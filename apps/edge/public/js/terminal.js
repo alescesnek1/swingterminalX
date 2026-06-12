@@ -6019,15 +6019,22 @@ function _renderTradingRadar(radar, esc) {
   const rowHtml = candidates.length ? candidates.map((c) => {
     const flags = Array.isArray(c.riskFlags) && c.riskFlags.length ? c.riskFlags.slice(0, 2).join(', ') : 'none';
     const reason = Array.isArray(c.reasons) && c.reasons.length ? c.reasons[0] : '--';
+    const nextReq = c.nextRequiredConfirmation || '--';
+    const missingSigs = Array.isArray(c.missingSignals) && c.missingSignals.length ? c.missingSignals.slice(0,2).join(', ') : 'none';
     return '<tr>'
       + '<td><b>' + esc(c.symbol || '--') + '</b></td>'
       + '<td>' + esc(c.stage || '--') + '</td>'
       + '<td><span class="radar-score ' + _fleetRadarScoreClass(c.setupQualityScore) + '">' + esc(c.setupQualityScore != null ? c.setupQualityScore : '--') + '</span></td>'
       + '<td>' + esc(c.confidence != null ? c.confidence : '--') + '</td>'
-      + '<td>' + esc(reason) + '</td>'
-      + '<td>' + esc(flags) + '</td>'
+      + '<td>' + esc(reason) + '<br/><small>Next: ' + esc(nextReq) + '</small></td>'
+      + '<td>' + esc(flags) + '<br/><small>Missing: ' + esc(missingSigs) + '</small></td>'
       + '</tr>';
-  }).join('') : '<tr><td colspan="6" class="fleet-empty">No RADAR setup has passed the advisory filters.</td></tr>';
+  }).join('') : (diag.rejectedSamples && diag.rejectedSamples.length ? 
+    '<tr><td colspan="6" class="fleet-empty" style="text-align:left;">No candidates. Top rejections:<br/>' + 
+    diag.rejectedSamples.slice(0,10).map(s => '• ' + esc(s.symbol) + ': ' + esc(s.reason)).join('<br/>') + '<br/><br/>Summary:<br/>' +
+    Object.entries(diag.rejected || {}).slice(0,10).map(([k,v]) => esc(k) + ': ' + v).join(', ') +
+    '</td></tr>' :
+    '<tr><td colspan="6" class="fleet-empty">No RADAR setup has passed the advisory filters.</td></tr>');
 
   const detailReasons = selected && Array.isArray(selected.reasons) ? selected.reasons : [];
   const detailFlags = selected && Array.isArray(selected.riskFlags) ? selected.riskFlags : [];

@@ -163,8 +163,10 @@ export function buildRadarUniverse(markets = [], opts = {}) {
       continue;
     }
 
+    const hasScanner = raw.scannerScore != null || raw.scannerPanic != null || raw.scannerHot != null;
+
     const quoteVolume = n(raw.quoteVolume24h ?? raw.volume24hUsd ?? raw.quoteVolume);
-    if (!(quoteVolume >= filters.minQuoteVolume24h)) {
+    if (!(quoteVolume >= filters.minQuoteVolume24h) && !hasScanner) {
       rejectCount(diag, 'low 24h volume', symbol);
       continue;
     }
@@ -172,7 +174,7 @@ export function buildRadarUniverse(markets = [], opts = {}) {
 
     const spreadPct = n(raw.spreadPct);
     if (spreadPct == null) missing.add('spreadPct');
-    if (spreadPct != null && spreadPct > filters.maxSpreadPct) {
+    if (spreadPct != null && spreadPct > filters.maxSpreadPct && !hasScanner) {
       rejectCount(diag, 'wide spread', symbol);
       continue;
     }
@@ -181,7 +183,7 @@ export function buildRadarUniverse(markets = [], opts = {}) {
     const depthUsd = n(raw.depthUsdWithin1Pct ?? raw.depthUsdWithin0_5Pct ?? raw.orderBookDepthUsd);
     if (depthUsd == null) {
       missing.add('orderBookDepthWithin1Pct');
-    } else if (depthUsd < filters.minDepthUsd) {
+    } else if (depthUsd < filters.minDepthUsd && !hasScanner) {
       rejectCount(diag, 'thin order book depth', symbol);
       continue;
     } else {
@@ -271,8 +273,9 @@ function signalBooleans(m, regime) {
     || buyDominance >= 0.55;
 
   const dropVsVol = atrPct != null ? Math.abs(c24) / Math.max(atrPct, 0.1) : null;
-  const isScannerFlush = Array.isArray(m.scannerTags) && m.scannerTags.includes('FLUSH');
-  const isScannerBuy = Array.isArray(m.scannerTags) && m.scannerTags.includes('BUY');
+  const isScannerFlush = Array.isArray(m.scannerTags) && (m.scannerTags.includes('FLUSH') || m.scannerTags.includes('CAPITULATION'));
+  const isScannerBuy = Array.isArray(m.scannerTags) && (m.scannerTags.includes('BUY') || m.scannerTags.includes('STRONG BUY') || m.scannerTags.includes('RECLAIM'));
+
   const watchDrop = c24 <= -4 || c12 <= -3.5 || c4 <= -2.5 || btcRel <= -3 || dropVsVol >= 1.8 || isScannerFlush || (m.scannerPanic > 50);
   const panicFlush = (longLiq != null && longLiq >= 1.5) || (sellRatio != null && sellRatio >= 0.62) || (volumeSpike >= 1.8 && c24 <= -6) || isScannerFlush;
   const oiFlush = oiChange != null && oiChange <= -4;
@@ -307,22 +310,31 @@ export function classifyRadarStage(market, regime = evaluateMarketRegime([])) {
   const riskFlags = [];
   let stage = RADAR_STAGES.NO_SETUP;
 
-  const isScannerWatch = (market.scannerScore >= 70 || market.scannerPanic > 50 || s.isScannerFlush);
+  const isScannerWatch = (market.scannerScore >= 7 || (market.scannerHot && market.scannerHot >= 70) || market.scannerPanic > 50 || s.isScannerFlush || s.isScannerBuy || s.c12 <= -4 || s.c24 <= -6);
 
   if ((s.watchDrop && s.volumeSpike >= 1.2) || isScannerWatch) {
     stage = RADAR_STAGES.WATCH;
     if (isScannerWatch) reasons.push(`scanner context promoted to watch (score ${market.scannerScore || 0}, panic ${market.scannerPanic || 0})`);
     else reasons.push(`relative flush watched (${round(s.c24, 2)}% 24h, volume x${round(s.volumeSpike, 1)})`);
   }
-  if (stage === RADAR_STAGES.WATCH && s.panicFlush && s.fundingOk && s.wickOk && (s.oiFlush || s.bidsOk || s.c24 <= -8 || s.isScannerBuy)) {
+
+  const isScannerLongFlush = s.isScannerFlush || ((s.c12 <= -4 || s.c24 <= -6) && (market.scannerPanic > 50 || market.scannerHot > 70 || s.volumeSpike >= 1.2));
+
+  if (stage === RADAR_STAGES.WATCH && ( (s.panicFlush && s.fundingOk && s.wickOk && (s.oiFlush || s.bidsOk || s.c24 <= -8 || s.isScannerBuy)) || isScannerLongFlush )) {
     stage = RADAR_STAGES.LONG_FLUSH_CONFIRMED;
-    reasons.push(s.isScannerBuy ? 'scanner BUY tag confirmed flush' : 'panic selling/long flush confirmed');
+    reasons.push(isScannerLongFlush ? 'scanner FLUSH tag or heavy drawdown confirmed' : 'panic selling/long flush confirmed');
   }
-  if (stage === RADAR_STAGES.LONG_FLUSH_CONFIRMED && s.noNewLows && s.rangeFormed && (s.sellFade || s.bidsOk || s.lateShorts)) {
+
+  const isScannerStabilizing = ((s.c1 > 0 || s.c4 > 0) && (s.c12 < -2 || s.c24 < -2)) || s.isScannerBuy;
+
+  if (stage === RADAR_STAGES.LONG_FLUSH_CONFIRMED && ( (s.noNewLows && s.rangeFormed && (s.sellFade || s.bidsOk || s.lateShorts)) || isScannerStabilizing )) {
     stage = RADAR_STAGES.STABILIZING;
-    reasons.push('new lows paused and local range formed');
+    reasons.push(isScannerStabilizing ? 'scanner BUY/RECLAIM or short-term improvement after dump' : 'new lows paused and local range formed');
   }
-  if (stage === RADAR_STAGES.STABILIZING && s.squeeze) {
+
+  const isScannerSqueeze = s.isScannerBuy || ((s.c1 > 1.5 || s.c4 > 2) && (s.c12 < -3 || s.c24 < -4));
+
+  if (stage === RADAR_STAGES.STABILIZING && (s.squeeze || isScannerSqueeze)) {
     stage = RADAR_STAGES.SQUEEZE_CONFIRMED;
     reasons.push('reclaim/squeeze confirmation present');
   }
@@ -647,7 +659,13 @@ export function evaluateTradingRadar({
   try {
     const scannerMap = new Map();
     for (const c of scannerCandidates || []) {
-      if (c && c.symbol) scannerMap.set(c.symbol.toUpperCase(), c);
+      if (c && c.symbol) {
+        let sym = c.symbol.toUpperCase();
+        if (!sym.endsWith('USDT') && !sym.endsWith('USDC')) {
+            sym = sym + 'USDT';
+        }
+        scannerMap.set(sym, c);
+      }
     }
     
     const seenSymbols = new Set();
@@ -673,7 +691,10 @@ export function evaluateTradingRadar({
 
     for (const sc of scannerCandidates || []) {
        if (sc && sc.symbol) {
-         const sym = sc.symbol.toUpperCase();
+         let sym = sc.symbol.toUpperCase();
+         if (!sym.endsWith('USDT') && !sym.endsWith('USDC')) {
+            sym = sym + 'USDT';
+         }
          if (!seenSymbols.has(sym)) {
             mergedMarkets.push({
                symbol: sym,
