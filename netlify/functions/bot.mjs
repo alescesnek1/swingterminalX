@@ -3992,7 +3992,7 @@ async function handleWorkerPair(req) {
 }
 
 const FLEET_WORKER_BASES = new Set(['worker-heartbeat', 'worker-session', 'execution-result', 'position-result', 'worker-command-ack', 'live-preflight-result', 'auto-market-snapshot', 'auto-decision', 'auto-intent-request']);
-const FLEET_BROWSER_BASES = new Set(['fleet', 'config', 'start-session', 'start-live-session', 'live-emergency-stop', 'global-kill-switch', 'auto-trader', 'session', 'clear-stale-sessions', 'create-execution-intent', 'create-smoke-execution-intent', 'create-live-execution-intent', 'create-worker-pairing-code']);
+const FLEET_BROWSER_BASES = new Set(['fleet', 'config', 'start-session', 'start-live-session', 'live-emergency-stop', 'global-kill-switch', 'auto-trader', 'session', 'clear-stale-sessions', 'create-execution-intent', 'create-smoke-execution-intent', 'create-live-execution-intent', 'create-worker-pairing-code', 'radar-context']);
 
 function isWorkerRoute(route) {
   return route === 'execution-intent';
