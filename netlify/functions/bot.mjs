@@ -1985,6 +1985,7 @@ function refreshTradingRadarFromFleet(fleet, nowMs = Date.now()) {
   const radar = evaluateTradingRadar({
     markets,
     scannerCandidates: radarContext,
+    scannerContext: fleet && fleet.radarContext ? fleet.radarContext : {},
     source: snapshot && snapshot.source ? snapshot.source : 'no_public_snapshot',
     fetchedAt: snapshot && snapshot.fetchedAt,
     receivedAt: snapshot && snapshot.receivedAt,
@@ -2851,26 +2852,41 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
     
     // Strict sanitization of incoming payload
     const rawCandidates = Array.isArray(body.scannerCandidates) ? body.scannerCandidates : [];
-    if (rawCandidates.length > 250) {
-      console.warn(`[radar-context] Rejected payload: ${rawCandidates.length} rows > 250 limit.`);
-      return json(req, { ok: false, error: 'Payload too large (max 250 rows)' }, 400);
+    if (rawCandidates.length > 500) {
+      console.warn(`[radar-context] Rejected payload: ${rawCandidates.length} rows > 500 limit.`);
+      return json(req, { ok: false, error: 'Payload too large (max 500 rows)' }, 400);
     }
     
+    const rejectedByReason = {};
+    const topRejectedSamples = [];
+    const rejectCandidate = (reason, symbol = '') => {
+      rejectedByReason[reason] = (rejectedByReason[reason] || 0) + 1;
+      if (topRejectedSamples.length < 30) topRejectedSamples.push({ symbol: String(symbol || '').slice(0, 24), reason });
+      return null;
+    };
+    const finiteOrNull = (v) => Number.isFinite(Number(v)) ? Number(v) : null;
     const sanitized = rawCandidates.map(c => {
-      if (!c || typeof c !== 'object') return null;
+      if (!c || typeof c !== 'object' || Array.isArray(c)) return rejectCandidate('invalid row');
+      const rawSymbol = String(c.pair || c.symbol || c.base || '').trim().toUpperCase();
+      if (!rawSymbol) return rejectCandidate('missing symbol');
+      const compactSymbol = rawSymbol.replace(/[^A-Z0-9]/g, '').slice(0, 24);
+      if (!compactSymbol) return rejectCandidate('missing symbol');
       return {
-        symbol: String(c.symbol || '').toUpperCase().slice(0, 24),
-        score: Number.isFinite(Number(c.score)) ? Number(c.score) : 0,
+        symbol: compactSymbol,
+        base: c.base ? String(c.base).toUpperCase().slice(0, 24) : null,
+        pair: c.pair ? String(c.pair).toUpperCase().slice(0, 24) : null,
+        quote: c.quote ? String(c.quote).toUpperCase().slice(0, 8) : null,
+        score: finiteOrNull(c.score),
         signal: c.signal ? String(c.signal).slice(0, 40) : null,
-        panic: Number.isFinite(Number(c.panic)) ? Number(c.panic) : 0,
-        c1: Number.isFinite(Number(c.c1)) ? Number(c.c1) : null,
-        c4: Number.isFinite(Number(c.c4)) ? Number(c.c4) : null,
-        c12: Number.isFinite(Number(c.c12)) ? Number(c.c12) : null,
-        c24: Number.isFinite(Number(c.c24)) ? Number(c.c24) : null,
-        c7d: Number.isFinite(Number(c.c7d)) ? Number(c.c7d) : null,
-        price: Number.isFinite(Number(c.price)) ? Number(c.price) : 0,
-        volume: Number.isFinite(Number(c.volume)) ? Number(c.volume) : 0,
-        hot: Number.isFinite(Number(c.hot)) ? Number(c.hot) : null,
+        panic: finiteOrNull(c.panic),
+        c1: finiteOrNull(c.c1),
+        c4: finiteOrNull(c.c4),
+        c12: finiteOrNull(c.c12),
+        c24: finiteOrNull(c.c24),
+        c7d: finiteOrNull(c.c7d),
+        price: finiteOrNull(c.price),
+        volume: finiteOrNull(c.volume),
+        hot: finiteOrNull(c.hot),
         tags: Array.isArray(c.tags) ? c.tags.slice(0, 10).map(t => String(t).slice(0, 20)) : []
       };
     }).filter(Boolean);
@@ -2880,10 +2896,18 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
     return await mutateFleet(async (fleet) => {
       fleet.radarContext = {
         scannerCandidates: sanitized,
+        fieldMappingDetected: Array.isArray(body.fieldMappingDetected) ? body.fieldMappingDetected.slice(0, 80).map((x) => String(x).slice(0, 80)) : [],
+        scannerRowsAvailable: Number(body.scannerRowsAvailable) || 0,
+        scannerRowsSent: Number(body.scannerRowsSent) || rawCandidates.length,
+        scannerRowsReceived: rawCandidates.length,
+        scannerRowsSanitized: sanitized.length,
+        scannerRowsRejected: rawCandidates.length - sanitized.length,
+        rejectedByReason,
+        topRejectedSamples,
         receivedAt: new Date().toISOString()
       };
       refreshTradingRadarFromFleet(fleet);
-      return json(req, { ok: true, received: rawCandidates.length, stored: sanitized.length, rejected: rawCandidates.length - sanitized.length });
+      return json(req, { ok: true, received: rawCandidates.length, stored: sanitized.length, rejected: rawCandidates.length - sanitized.length, rejectedByReason });
     });
   }
   // POST /api/bot/create-worker-pairing-code

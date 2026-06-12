@@ -153,7 +153,7 @@ test('RADAR confidence varies across candidates and missing data lowers confiden
 test('RADAR sorts by distanceToEntryReadyScore correctly', () => {
   const state = evaluateTradingRadar({
     markets: [
-      { ...BTC, diagnostics: { change1hPct: 2, change12hPct: -5 }, scannerTags: ['FLUSH', 'BUY'], depthUsd: 1e6 }, // SQUEEZE (NEAR_ENTRY)
+      { ...BTC, diagnostics: { change1hPct: 2, change12hPct: -5 }, scannerScore: 8, scannerSignal: 'RECLAIM', scannerTags: ['FLUSH', 'BUY', 'RECLAIM'], depthUsd: 1e6 }, // SQUEEZE (NEAR_ENTRY)
       { ...ETH, diagnostics: { change12hPct: -6 }, scannerPanic: 60, depthUsd: 1e6 }, // WATCH
       FLUSH // ENTRY_READY
     ],
@@ -161,8 +161,6 @@ test('RADAR sorts by distanceToEntryReadyScore correctly', () => {
     fetchedAt: new Date(NOW).toISOString(),
     now: NOW,
   });
-  
-  console.log('CANDIDATES:', state.candidates.map(c => [c.symbol, c.actionability, c.stage, c.confidence, c.reasons]));
   
   const btcCand = state.candidates.find(c => c.symbol === 'BTCUSDT');
   const ethCand = state.candidates.find(c => c.symbol === 'ETHUSDT');
@@ -177,6 +175,63 @@ test('RADAR sorts by distanceToEntryReadyScore correctly', () => {
   assert.equal(state.candidates[0].symbol, 'SOLUSDT');
   assert.equal(state.candidates[1].symbol, 'BTCUSDT');
   assert.equal(state.candidates[2].symbol, 'ETHUSDT');
+});
+
+test('RADAR ingests and evaluates 500 sanitized scanner rows with diagnostics', () => {
+  const scannerCandidates = Array.from({ length: 500 }, (_, i) => ({
+    symbol: `SCAN${i}USDT`,
+    score: i % 10,
+    signal: i % 3 === 0 ? 'FLUSH+BUY' : 'WATCH',
+    panic: i % 100,
+    c1: i % 5 === 0 ? 1.2 : -0.2,
+    c4: i % 7 === 0 ? 2.4 : -0.5,
+    c12: -2 - (i % 8),
+    c24: -3 - (i % 12),
+    price: 1 + i / 100,
+    volume: 100_000 + i * 1000,
+    hot: i % 90,
+    tags: i % 3 === 0 ? ['FLUSH', 'BUY'] : ['WATCH'],
+  }));
+  const state = evaluateTradingRadar({
+    markets: [BTC, ETH],
+    scannerCandidates,
+    scannerContext: {
+      scannerRowsAvailable: 500,
+      scannerRowsSent: 500,
+      scannerRowsReceived: 500,
+      scannerRowsSanitized: 500,
+      scannerRowsRejected: 0,
+      fieldMappingDetected: ['symbol:pair', 'score:_sig_score', 'h24:_c24'],
+    },
+    source: 'scanner_context_test',
+    now: NOW,
+  });
+
+  const scannerSymbols = state.candidates.filter((c) => /^SCAN\d+USDT$/.test(c.symbol));
+  assert.equal(scannerSymbols.length, 500);
+  assert.equal(state.universeDiagnostics.scannerRowsAvailable, 500);
+  assert.equal(state.universeDiagnostics.scannerRowsSent, 500);
+  assert.equal(state.universeDiagnostics.scannerRowsSanitized, 500);
+  assert.equal(state.universeDiagnostics.radarRowsEvaluated, state.candidates.length);
+  assert.deepEqual(state.universeDiagnostics.fieldMappingDetected, ['symbol:pair', 'score:_sig_score', 'h24:_c24']);
+});
+
+test('RADAR score and distance vary across different realistic scanner rows', () => {
+  const state = evaluateTradingRadar({
+    markets: [BTC, ETH],
+    scannerCandidates: [
+      { symbol: 'VARAUSDT', score: 9, signal: 'RECLAIM', panic: 84, c1: 2.6, c4: 3.2, c12: -8, c24: -11, price: 2, volume: 80_000_000, hot: 88, tags: ['RECLAIM', 'BUY'] },
+      { symbol: 'VARBUSDT', score: 6, signal: 'FLUSH+BUY', panic: 55, c1: 0.4, c4: -0.8, c12: -5, c24: -7, price: 3, volume: 20_000_000, hot: 50, tags: ['FLUSH'] },
+      { symbol: 'VARCUSDT', score: 2, signal: 'WATCH', panic: 15, c1: -0.2, c4: -0.4, c12: -1, c24: -2, price: 4, volume: 1_000_000, hot: 10, tags: ['WATCH'] },
+    ],
+    source: 'scanner_context_test',
+    now: NOW,
+  });
+  const picked = state.candidates.filter((c) => /^VAR[A-C]USDT$/.test(c.symbol));
+  assert.equal(picked.length, 3);
+  assert.ok(new Set(picked.map((c) => c.distanceToEntryReadyScore)).size > 1);
+  assert.ok(new Set(picked.map((c) => c.confidence)).size > 1);
+  assert.ok(new Set(picked.map((c) => c.blockedBy)).size > 1);
 });
 
 test('RADAR market-regime breakdown downgrades entry candidates', () => {

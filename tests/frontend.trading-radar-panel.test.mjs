@@ -38,3 +38,35 @@ test('Trading RADAR backend is read-only and exposed through fleet state only', 
   assert.doesNotMatch(botSrc, /tradingRadar[\s\S]{0,120}executionIntents\[/);
   assert.doesNotMatch(botSrc, /TRADING_RADAR[\s\S]{0,160}create-live-execution-intent/);
 });
+
+test('Trading RADAR frontend sends 500 scanner rows with detected field mapping', () => {
+  assert.match(terminalJs, /DATA\.slice\(0, 500\)/);
+  assert.match(terminalJs, /_radarDetectScannerFields/);
+  assert.match(terminalJs, /scannerRowsAvailable: DATA\.length/);
+  assert.match(terminalJs, /scannerRowsSent: payload\.length/);
+  assert.match(terminalJs, /symbol\/base\/pair/);
+  assert.match(terminalJs, /h24/);
+  assert.match(terminalJs, /volume/);
+});
+
+test('Trading RADAR UI defaults to top 20 and exposes working filter chips', () => {
+  assert.match(terminalJs, /window\._radarFilter \|\| 'TOP_20'/);
+  assert.match(terminalJs, /rowsToRender\.slice\(0, 20\)/);
+  assert.match(terminalJs, /filterButton\('NEEDS_ABSORPTION'/);
+  assert.match(terminalJs, /filterButton\('NEEDS_RECLAIM'/);
+  assert.match(terminalJs, /filterButton\('REJECTED'/);
+  assert.match(terminalJs, /activeFilter === 'REJECTED'/);
+  assert.match(terminalCss, /\.radar-filter-chip/);
+  assert.match(terminalCss, /\.radar-limit-select/);
+});
+
+test('Trading RADAR diagnostics and matrix expose coverage counts and readable states', () => {
+  assert.match(terminalJs, /Scanner Rows Available/);
+  assert.match(terminalJs, /Scanner Rows Sent/);
+  assert.match(terminalJs, /Scanner Rows Sanitized/);
+  assert.match(terminalJs, /Radar Rows Evaluated/);
+  assert.match(terminalJs, /Detected scanner fields/);
+  assert.match(terminalJs, /radar-telegram-ready/);
+  assert.match(terminalJs, /radar-telegram-no/);
+  assert.match(terminalJs, /Current market blocker/);
+});

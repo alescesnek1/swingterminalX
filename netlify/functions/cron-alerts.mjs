@@ -51,14 +51,26 @@ export function shouldSendRadarTelegramAlert(candidate, state = {}, nowMs = Date
   return !Number.isFinite(lastSentAt) || lastSentAt <= 0 || nowMs - lastSentAt >= normalized.cooldownMs;
 }
 
+export function isRadarTelegramQualifiedCandidate(candidate) {
+  return !!(candidate
+    && String(candidate.stage || '') === 'ENTRY_READY'
+    && String(candidate.actionability || '') === 'ENTRY_READY'
+    && candidate.telegramEligible === true
+    && Number.isFinite(Number(candidate.confidence))
+    && Number(candidate.confidence) >= 75
+    && candidate.entryZone
+    && typeof candidate.entryZone === 'object'
+    && candidate.entryZone.low != null
+    && candidate.entryZone.high != null
+    && (candidate.invalidationLevel != null || candidate.suggestedStop != null));
+}
+
 export function selectRadarEntryAlerts(radar = {}, state = {}, nowMs = Date.now()) {
-  // Use radar.entryReady directly for iteration, assuming trading-radar places true candidates there
-  // Fall back to candidates array if entryReady isn't pre-populated
   const candidates = (Array.isArray(radar.entryReady) && radar.entryReady.length > 0) ? radar.entryReady : (Array.isArray(radar.candidates) ? radar.candidates : []);
   
   return candidates
-    .filter((c) => c && String(c.stage || '') === 'ENTRY_READY')
-    .slice(0, 5); // Take top 5 potentials, filter strictly later during send
+    .filter((c) => isRadarTelegramQualifiedCandidate(c) && shouldSendRadarTelegramAlert(c, state, nowMs))
+    .slice(0, 5);
 }
 
 export function buildRadarTelegramMessage(candidate) {
@@ -119,23 +131,19 @@ export async function sendRadarEntryReadyTelegram(candidate, state, token, chatI
     return { ok: false, reason: 'stage_not_entry_ready', code: 'TELEGRAM_RADAR_SKIPPED_NOT_ENTRY_READY' };
   }
   
-  if (String(candidate.actionability || '') !== 'ENTRY_READY') {
+  if (!isRadarTelegramQualifiedCandidate(candidate)) {
+    if (String(candidate.actionability || '') !== 'ENTRY_READY') {
     return { ok: false, reason: 'actionability_not_entry_ready', code: 'TELEGRAM_RADAR_SKIPPED_NOT_ENTRY_READY' };
-  }
-
-  if (candidate.telegramEligible !== true) {
+    }
+    if (candidate.telegramEligible !== true) {
      return { ok: false, reason: 'not_telegram_eligible', code: 'TELEGRAM_RADAR_SKIPPED_NOT_ENTRY_READY' };
-  }
-  
-  if (Number(candidate.confidence) < 75 || !Number.isFinite(Number(candidate.confidence))) {
-    return { ok: false, reason: 'confidence_below_75', code: 'TELEGRAM_RADAR_SKIPPED_NOT_ENTRY_READY' };
-  }
-  
-  if (!candidate.entryZone || typeof candidate.entryZone !== 'object' || candidate.entryZone.low == null || candidate.entryZone.high == null) {
-    return { ok: false, reason: 'missing_entry_zone', code: 'TELEGRAM_RADAR_SKIPPED_NOT_ENTRY_READY' };
-  }
-  
-  if (candidate.invalidationLevel == null && candidate.suggestedStop == null) {
+    }
+    if (Number(candidate.confidence) < 75 || !Number.isFinite(Number(candidate.confidence))) {
+      return { ok: false, reason: 'confidence_below_75', code: 'TELEGRAM_RADAR_SKIPPED_NOT_ENTRY_READY' };
+    }
+    if (!candidate.entryZone || typeof candidate.entryZone !== 'object' || candidate.entryZone.low == null || candidate.entryZone.high == null) {
+      return { ok: false, reason: 'missing_entry_zone', code: 'TELEGRAM_RADAR_SKIPPED_NOT_ENTRY_READY' };
+    }
     return { ok: false, reason: 'missing_stop_invalidation', code: 'TELEGRAM_RADAR_SKIPPED_NOT_ENTRY_READY' };
   }
   

@@ -96,6 +96,16 @@ export function defaultTradingRadarState(nowIso = null) {
       depthOk: 0,
       rejected: {},
       rejectedSamples: [],
+      scannerRowsAvailable: 0,
+      scannerRowsSent: 0,
+      scannerRowsReceived: 0,
+      scannerRowsSanitized: 0,
+      scannerRowsRejected: 0,
+      radarRowsEvaluated: 0,
+      radarRowsDisplayed: 0,
+      rejectedByReason: {},
+      topRejectedSamples: [],
+      fieldMappingDetected: [],
     },
     marketRegime: {
       status: 'UNKNOWN',
@@ -126,6 +136,10 @@ export function defaultTradingRadarState(nowIso = null) {
       lastSentAt: null,
       lastError: null,
       sentCount: 0,
+      legacyBlockedCount: 0,
+      lastLegacyBlockedAt: null,
+      lastRadarSkippedReason: null,
+      lastRadarSentAt: null,
     },
     missingSignals: [],
     dataCompleteness: 0,
@@ -163,7 +177,7 @@ export function buildRadarUniverse(markets = [], opts = {}) {
       continue;
     }
 
-    const hasScanner = raw.scannerScore != null || raw.scannerPanic != null || raw.scannerHot != null;
+    const hasScanner = raw.isScannerContext === true || raw.scannerScore != null || raw.scannerPanic != null || raw.scannerHot != null;
 
     const quoteVolume = n(raw.quoteVolume24h ?? raw.volume24hUsd ?? raw.quoteVolume);
     if (!(quoteVolume >= filters.minQuoteVolume24h) && !hasScanner) {
@@ -276,6 +290,8 @@ function signalBooleans(m, regime) {
   const dropVsVol = atrPct != null ? Math.abs(c24) / Math.max(atrPct, 0.1) : null;
   const isScannerFlush = Array.isArray(m.scannerTags) && (m.scannerTags.includes('FLUSH') || m.scannerTags.includes('CAPITULATION'));
   const isScannerBuy = Array.isArray(m.scannerTags) && (m.scannerTags.includes('BUY') || m.scannerTags.includes('STRONG BUY') || m.scannerTags.includes('RECLAIM'));
+  const scannerSignal = String(m.scannerSignal || '').toUpperCase();
+  const isScannerReclaim = scannerSignal.includes('RECLAIM') || (Array.isArray(m.scannerTags) && m.scannerTags.includes('RECLAIM'));
 
   const watchDrop = c24 <= -4 || c12 <= -3.5 || c4 <= -2.5 || btcRel <= -3 || dropVsVol >= 1.8 || isScannerFlush || (m.scannerPanic > 50);
   const panicFlush = (longLiq != null && longLiq >= 1.5) || (sellRatio != null && sellRatio >= 0.62) || (volumeSpike >= 1.8 && c24 <= -6) || isScannerFlush;
@@ -299,9 +315,9 @@ function signalBooleans(m, regime) {
     c24, c12, c4, c1, btcRel, atrPct, volumeSpike, oiChange, funding,
     watchDrop, panicFlush, oiFlush, fundingOk, wickOk, bidsOk, sellFade,
     noNewLows, rangeFormed, lateShorts, squeeze, reclaim, higherLow,
-    retestEntry, absorptionEntry, absorptionScore, buyDominance, shortLiq,
+    retestEntry, absorptionEntry, absorptionScore, buyDominance, shortLiq, longLiq,
     tightSpread, supportRetest, deltaImproves, absorptionConfirmed,
-    isScannerFlush, isScannerBuy
+    isScannerFlush, isScannerBuy, isScannerReclaim
   };
 }
 
@@ -352,8 +368,9 @@ export function classifyRadarStage(market, regime = evaluateMarketRegime([])) {
   if (s.tightSpread && s.isScannerBuy) absorptionProxies++; // bid absorption proxy
   if (s.c4 > 0 && market.scannerScore >= 5) absorptionProxies++; // delta improves proxy
 
-  const realAbsorptionData = market.absorptionScore != null || market.bidDepthRebuildPct != null;
-  const isAbsorption = s.absorptionConfirmed || (absorptionProxies >= 2 && realAbsorptionData) || absorptionProxies >= 3;
+  const realAbsorptionData = market.absorptionScore != null || market.bidDepthRebuildPct != null || market.bidAbsorption != null || market.aggressiveSellsFailed != null;
+  const strongAbsorptionProxy = absorptionProxies >= 3 && market.scannerScore >= 8 && s.c1 > 0.5 && s.c4 > 0;
+  const isAbsorption = s.absorptionConfirmed || (absorptionProxies >= 2 && realAbsorptionData) || strongAbsorptionProxy;
   
   if (stage === RADAR_STAGES.STABILIZING) {
     if (realAbsorptionData) {
@@ -365,14 +382,14 @@ export function classifyRadarStage(market, regime = evaluateMarketRegime([])) {
         cl.absorption.reason = 'awaiting absorption confirmation';
       }
     } else {
-      cl.absorption.status = isAbsorption ? 'PASS' : 'MISSING DATA';
-      cl.absorption.reason = isAbsorption ? 'absorption proxies passed' : 'lacking order book / delta data';
+      cl.absorption.status = strongAbsorptionProxy ? 'PASS' : 'MISSING DATA';
+      cl.absorption.reason = strongAbsorptionProxy ? 'strong scanner recovery proxies, no order book data' : 'lacking order book / delta data';
     }
   }
 
   const hasRecovery = (s.c1 > 1.5 || s.c4 > 2);
   const hasDrawdown = (s.c12 < -3 || s.c24 < -4);
-  const isSqueeze = (s.squeeze || (s.isScannerBuy && hasRecovery && hasDrawdown)) && !regime.blocksMeanReversion;
+  const isSqueeze = (s.squeeze || (s.isScannerReclaim && hasRecovery && hasDrawdown && market.scannerScore >= 7)) && !regime.blocksMeanReversion;
 
   if (stage === RADAR_STAGES.STABILIZING && (isSqueeze || cl.absorption.status === 'PASS')) {
     stage = RADAR_STAGES.SQUEEZE_CONFIRMED;
@@ -386,17 +403,35 @@ export function classifyRadarStage(market, regime = evaluateMarketRegime([])) {
     reasons.push('setup structural confirmation');
   }
 
+  const passCount = Object.values(cl).filter((x) => x && x.status === 'PASS').length;
+  const missingCriticalCount = Object.values(cl).filter((x) => x && x.status === 'MISSING DATA').length + missingForMarket(market).length;
+  const scannerSignalStrength = clamp(
+    (market.scannerScore != null ? Number(market.scannerScore) * 5 : 0)
+      + (market.scannerPanic != null ? Number(market.scannerPanic) * 0.25 : 0)
+      + (market.scannerHot != null ? Number(market.scannerHot) * 0.12 : 0),
+    0,
+    100
+  );
+  const dumpMagnitude = clamp(Math.max(Math.abs(s.c24 || 0), Math.abs(s.c12 || 0) * 1.25, Math.abs(s.c4 || 0) * 2), 0, 40);
+  const recoverySpeed = clamp((s.c1 > 0 ? s.c1 * 4 : 0) + (s.c4 > 0 ? s.c4 * 1.8 : 0), 0, 20);
+  const spreadQuality = market.spreadPct == null ? 1.5 : clamp(6 - Number(market.spreadPct) * 30, -8, 6);
+  const liquidityQuality = market.quoteVolume ? clamp(Math.log10(Math.max(1, market.quoteVolume)) - 6, -4, 5) : -3;
+  const precisionMod = round(spreadQuality + liquidityQuality + (scannerSignalStrength - 35) * 0.06 + dumpMagnitude * 0.08 + recoverySpeed * 0.12 - missingCriticalCount * 1.5, 2);
+
   // Confidence Calculation
   let confidence = clamp(35 + (stage === RADAR_STAGES.NO_SETUP ? 0 : 10)
     + (market.depthUsd != null ? 8 : 0)
     + (s.oiChange != null ? 6 : 0)
     + (s.funding != null ? 6 : 0)
-    + (s.shortLiq != null || s.longLiquidationSpike != null ? 6 : 0)
+    + (s.shortLiq != null || s.longLiq != null ? 6 : 0)
     + (s.tightSpread ? 5 : 0)
     + (market.scannerScore != null ? clamp((market.scannerScore - 5) * 3, 0, 15) : 0)
     + (s.isScannerBuy ? 8 : (s.isScannerFlush ? 5 : 0))
+    + passCount * 1.7
     - (regime.blocksMeanReversion ? 15 : 0)
-    - (!realAbsorptionData ? 10 : 0));
+    - (!realAbsorptionData ? 10 : 0)
+    - missingCriticalCount * 0.9
+    + precisionMod);
 
   let entryType = RADAR_ENTRY_TYPES.NONE;
   if (stage === RADAR_STAGES.SQUEEZE_CONFIRMED) {
@@ -441,8 +476,14 @@ export function classifyRadarStage(market, regime = evaluateMarketRegime([])) {
     + Math.min(8, Math.max(0, (s.volumeSpike - 1.2) * 4))
     + (s.bidsOk ? 5 : 0)
     + (s.buyDominance >= 0.58 ? 5 : 0)
+    + passCount * 1.8
+    + scannerSignalStrength * 0.08
+    + dumpMagnitude * 0.12
+    + recoverySpeed * 0.15
     - (regime.blocksMeanReversion ? 25 : 0)
-    - (riskFlags.length * 3));
+    - (riskFlags.length * 3)
+    - missingCriticalCount * 1.1
+    + precisionMod * 1.5);
 
   let actionability = 'WATCH_ONLY';
   if (stage === RADAR_STAGES.LONG_FLUSH_CONFIRMED) actionability = 'NEEDS_STABILIZATION';
@@ -462,12 +503,20 @@ export function classifyRadarStage(market, regime = evaluateMarketRegime([])) {
   // Distance to entry ready score (0-100)
   let distanceToEntryReadyScore = clamp(
     baseScore + 
+    passCount * 3.2 +
+    scannerSignalStrength * 0.10 +
+    dumpMagnitude * 0.18 +
+    recoverySpeed * 0.35 +
     (actionability === 'NEAR_ENTRY' ? 15 : 0) +
     (cl.absorption.status === 'PASS' ? 5 : 0) +
     (s.c1 > 0 ? 3 : 0) -
-    (regime.blocksMeanReversion ? 40 : 0)
+    (regime.blocksMeanReversion ? 40 : 0) +
+    (market.spreadPct != null && market.spreadPct > 0.15 ? -8 : 0) -
+    missingCriticalCount * 1.4 +
+    (precisionMod * 0.8)
   );
   if (actionability === 'ENTRY_READY') distanceToEntryReadyScore = 100;
+  else distanceToEntryReadyScore = Math.min(distanceToEntryReadyScore, 97);
 
   let blockedBy = null;
   if (actionability !== 'ENTRY_READY') {
@@ -716,7 +765,7 @@ function missingForMarket(m) {
 
 function buildPipeline(candidates, universeSize) {
   const pipeline = {
-    NO_SETUP: Math.max(0, Number(universeSize) || 0),
+    NO_SETUP: 0,
     WATCH: 0,
     LONG_FLUSH_CONFIRMED: 0,
     STABILIZING: 0,
@@ -726,9 +775,19 @@ function buildPipeline(candidates, universeSize) {
   for (const c of candidates || []) {
     if (!c || !pipeline.hasOwnProperty(c.stage)) continue;
     pipeline[c.stage] += 1;
-    pipeline.NO_SETUP = Math.max(0, pipeline.NO_SETUP - 1);
   }
+  if (!candidates.length && universeSize) pipeline.NO_SETUP = Math.max(0, Number(universeSize) || 0);
   return pipeline;
+}
+
+function normalizeScannerSymbol(c) {
+  const raw = String(c && (c.pair || c.symbol || c.base) || '').trim().toUpperCase();
+  if (!raw) return '';
+  const compact = raw.replace(/[^A-Z0-9]/g, '');
+  if (compact.endsWith('USDT') || compact.endsWith('USDC')) return compact;
+  const quote = String(c && c.quote || '').toUpperCase();
+  if (quote === 'USDT' || quote === 'USDC') return compact + quote;
+  return compact + 'USDT';
 }
 
 function radarStatus(state) {
@@ -749,6 +808,7 @@ export function evaluateTradingRadar({
   positions = [],
   selectedSymbol = null,
   filters = {},
+  scannerContext = {},
 } = {}) {
   const nowIso = new Date(now).toISOString();
   const state = defaultTradingRadarState(nowIso);
@@ -761,10 +821,8 @@ export function evaluateTradingRadar({
     const scannerMap = new Map();
     for (const c of scannerCandidates || []) {
       if (c && c.symbol) {
-        let sym = c.symbol.toUpperCase();
-        if (!sym.endsWith('USDT') && !sym.endsWith('USDC')) {
-            sym = sym + 'USDT';
-        }
+        let sym = normalizeScannerSymbol(c);
+        if (!sym) continue;
         scannerMap.set(sym, c);
       }
     }
@@ -781,7 +839,8 @@ export function evaluateTradingRadar({
         scannerPanic: sc.panic,
         scannerSignal: sc.signal,
         scannerHot: sc.hot,
-        scannerTags: sc.tags || [],
+        scannerTags: Array.from(new Set([...(sc.tags || []), sc.signal].filter(Boolean).map((x) => String(x).toUpperCase()))),
+        isScannerContext: true,
         change1hPct: m.change1hPct ?? sc.c1,
         change4hPct: m.change4hPct ?? sc.c4,
         change12hPct: m.change12hPct ?? sc.c12,
@@ -792,10 +851,8 @@ export function evaluateTradingRadar({
 
     for (const sc of scannerCandidates || []) {
        if (sc && sc.symbol) {
-         let sym = sc.symbol.toUpperCase();
-         if (!sym.endsWith('USDT') && !sym.endsWith('USDC')) {
-            sym = sym + 'USDT';
-         }
+         let sym = normalizeScannerSymbol(sc);
+         if (!sym) continue;
          if (!seenSymbols.has(sym)) {
             mergedMarkets.push({
                symbol: sym,
@@ -805,7 +862,8 @@ export function evaluateTradingRadar({
                scannerPanic: sc.panic,
                scannerSignal: sc.signal,
                scannerHot: sc.hot,
-               scannerTags: sc.tags || [],
+               scannerTags: Array.from(new Set([...(sc.tags || []), sc.signal].filter(Boolean).map((x) => String(x).toUpperCase()))),
+               isScannerContext: true,
                change1hPct: sc.c1,
                change4hPct: sc.c4,
                change12hPct: sc.c12,
@@ -852,8 +910,7 @@ export function evaluateTradingRadar({
           missingSignals: missingForMarket(m).slice(0, 8),
         },
       };
-    }).filter((c) => c.stage !== RADAR_STAGES.NO_SETUP)
-      .sort((a, b) => {
+    }).sort((a, b) => {
         const aAction = { ENTRY_READY: 7, NEAR_ENTRY: 6, NEEDS_ABSORPTION: 5, NEEDS_STABILIZATION: 4, NEEDS_CONFIRMATION: 4, NEEDS_FLUSH_CONFIRMATION: 3, WATCH_ONLY: 2, INVALIDATED: 1 }[a.actionability] || 0;
         const bAction = { ENTRY_READY: 7, NEAR_ENTRY: 6, NEEDS_ABSORPTION: 5, NEEDS_STABILIZATION: 4, NEEDS_CONFIRMATION: 4, NEEDS_FLUSH_CONFIRMATION: 3, WATCH_ONLY: 2, INVALIDATED: 1 }[b.actionability] || 0;
         if (aAction !== bAction) return bAction - aAction;
@@ -875,8 +932,25 @@ export function evaluateTradingRadar({
       ? universe.find((m) => m.symbol === positionSymbol) || markets.find((m) => String(m.symbol || '').toUpperCase() === positionSymbol) || {}
       : (selected ? universe.find((m) => m.symbol === selected.symbol) || {} : {});
 
+    const fullDiagnostics = {
+      ...diagnostics,
+      scannerRowsAvailable: Number(scannerContext.scannerRowsAvailable) || scannerCandidates.length,
+      scannerRowsSent: Number(scannerContext.scannerRowsSent) || scannerCandidates.length,
+      scannerRowsReceived: Number(scannerContext.scannerRowsReceived) || scannerCandidates.length,
+      scannerRowsSanitized: Number(scannerContext.scannerRowsSanitized) || scannerCandidates.length,
+      scannerRowsRejected: Number(scannerContext.scannerRowsRejected) || 0,
+      radarRowsEvaluated: candidates.length,
+      radarRowsDisplayed: 20,
+      fieldMappingDetected: Array.isArray(scannerContext.fieldMappingDetected) ? scannerContext.fieldMappingDetected : [],
+      rejectedByReason: { ...(scannerContext.rejectedByReason || {}), ...(diagnostics.rejected || {}) },
+      topRejectedSamples: [
+        ...((scannerContext.topRejectedSamples || scannerContext.rejectedSamples || []).slice(0, 10)),
+        ...(diagnostics.rejectedSamples || []).slice(0, 20),
+      ].slice(0, 30)
+    };
+
     state.marketRegime = regime;
-    state.universeDiagnostics = diagnostics;
+    state.universeDiagnostics = fullDiagnostics;
     state.scannerCandidatesIngested = scannerCandidates.length;
     state.snapshotSymbolsIngested = markets.length;
     state.candidatesByStage = state.pipeline;

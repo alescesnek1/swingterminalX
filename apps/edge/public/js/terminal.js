@@ -3341,24 +3341,68 @@ async function doRefresh() {
 window.__lastRadarContextPush = null;
 window.__lastRadarContextPostStatus = 'none';
 
+function _radarFiniteOrNull(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function _radarDetectScannerFields(rows) {
+  const sample = (Array.isArray(rows) ? rows : []).find((r) => r && typeof r === 'object') || {};
+  const has = (keys) => keys.find((k) => {
+    if (k.indexOf('.') === -1) return sample[k] != null;
+    return k.split('.').reduce((acc, part) => acc && acc[part], sample) != null;
+  }) || null;
+  const sig = sample._sig && typeof sample._sig === 'object' ? sample._sig : null;
+  const detected = [
+    ['symbol/base/pair', has(['pair', 'spot_pair', 'futures_pair', 'symbol', 'base'])],
+    ['score', has(['_sig_score', 'score']) || (sig && sig.score != null ? '_sig.score' : null)],
+    ['signal', (sig && sig.label != null ? '_sig.label' : null) || has(['signal', '_signal'])],
+    ['panic', has(['_panic', 'panic_score', 'panic'])],
+    ['h1', has(['_c1', 'price_change_percentage_1h_in_currency', 'c1'])],
+    ['h4', has(['_c4', 'c4'])],
+    ['h12', has(['_c12', 'c12'])],
+    ['h24', has(['_c24', 'price_change_percentage_24h', 'c24'])],
+    ['d7', has(['_c7d', 'price_change_percentage_7d_in_currency', 'c7d'])],
+    ['volume', has(['total_volume', 'volume_24h', 'quoteVolume'])],
+    ['hot', has(['_mom.hotScore', 'hot'])],
+    ['tags/labels/markers', sig && Array.isArray(sig.tags) ? '_sig.tags' : has(['tags', 'labels', 'markers'])],
+    ['price', has(['current_price', 'price', 'lastPrice'])],
+  ];
+  return detected.map(([label, key]) => `${label}:${key || 'missing'}`);
+}
+
 function pushScannerContextToRadar() {
   if (!DATA || !DATA.length) return;
   window.__lastRadarContextPush = Date.now();
   try {
-    const payload = DATA.slice(0, 250).map(d => ({
-      symbol: String(d.symbol || '').toUpperCase(),
-      score: Number(d.score) || 0,
-      signal: d._sig ? String(d._sig.label) : null,
-      panic: Number(d._panic) || 0,
-      c1: d._c1, c4: d._c4, c12: d._c12, c24: d._c24, c7d: d._c7d,
-      price: Number(d.current_price) || 0,
-      volume: Number(d.total_volume) || 0,
-      hot: d._mom ? Number(d._mom.hotScore) : null,
-      tags: d._sig && Array.isArray(d._sig.tags) ? d._sig.tags : []
-    }));
+    const rows = DATA.slice(0, 500);
+    const payload = rows.map(d => {
+      const sigMeta = d && d._sig ? d._sig : (typeof _sigOf === 'function' ? _sigOf(d || {}) : null);
+      return {
+        symbol: String((d && (d.pair || d.spot_pair || d.futures_pair || d.symbol)) || '').toUpperCase(),
+        base: d && d.symbol ? String(d.symbol).toUpperCase() : null,
+        pair: d && (d.pair || d.spot_pair || d.futures_pair) ? String(d.pair || d.spot_pair || d.futures_pair).toUpperCase() : null,
+        quote: d && d.quote ? String(d.quote).toUpperCase() : null,
+        score: _radarFiniteOrNull(d && (d._sig_score != null ? d._sig_score : (d.score != null ? d.score : (sigMeta && sigMeta.score)))),
+        signal: sigMeta && sigMeta.label ? String(sigMeta.label) : null,
+        panic: _radarFiniteOrNull(d && (d._panic != null ? d._panic : d.panic_score)),
+        c1: _radarFiniteOrNull(d && d._c1),
+        c4: _radarFiniteOrNull(d && d._c4),
+        c12: _radarFiniteOrNull(d && d._c12),
+        c24: _radarFiniteOrNull(d && (d._c24 != null ? d._c24 : d.price_change_percentage_24h)),
+        c7d: _radarFiniteOrNull(d && d._c7d),
+        price: _radarFiniteOrNull(d && d.current_price),
+        volume: _radarFiniteOrNull(d && d.total_volume),
+        hot: _radarFiniteOrNull(d && d._mom && d._mom.hotScore),
+        tags: sigMeta && Array.isArray(sigMeta.tags) ? sigMeta.tags : []
+      };
+    });
+
+    const fieldMappingDetected = _radarDetectScannerFields(rows);
+
     window.__lastRadarContextPostStatus = 'posting...';
     console.log(`[RADAR] Posting scanner context to /api/bot/radar-context (${payload.length} rows)...`);
-    _fleetFetch('POST', '/api/bot/radar-context', { scannerCandidates: payload })
+    _fleetFetch('POST', '/api/bot/radar-context', { scannerCandidates: payload, fieldMappingDetected, scannerRowsAvailable: DATA.length, scannerRowsSent: payload.length })
       .then((res) => {
          window.__lastRadarContextPostStatus = `ok (${res.stored} stored)`;
          console.log(`[RADAR] Scanner context post successful. Server stored: ${res.stored}`);
@@ -5998,24 +6042,96 @@ function _fleetRadarScoreClass(score) {
   return 'radar-score--bad';
 }
 
+function _fleetFmtRadarValue(v, digits) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '--';
+  const d = digits == null ? 0 : digits;
+  return n.toFixed(d).replace(/\.?0+$/, '');
+}
+
+function _fleetFmtRadarPrice(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return '--';
+  if (n >= 1000) return _fleetFmtRadarValue(n, 0);
+  if (n >= 1) return _fleetFmtRadarValue(n, 2);
+  if (n >= 0.01) return _fleetFmtRadarValue(n, 4);
+  return _fleetFmtRadarValue(n, 8);
+}
+
+function _fleetRadarBadgeClass(v) {
+  return 'radar-badge-' + String(v || 'WATCH_ONLY').replace(/[^A-Z0-9_]/g, '');
+}
+
+function _fleetRadarChecklistGroups(checklist) {
+  const passed = [];
+  const waiting = [];
+  const missing = [];
+  Object.entries(checklist || {}).forEach(([key, item]) => {
+    const label = key.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase());
+    const status = item && item.status;
+    if (status === 'PASS') passed.push(label);
+    else if (status === 'MISSING DATA') missing.push(label);
+    else waiting.push(label);
+  });
+  return { passed, waiting, missing };
+}
+
 function _renderTradingRadar(radar, esc) {
   radar = radar || {};
-  let candidates = Array.isArray(radar.candidates) ? radar.candidates : [];
+  const allCandidates = Array.isArray(radar.candidates) ? radar.candidates : [];
+  const diag = radar.universeDiagnostics || {};
+  const rejectedRows = Array.isArray(diag.topRejectedSamples)
+    ? diag.topRejectedSamples
+    : (Array.isArray(diag.rejectedSamples) ? diag.rejectedSamples : []);
+  if (!Array.isArray(diag.rejectedSamples)) diag.rejectedSamples = rejectedRows;
   
-  const activeFilter = window._radarFilter || 'ALL';
+  const activeFilter = window._radarFilter || 'TOP_20';
+  const rowLimitStr = window._radarFilterLimit || '20';
+  const rowLimit = rowLimitStr === 'ALL' ? allCandidates.length : (parseInt(rowLimitStr, 10) || 20);
+
+  const filtersCount = {
+    ALL: allCandidates.length,
+    TOP_20: Math.min(allCandidates.length, 20),
+    CLOSEST: allCandidates.length,
+    NEEDS_ABSORPTION: allCandidates.filter(c => c.actionability === 'NEEDS_ABSORPTION').length,
+    NEEDS_RECLAIM: allCandidates.filter(c => c.actionability === 'NEEDS_CONFIRMATION' || c.actionability === 'NEAR_ENTRY').length,
+    STABILIZING: allCandidates.filter(c => c.actionability === 'NEEDS_STABILIZATION' || c.stage === 'STABILIZING').length,
+    FLUSH_CONFIRMED: allCandidates.filter(c => c.stage === 'LONG_FLUSH_CONFIRMED').length,
+    ENTRY_READY: allCandidates.filter(c => c.actionability === 'ENTRY_READY').length,
+    REJECTED: rejectedRows.length,
+  };
+
+  let candidates = [...allCandidates];
   if (activeFilter === 'CLOSEST') candidates = candidates.sort((a,b) => b.distanceToEntryReadyScore - a.distanceToEntryReadyScore);
+  else if (activeFilter === 'NEEDS_ABSORPTION') candidates = candidates.filter(c => c.actionability === 'NEEDS_ABSORPTION');
+  else if (activeFilter === 'NEEDS_RECLAIM') candidates = candidates.filter(c => c.actionability === 'NEEDS_CONFIRMATION' || c.actionability === 'NEAR_ENTRY');
+  else if (activeFilter === 'STABILIZING') candidates = candidates.filter(c => c.actionability === 'NEEDS_STABILIZATION' || c.stage === 'STABILIZING');
+  else if (activeFilter === 'FLUSH_CONFIRMED') candidates = candidates.filter(c => c.stage === 'LONG_FLUSH_CONFIRMED');
   else if (activeFilter === 'ENTRY_READY') candidates = candidates.filter(c => c.actionability === 'ENTRY_READY');
+  else if (activeFilter === 'REJECTED') candidates = rejectedRows.map((r) => ({
+    symbol: r.symbol || '--',
+    stage: 'REJECTED',
+    actionability: 'INVALIDATED',
+    distanceToEntryReadyScore: 0,
+    setupQualityScore: 0,
+    confidence: 0,
+    conditionChecklist: {},
+    entryZone: null,
+    suggestedStop: null,
+    blockedBy: r.reason || 'rejected by universe filter',
+    telegramEligible: false,
+  }));
 
   const selected = radar.selected || candidates[0] || null;
   const entryReady = Array.isArray(radar.entryReady) ? radar.entryReady : [];
-  const diag = radar.universeDiagnostics || {};
   const telegram = radar.telegramAlertState || {};
   const missing = Array.isArray(radar.missingSignals) ? radar.missingSignals.slice(0, 8) : [];
   const stale = Number(radar.dataFreshnessMs) > 120000;
   const status = radar.status || (radar.lastError ? 'ERROR' : (entryReady.length ? 'ENTRY_READY' : (candidates.length ? 'WATCHING' : 'SCANNING')));
 
-  const maxRows = 20;
-  const rowsToRender = candidates.slice(0, maxRows);
+  let rowsToRender = candidates;
+  if (activeFilter === 'TOP_20') rowsToRender = rowsToRender.slice(0, 20);
+  else rowsToRender = rowsToRender.slice(0, rowLimit);
   
   const pillStatus = (s) => {
     if (s === 'PASS') return '<span class="radar-pill radar-pill-pass">✓</span>';
@@ -6024,14 +6140,21 @@ function _renderTradingRadar(radar, esc) {
     return '<span class="radar-pill radar-pill-wait">…</span>';
   };
   
+  const zoneText = (zone) => zone && zone.low != null && zone.high != null
+    ? _fleetFmtRadarPrice(zone.low) + '-' + _fleetFmtRadarPrice(zone.high)
+    : '--';
+  const chipList = (items, cls) => (items && items.length)
+    ? items.map(x => `<span class="${cls}">${esc(x)}</span>`).join('')
+    : `<span class="${cls} radar-chip--muted">none</span>`;
+
   const matrixHtml = rowsToRender.length ? rowsToRender.map(c => {
     const cl = c.conditionChecklist || {};
     return `<tr class="radar-matrix-row ${c.actionability === 'ENTRY_READY' ? 'radar-matrix-row--ready' : ''}" onclick="window._radarSelect('${esc(c.symbol)}')">
       <td><b>${esc(c.symbol)}</b></td>
-      <td><span class="radar-badge-${c.actionability}">${esc(c.actionability)}</span></td>
-      <td>${c.distanceToEntryReadyScore}</td>
-      <td><b class="${_fleetRadarScoreClass(c.setupQualityScore)}">${c.setupQualityScore}</b></td>
-      <td><b>${c.confidence}</b></td>
+      <td><span class="${_fleetRadarBadgeClass(c.actionability)}">${esc(c.actionability)}</span></td>
+      <td>${esc(_fleetFmtRadarValue(c.distanceToEntryReadyScore, 0))}</td>
+      <td><b class="${_fleetRadarScoreClass(c.setupQualityScore)}">${esc(_fleetFmtRadarValue(c.setupQualityScore, 0))}</b></td>
+      <td><b>${esc(_fleetFmtRadarValue(c.confidence, 0))}</b></td>
       <td>${pillStatus((cl.relativeDump || {}).status)}</td>
       <td>${pillStatus((cl.longFlush || {}).status)}</td>
       <td>${pillStatus((cl.stabilization || {}).status)}</td>
@@ -6039,17 +6162,30 @@ function _renderTradingRadar(radar, esc) {
       <td>${pillStatus((cl.squeezeOrReclaim || {}).status)}</td>
       <td>${pillStatus((cl.marketRegime || {}).status)}</td>
       <td>${esc((cl.entryVariant || {}).type || '--')}</td>
-      <td class="radar-zone-td">${c.entryZone ? esc(c.entryZone.low) + '–' + esc(c.entryZone.high) : '--'}</td>
-      <td class="radar-zone-td">${esc(c.suggestedStop || '--')}</td>
+      <td class="radar-zone-td">${esc(zoneText(c.entryZone))}</td>
+      <td class="radar-zone-td">${esc(_fleetFmtRadarPrice(c.suggestedStop))}</td>
       <td class="radar-blocked-by">${esc(c.blockedBy || '--')}</td>
-      <td class="radar-telegram-td">${c.telegramEligible ? '✈️' : '⛔'}</td>
+      <td class="radar-telegram-td">${c.telegramEligible ? '<span class="radar-telegram-ready">ready</span>' : '<span class="radar-telegram-no">no</span>'}</td>
     </tr>`;
   }).join('') : `<tr><td colspan="16" class="fleet-empty">No candidates match current filter.</td></tr>`;
 
+  const filterButton = (key, label, count) =>
+    `<button type="button" onclick="window._radarFilter='${key}'; renderTradingRadarPanel()" class="radar-filter-chip ${activeFilter===key?'radar-filter-chip--active':''}">${label} <b>${count}</b></button>`;
   const filtersHtml = `<div class="radar-filters">
-    <button onclick="window._radarFilter='ALL'; renderTradingRadarPanel()" class="${activeFilter==='ALL'?'active':''}">All</button>
-    <button onclick="window._radarFilter='CLOSEST'; renderTradingRadarPanel()" class="${activeFilter==='CLOSEST'?'active':''}">Closest to Entry</button>
-    <button onclick="window._radarFilter='ENTRY_READY'; renderTradingRadarPanel()" class="${activeFilter==='ENTRY_READY'?'active':''}">Entry Ready</button>
+    ${filterButton('ALL', 'All', filtersCount.ALL)}
+    ${filterButton('TOP_20', 'Top 20', filtersCount.TOP_20)}
+    ${filterButton('CLOSEST', 'Closest to Entry', filtersCount.CLOSEST)}
+    ${filterButton('NEEDS_ABSORPTION', 'Needs Absorption', filtersCount.NEEDS_ABSORPTION)}
+    ${filterButton('NEEDS_RECLAIM', 'Needs Reclaim', filtersCount.NEEDS_RECLAIM)}
+    ${filterButton('STABILIZING', 'Stabilizing', filtersCount.STABILIZING)}
+    ${filterButton('FLUSH_CONFIRMED', 'Flush Confirmed', filtersCount.FLUSH_CONFIRMED)}
+    ${filterButton('ENTRY_READY', 'Entry Ready', filtersCount.ENTRY_READY)}
+    ${filterButton('REJECTED', 'Rejected', filtersCount.REJECTED)}
+    <select class="radar-limit-select" onchange="window._radarFilterLimit=this.value; renderTradingRadarPanel()">
+      <option value="20" ${rowLimitStr==='20'?'selected':''}>Show 20</option>
+      <option value="50" ${rowLimitStr==='50'?'selected':''}>Show 50</option>
+      <option value="ALL" ${rowLimitStr==='ALL'?'selected':''}>Show All</option>
+    </select>
   </div>`;
 
   const matrixTableHtml = `<div class="radar-matrix-wrap"><table class="radar-matrix">
@@ -6066,18 +6202,22 @@ function _renderTradingRadar(radar, esc) {
   // What to watch now (nearest to entry)
   const watchNowCandidates = Array.isArray(radar.candidates) 
     ? [...radar.candidates]
-        .filter(c => c.actionability !== 'ENTRY_READY' && c.stage !== 'NO_SETUP')
+        .filter(c => c.actionability !== 'ENTRY_READY')
         .sort((a,b) => b.distanceToEntryReadyScore - a.distanceToEntryReadyScore)
         .slice(0, 3) 
     : [];
+  const commonBlocker = watchNowCandidates.length === 3
+    && watchNowCandidates.every(c => (c.blockedBy || '') === (watchNowCandidates[0].blockedBy || ''))
+    ? watchNowCandidates[0].blockedBy
+    : null;
 
   const watchNowHtml = watchNowCandidates.length ? watchNowCandidates.map(c => {
     return `<div class="radar-watch-card" onclick="window._radarSelect('${esc(c.symbol)}')">
-      <div class="radar-watch-card__head"><b>${esc(c.symbol)}</b> <span class="radar-badge-${c.actionability}">${esc(c.actionability)}</span></div>
-      <div class="radar-watch-card__metrics">Dist: ${c.distanceToEntryReadyScore} | Score: ${c.setupQualityScore} | Conf: ${c.confidence}</div>
-      <div class="radar-watch-card__blocker"><b>Blocked By:</b> ${esc(c.blockedBy || '--')}</div>
+      <div class="radar-watch-card__head"><b>${esc(c.symbol)}</b> <span class="${_fleetRadarBadgeClass(c.actionability)}">${esc(c.actionability)}</span></div>
+      <div class="radar-watch-card__metrics"><span>dist ${esc(_fleetFmtRadarValue(c.distanceToEntryReadyScore, 0))}</span><span>score ${esc(_fleetFmtRadarValue(c.setupQualityScore, 0))}</span><span>conf ${esc(_fleetFmtRadarValue(c.confidence, 0))}</span></div>
+      <div class="radar-watch-card__blocker"><b>Blocked by:</b> ${esc(c.blockedBy || '--')}</div>
       <div class="radar-watch-card__conf"><b>Next:</b> ${esc(c.nextRequiredConfirmation || '--')}</div>
-      ${c.entryZone ? `<div class="radar-watch-card__zone">Zone: ${esc(c.entryZone.low)}–${esc(c.entryZone.high)}</div>` : ''}
+      ${c.entryZone ? `<div class="radar-watch-card__zone">Zone: ${esc(zoneText(c.entryZone))}</div>` : ''}
     </div>`;
   }).join('') : '<div class="fleet-empty">No candidates nearing entry.</div>';
 
@@ -6085,25 +6225,27 @@ function _renderTradingRadar(radar, esc) {
   let focusHtml = '';
   if (selected) {
     const actLabel = selected.actionability === 'ENTRY_READY' ? 'ENTRY READY' : 
-                     selected.actionability === 'NEAR_ENTRY' ? 'NEAR ENTRY — WAITING FOR CONFIRMATION' :
+                     selected.actionability === 'NEAR_ENTRY' ? 'NEAR ENTRY - WAITING FOR CONFIRMATION' :
                      selected.actionability === 'INVALIDATED' ? 'INVALIDATED' : 'NOT ACTIONABLE YET';
     
     const cl = selected.conditionChecklist || {};
     const checklistHtml = Object.keys(cl).map(k => `<li>${pillStatus(cl[k].status)} <b>${k}</b>: ${esc(cl[k].reason)}</li>`).join('');
+    const groups = _fleetRadarChecklistGroups(selected.conditionChecklist || {});
 
     focusHtml = `<div class="radar-focus-card">
-      <div class="radar-focus-title"><b>${esc(selected.symbol || '--')}</b> <span class="radar-badge-${selected.actionability}">${actLabel}</span></div>
+      <div class="radar-focus-title"><b>${esc(selected.symbol || '--')}</b> <span class="${_fleetRadarBadgeClass(selected.actionability)}">${actLabel}</span></div>
+      <div class="radar-focus-blocked"><span>Blocked by</span><b>${esc(selected.blockedBy || 'none')}</b></div>
       <div class="radar-focus-grid">
-        <div><span>Condition Checklist</span><ul class="radar-checklist">${checklistHtml}</ul></div>
-        <div><span>What confirms next stage</span><p>${esc(selected.nextRequiredConfirmation || 'none')}</p></div>
-        <div><span>What invalidates setup</span><p>${esc((selected.riskFlags && selected.riskFlags[0]) || '--')}</p></div>
+        <div><span>Passed</span><div class="radar-chip-row">${chipList(groups.passed, 'radar-status-chip radar-status-chip--pass')}</div></div>
+        <div><span>Waiting</span><div class="radar-chip-row">${chipList(groups.waiting, 'radar-status-chip radar-status-chip--wait')}</div></div>
+        <div><span>Missing data</span><div class="radar-chip-row">${chipList([...(groups.missing || []), ...((selected.missingSignals || []).slice(0, 6))], 'radar-status-chip radar-status-chip--missing')}</div></div>
       </div>
+      <div class="radar-next-trigger"><span>Next trigger</span><b>${esc(selected.nextRequiredConfirmation || 'none')}</b></div>
       <div class="radar-focus-levels">
-        ${selected.actionability === 'ENTRY_READY' && selected.entryZone ? `<div><span>Suggested entry zone</span><b>${esc(selected.entryZone.low)}–${esc(selected.entryZone.high)}</b></div>` : ''}
-        <div><span>Suggested stop</span><b>${esc(selected.suggestedStop || '--')}</b></div>
-        <div><span>Invalidation Level</span><b>${esc(selected.invalidationLevel || '--')}</b></div>
+        <div><span>Entry zone</span><b>${esc(zoneText(selected.entryZone))}</b></div>
+        <div><span>Suggested stop</span><b>${esc(_fleetFmtRadarPrice(selected.suggestedStop))}</b></div>
+        <div><span>Invalidation</span><b>${esc(_fleetFmtRadarPrice(selected.invalidationLevel))}</b></div>
       </div>
-      <p class="radar-focus-missing">Missing data: <b>${esc((selected.missingSignals || []).join(', ') || 'none')}</b></p>
     </div>`;
   } else {
     focusHtml = '<div class="fleet-empty radar-focus-card">No selected setup. Click a row to focus.</div>';
@@ -6126,6 +6268,7 @@ function _renderTradingRadar(radar, esc) {
     + '</div>'
     + '<div class="radar-top3-section">'
     + '  <div class="radar-section-title">Top 3 Closest to Entry</div>'
+    + (commonBlocker ? '<div class="radar-common-blocker">Current market blocker: ' + esc(commonBlocker) + '</div>' : '')
     + '  <div class="radar-watch-list">' + watchNowHtml + '</div>'
     + '</div>'
     + '<div class="radar-section-title">Radar Matrix</div>'
@@ -6137,16 +6280,20 @@ function _renderTradingRadar(radar, esc) {
     + '</div>'
     + '<details class="radar-diagnostics"><summary>Diagnostics & Logs</summary>'
     + '<ul>'
-    + '<li>Scanner Candidates Ingested: ' + esc(radar.scannerCandidatesIngested || 0) + '</li>'
-    + '<li>Snapshot Symbols Ingested: ' + esc(radar.snapshotSymbolsIngested || 0) + '</li>'
-    + '<li>Radar Candidates Built: ' + esc(radar.candidates ? radar.candidates.length : 0) + '</li>'
-    + '<li>Telegram Eligible Count: ' + esc(entryReady.length) + '</li>'
+    + '<li>Scanner Rows Available: ' + esc(diag.scannerRowsAvailable || 0) + '</li>'
+    + '<li>Scanner Rows Sent: ' + esc(diag.scannerRowsSent || 0) + '</li>'
+    + '<li>Scanner Rows Received: ' + esc(diag.scannerRowsReceived || 0) + '</li>'
+    + '<li>Scanner Rows Sanitized: ' + esc(diag.scannerRowsSanitized || 0) + '</li>'
+    + '<li>Scanner Rows Rejected: ' + esc(diag.scannerRowsRejected || 0) + '</li>'
+    + '<li>Radar Rows Evaluated: ' + esc(diag.radarRowsEvaluated || 0) + '</li>'
+    + '<li>Radar Rows Displayed: ' + esc(rowsToRender.length || 0) + '</li>'
+    + '<li>Detected scanner fields: ' + esc((diag.fieldMappingDetected || []).join(', ') || 'none') + '</li>'
     + '<li>Last Radar Refresh: ' + esc(radar.updatedAt ? new Date(radar.updatedAt).toLocaleTimeString() : 'never') + '</li>'
-    + '<li>Rejected: ' + esc(Object.entries(diag.rejected || {}).slice(0, 4).map(([k, v]) => k + ':' + v).join(', ') || 'none') + '</li>'
+    + '<li>Rejected: ' + esc(Object.entries(diag.rejectedByReason || diag.rejected || {}).slice(0, 4).map(([k, v]) => k + ':' + v).join(', ') || 'none') + '</li>'
     + '<li>Missing: ' + esc(missing.join(', ') || 'none') + '</li>'
     + '</ul>';
     
-  if (diag.rejectedSamples && diag.rejectedSamples.length && (!radar.candidates || radar.candidates.length === 0)) {
+  if (rejectedRows.length) {
      html += '<br/>Top rejections:<br/>' + diag.rejectedSamples.slice(0,10).map(s => '• ' + esc(s.symbol) + ': ' + esc(s.reason)).join('<br/>');
   }
   
@@ -6156,8 +6303,10 @@ function _renderTradingRadar(radar, esc) {
     + '<ul>'
     + '<li>Mode: <b>' + esc(telegram.mode || 'ENTRY_READY_ONLY') + '</b></li>'
     + '<li>Last sent: ' + esc(telegram.lastSentAt || '--') + '</li>'
+    + '<li>Last radar sent: ' + esc(telegram.lastRadarSentAt || '--') + '</li>'
     + '<li>Sent count: ' + esc(telegram.sentCount != null ? telegram.sentCount : 0) + '</li>'
     + '<li>Legacy Blocked Count: ' + esc(telegram.legacyBlockedCount || 0) + '</li>'
+    + '<li>Last legacy blocked: ' + esc(telegram.lastLegacyBlockedAt || '--') + '</li>'
     + '<li>Last Skipped Reason: ' + esc(telegram.lastRadarSkippedReason || 'none') + '</li>'
     + '<li>Error: ' + esc(telegram.lastError || 'none') + '</li>'
     + '</ul></details>';
