@@ -271,8 +271,9 @@ function signalBooleans(m, regime) {
     || buyDominance >= 0.55;
 
   const dropVsVol = atrPct != null ? Math.abs(c24) / Math.max(atrPct, 0.1) : null;
-  const watchDrop = c24 <= -4 || c12 <= -3.5 || c4 <= -2.5 || btcRel <= -3 || dropVsVol >= 1.8;
-  const panicFlush = (longLiq != null && longLiq >= 1.5) || (sellRatio != null && sellRatio >= 0.62) || (volumeSpike >= 1.8 && c24 <= -6);
+  const isScannerFlush = Array.isArray(m.scannerTags) && m.scannerTags.includes('FLUSH');
+  const watchDrop = c24 <= -4 || c12 <= -3.5 || c4 <= -2.5 || btcRel <= -3 || dropVsVol >= 1.8 || isScannerFlush || (m.scannerPanic > 50);
+  const panicFlush = (longLiq != null && longLiq >= 1.5) || (sellRatio != null && sellRatio >= 0.62) || (volumeSpike >= 1.8 && c24 <= -6) || isScannerFlush;
   const oiFlush = oiChange != null && oiChange <= -4;
   const fundingOk = funding == null || funding <= 0.03;
   const wickOk = wickRecovery == null ? c24 <= -7 : wickRecovery >= 35;
@@ -320,6 +321,13 @@ export function classifyRadarStage(market, regime = evaluateMarketRegime([])) {
     stage = RADAR_STAGES.SQUEEZE_CONFIRMED;
     reasons.push('reclaim/squeeze confirmation present');
   }
+
+  let nextRequiredConfirmation = null;
+  if (stage === RADAR_STAGES.WATCH) nextRequiredConfirmation = 'panic flush volume + OI flush';
+  if (stage === RADAR_STAGES.LONG_FLUSH_CONFIRMED) nextRequiredConfirmation = 'new lows paused + local range formed';
+  if (stage === RADAR_STAGES.STABILIZING) nextRequiredConfirmation = 'absorption or squeeze confirmed';
+  if (stage === RADAR_STAGES.SQUEEZE_CONFIRMED) nextRequiredConfirmation = 'retest held';
+
   let entryType = RADAR_ENTRY_TYPES.NONE;
   if (stage === RADAR_STAGES.SQUEEZE_CONFIRMED && s.retestEntry) {
     stage = RADAR_STAGES.ENTRY_READY;
@@ -364,6 +372,7 @@ export function classifyRadarStage(market, regime = evaluateMarketRegime([])) {
     setupQualityScore: round(setupQualityScore, 0),
     confidence: round(confidence, 0),
     entryType,
+    nextRequiredConfirmation,
     reasons: compactReasons(reasons.length ? reasons : ['no flush/stabilization sequence confirmed'], 8),
     riskFlags: compactReasons(riskFlags, 8),
     _signals: s,
@@ -614,6 +623,7 @@ function radarStatus(state) {
 
 export function evaluateTradingRadar({
   markets = [],
+  scannerCandidates = [],
   source = 'unknown',
   fetchedAt = null,
   receivedAt = null,
@@ -630,8 +640,58 @@ export function evaluateTradingRadar({
   state.dataFreshnessMs = Number.isFinite(freshnessMs) ? freshnessMs : null;
 
   try {
-    const { universe, diagnostics, missingSignals } = buildRadarUniverse(markets, { filters });
-    const regime = evaluateMarketRegime(markets);
+    const scannerMap = new Map();
+    for (const c of scannerCandidates || []) {
+      if (c && c.symbol) scannerMap.set(c.symbol.toUpperCase(), c);
+    }
+    
+    const seenSymbols = new Set();
+    const mergedMarkets = markets.map(m => {
+      const sym = String(m.symbol || '').toUpperCase();
+      seenSymbols.add(sym);
+      const sc = scannerMap.get(sym);
+      if (!sc) return m;
+      return {
+        ...m,
+        scannerScore: sc.score,
+        scannerPanic: sc.panic,
+        scannerSignal: sc.signal,
+        scannerHot: sc.hot,
+        scannerTags: sc.tags || [],
+        change1hPct: m.change1hPct ?? sc.c1,
+        change4hPct: m.change4hPct ?? sc.c4,
+        change12hPct: m.change12hPct ?? sc.c12,
+        change24hPct: m.change24hPct ?? sc.c24,
+        priceChangePercent: m.priceChangePercent ?? sc.c24
+      };
+    });
+
+    for (const sc of scannerCandidates || []) {
+       if (sc && sc.symbol) {
+         const sym = sc.symbol.toUpperCase();
+         if (!seenSymbols.has(sym)) {
+            mergedMarkets.push({
+               symbol: sym,
+               lastPrice: sc.price,
+               quoteVolume24h: sc.volume,
+               scannerScore: sc.score,
+               scannerPanic: sc.panic,
+               scannerSignal: sc.signal,
+               scannerHot: sc.hot,
+               scannerTags: sc.tags || [],
+               change1hPct: sc.c1,
+               change4hPct: sc.c4,
+               change12hPct: sc.c12,
+               change24hPct: sc.c24,
+               priceChangePercent: sc.c24,
+               status: 'TRADING'
+            });
+         }
+       }
+    }
+
+    const { universe, diagnostics, missingSignals } = buildRadarUniverse(mergedMarkets, { filters });
+    const regime = evaluateMarketRegime(mergedMarkets);
     const allMissing = new Set(missingSignals);
     const candidates = universe.map((m) => {
       for (const miss of missingForMarket(m)) allMissing.add(miss);
@@ -650,6 +710,8 @@ export function evaluateTradingRadar({
         reasons: stageInfo.reasons,
         riskFlags: stageInfo.riskFlags,
         missingSignals: missingForMarket(m).slice(0, 8),
+        nextRequiredConfirmation: stageInfo.nextRequiredConfirmation,
+        sourceSignals: Array.isArray(m.scannerTags) ? m.scannerTags : [],
         diagnostics: {
           change24hPct: round(n(m.change24hPct ?? m.priceChangePercent), 2),
           spreadPct: round(m.spreadPct, 4),
@@ -674,12 +736,16 @@ export function evaluateTradingRadar({
 
     state.marketRegime = regime;
     state.universeDiagnostics = diagnostics;
+    state.scannerCandidatesIngested = scannerCandidates.length;
+    state.snapshotSymbolsIngested = markets.length;
+    state.candidatesByStage = state.pipeline;
     state.candidates = candidates.slice(0, 10);
     state.watchlist = candidates.filter((c) => c.stage !== RADAR_STAGES.ENTRY_READY).slice(0, 20);
     state.entryReady = candidates.filter((c) => c.stage === RADAR_STAGES.ENTRY_READY).slice(0, 10);
     state.selected = selected;
     state.exitGuidance = buildExitGuidance({ market: positionMarket, position, regime, now });
     state.pipeline = buildPipeline(candidates, universe.length);
+    state.candidatesByStage = { ...state.pipeline };
     state.missingSignals = Array.from(allMissing).sort();
     state.dataCompleteness = completeness(state.missingSignals);
     if (freshnessMs != null && freshnessMs > 120000) {

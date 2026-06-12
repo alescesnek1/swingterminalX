@@ -3296,6 +3296,26 @@ async function doRefresh() {
     DATA.forEach((d) => { d._mom = computeMomentumScore(d); });
   } catch (e) { console.warn('[MOM] compute failed:', e.message); }
 
+  if (!window.__lastRadarContextPush || (Date.now() - window.__lastRadarContextPush > 45000)) {
+    window.__lastRadarContextPush = Date.now();
+    try {
+      const payload = DATA.slice(0, 250).map(d => ({
+        symbol: String(d.symbol || '').toUpperCase(),
+        score: Number(d.score) || 0,
+        signal: d._sig ? String(d._sig.label) : null,
+        panic: Number(d._panic) || 0,
+        c1: d._c1, c4: d._c4, c12: d._c12, c24: d._c24, c7d: d._c7d,
+        price: Number(d.current_price) || 0,
+        volume: Number(d.total_volume) || 0,
+        hot: d._mom ? Number(d._mom.hotScore) : null,
+        tags: d._sig && Array.isArray(d._sig.tags) ? d._sig.tags : []
+      }));
+      _fleetFetch('POST', '/api/bot/radar-context', { scannerCandidates: payload }).catch(() => {});
+    } catch (err) {
+      console.warn('[RADAR] Failed to push context:', err);
+    }
+  }
+
   renderTopbar();
   renderList();
   renderAlerts();
@@ -5996,7 +6016,7 @@ function _renderTradingRadar(radar, esc) {
   const tps = selected && Array.isArray(selected.takeProfitCheckpoints) ? selected.takeProfitCheckpoints : [];
   let html = '<div class="trading-radar trading-radar--standalone">'
     + '<div class="trading-radar__head">'
-    + '<div><div class="trading-radar__kicker">TRADING RADAR</div><div class="trading-radar__state">' + esc(status) + '</div></div>'
+    + '<div><div class="trading-radar__kicker">RADAR — mean reversion setup pipeline</div><div class="trading-radar__state">' + esc(status) + '</div></div>'
     + '<div class="trading-radar__badge">ADVISORY ONLY</div>'
     + '</div>'
     + '<div class="trading-radar__copy">Read-only mean-reversion scanner. It never creates orders, execution intents, or live trading gate changes.</div>'
@@ -6028,6 +6048,10 @@ function _renderTradingRadar(radar, esc) {
       + '<p>Entry: ' + esc(selected.entryType || '--') + (dz ? ' ' + esc(dz.low) + ' - ' + esc(dz.high) : '') + '</p>'
       + '<p>Invalidation: ' + esc(selected.invalidationLevel || '--') + ' | Stop: ' + esc(selected.suggestedStop || '--') + '</p>'
       + (tps.length ? '<p>TP checkpoints: ' + tps.map((tp) => esc(tp.label + ' ' + tp.level)).join(' / ') + '</p>' : '')
+      + (selected.stage !== 'ENTRY_READY' ? '<p>Next required: <b>' + esc(selected.nextRequiredConfirmation || '--') + '</b></p>' : '')
+      + (selected.stage !== 'ENTRY_READY' ? '<p>Why not ENTRY_READY yet: Waiting for ' + esc(selected.nextRequiredConfirmation || 'further validations') + '</p>' : '')
+      + (selected.stage !== 'ENTRY_READY' ? '<p>Missing signals: ' + esc((selected.missingSignals || []).join(', ') || 'none') + '</p>' : '')
+      + (selected.stage !== 'ENTRY_READY' ? '<p>Source signals: ' + esc((selected.sourceSignals || []).join(', ') || 'none') + '</p>' : '')
       + '</div>'
       + (detailReasons.length ? '<ul>' + detailReasons.map((r) => '<li>' + esc(r) + '</li>').join('') + '</ul>' : '<p>--</p>');
   } else {
@@ -6068,6 +6092,10 @@ function _renderTradingRadar(radar, esc) {
 
   html += '<div><span>Diagnostics</span>'
     + '<ul>'
+    + '<li>Scanner Candidates Ingested: ' + esc(radar.scannerCandidatesIngested || 0) + '</li>'
+    + '<li>Snapshot Symbols Ingested: ' + esc(radar.snapshotSymbolsIngested || 0) + '</li>'
+    + '<li>Radar Candidates Built: ' + esc(radar.candidates ? radar.candidates.length : 0) + '</li>'
+    + '<li>Telegram Eligible Count: ' + esc(entryReady.length) + '</li>'
     + '<li>Rejected: ' + esc(Object.entries(diag.rejected || {}).slice(0, 4).map(([k, v]) => k + ':' + v).join(', ') || 'none') + '</li>'
     + '<li>Missing: ' + esc(missing.join(', ') || 'none') + '</li>'
     + (detailFlags.length ? detailFlags.slice(0, 4).map((f) => '<li>Flag: ' + esc(f) + '</li>').join('') : '<li>Flags: none</li>')

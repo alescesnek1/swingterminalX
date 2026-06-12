@@ -22,9 +22,13 @@ function emptyTradingRadar(nowIso = null) {
     updatedAt: nowIso,
     source: 'uninitialized',
     dataFreshnessMs: null,
+    scannerCandidatesIngested: 0,
+    botFeedSignalsIngested: 0,
+    snapshotSymbolsIngested: 0,
     status: 'SCANNING',
     universeDiagnostics: { fetched: 0, liquid: 0, spreadOk: 0, depthOk: 0, rejected: {}, rejectedSamples: [] },
     marketRegime: { status: 'UNKNOWN', score: 50, blocksMeanReversion: false, reasons: ['no market data yet'], breadthPct: null, btc: null, eth: null },
+    candidatesByStage: { NO_SETUP: 0, WATCH: 0, LONG_FLUSH_CONFIRMED: 0, STABILIZING: 0, SQUEEZE_CONFIRMED: 0, ENTRY_READY: 0 },
     pipeline: { NO_SETUP: 0, WATCH: 0, LONG_FLUSH_CONFIRMED: 0, STABILIZING: 0, SQUEEZE_CONFIRMED: 0, ENTRY_READY: 0 },
     candidates: [],
     watchlist: [],
@@ -73,6 +77,7 @@ function emptyFleet() {
 
     autoTrader: null,      // operator-requested autonomous mode/status; no secrets, no order execution
     autoMarketSnapshot: null, // latest sanitized PUBLIC market snapshot posted by a local worker (no secrets, no orders)
+    radarContext: { scannerCandidates: [], receivedAt: null }, // context pushed by the browser
     tradingRadar: emptyTradingRadar(), // read-only advisory panel state; no orders, no intents, no gates
     lastRegime: null,     // { regime, entriesAllowed, reason[], metrics, updatedAt }
     updatedAt: null,
@@ -99,6 +104,7 @@ function normalize(data) {
     radar.universeDiagnostics = { ...emptyTradingRadar().universeDiagnostics, ...(base.tradingRadar.universeDiagnostics || {}) };
     radar.marketRegime = { ...emptyTradingRadar().marketRegime, ...(base.tradingRadar.marketRegime || {}) };
     radar.pipeline = { ...emptyTradingRadar().pipeline, ...(base.tradingRadar.pipeline || {}) };
+    radar.candidatesByStage = { ...emptyTradingRadar().candidatesByStage, ...(base.tradingRadar.candidatesByStage || {}) };
     radar.telegramAlertState = { ...emptyTradingRadar().telegramAlertState, ...(base.tradingRadar.telegramAlertState || {}) };
     if (!radar.telegramAlertState.sent || typeof radar.telegramAlertState.sent !== 'object' || Array.isArray(radar.telegramAlertState.sent)) {
       radar.telegramAlertState.sent = {};

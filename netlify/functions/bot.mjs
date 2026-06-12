@@ -1981,8 +1981,10 @@ function refreshTradingRadarFromFleet(fleet, nowMs = Date.now()) {
   const snapshot = fleet && fleet.autoMarketSnapshot;
   const previousRadar = fleet && fleet.tradingRadar && typeof fleet.tradingRadar === 'object' ? fleet.tradingRadar : null;
   const markets = snapshot ? marketsFromSnapshot(snapshot) : [];
+  const radarContext = fleet && fleet.radarContext && Array.isArray(fleet.radarContext.scannerCandidates) ? fleet.radarContext.scannerCandidates : [];
   const radar = evaluateTradingRadar({
     markets,
+    scannerCandidates: radarContext,
     source: snapshot && snapshot.source ? snapshot.source : 'no_public_snapshot',
     fetchedAt: snapshot && snapshot.fetchedAt,
     receivedAt: snapshot && snapshot.receivedAt,
@@ -2238,6 +2240,44 @@ async function handleFleetWorker(req, base, body) {
           `Local worker posted public market snapshot (${markets.length} markets).`, {});
       }
       return json(req, { ok: true, stored: markets.length, failed });
+    });
+  }
+
+  if (base === 'radar-context') {
+    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    
+    // Strict sanitization of incoming payload
+    const rawCandidates = Array.isArray(body.scannerCandidates) ? body.scannerCandidates : [];
+    if (rawCandidates.length > 250) {
+      return json(req, { ok: false, error: 'Payload too large (max 250 rows)' }, 400);
+    }
+    
+    const sanitized = rawCandidates.map(c => {
+      if (!c || typeof c !== 'object') return null;
+      return {
+        symbol: String(c.symbol || '').toUpperCase().slice(0, 24),
+        score: Number.isFinite(Number(c.score)) ? Number(c.score) : 0,
+        signal: c.signal ? String(c.signal).slice(0, 40) : null,
+        panic: Number.isFinite(Number(c.panic)) ? Number(c.panic) : 0,
+        c1: Number.isFinite(Number(c.c1)) ? Number(c.c1) : null,
+        c4: Number.isFinite(Number(c.c4)) ? Number(c.c4) : null,
+        c12: Number.isFinite(Number(c.c12)) ? Number(c.c12) : null,
+        c24: Number.isFinite(Number(c.c24)) ? Number(c.c24) : null,
+        c7d: Number.isFinite(Number(c.c7d)) ? Number(c.c7d) : null,
+        price: Number.isFinite(Number(c.price)) ? Number(c.price) : 0,
+        volume: Number.isFinite(Number(c.volume)) ? Number(c.volume) : 0,
+        hot: Number.isFinite(Number(c.hot)) ? Number(c.hot) : null,
+        tags: Array.isArray(c.tags) ? c.tags.slice(0, 10).map(t => String(t).slice(0, 20)) : []
+      };
+    }).filter(Boolean);
+
+    return await mutateFleet(async (fleet) => {
+      fleet.radarContext = {
+        scannerCandidates: sanitized,
+        receivedAt: new Date().toISOString()
+      };
+      refreshTradingRadarFromFleet(fleet);
+      return json(req, { ok: true, stored: sanitized.length });
     });
   }
 
