@@ -88,6 +88,7 @@ export function defaultTradingRadarState(nowIso = null) {
     updatedAt: nowIso,
     source: 'uninitialized',
     dataFreshnessMs: null,
+    status: 'SCANNING',
     universeDiagnostics: {
       fetched: 0,
       liquid: 0,
@@ -105,11 +106,27 @@ export function defaultTradingRadarState(nowIso = null) {
       btc: null,
       eth: null,
     },
+    pipeline: {
+      NO_SETUP: 0,
+      WATCH: 0,
+      LONG_FLUSH_CONFIRMED: 0,
+      STABILIZING: 0,
+      SQUEEZE_CONFIRMED: 0,
+      ENTRY_READY: 0,
+    },
     candidates: [],
     watchlist: [],
     entryReady: [],
     selected: null,
     exitGuidance: null,
+    telegramAlertState: {
+      mode: 'ENTRY_READY_ONLY',
+      cooldownMs: 60 * 60 * 1000,
+      sent: {},
+      lastSentAt: null,
+      lastError: null,
+      sentCount: 0,
+    },
     missingSignals: [],
     dataCompleteness: 0,
     lastError: null,
@@ -245,6 +262,13 @@ function signalBooleans(m, regime) {
   const higherLow = m.higherLowHeld === true;
   const noNewLows = m.noNewLows === true || n(m.noNewLowMinutes, 0) >= 20;
   const rangeFormed = m.rangeFormed === true || n(m.localRangeMinutes, 0) >= 20;
+  const tightSpread = m.spreadPct == null || n(m.spreadPct, 999) <= 0.08;
+  const supportRetest = m.supportRetested === true
+    || m.liquidationLowRetested === true
+    || (n(m.distanceToSupportPct) != null && n(m.distanceToSupportPct) <= 0.75);
+  const deltaImproves = m.deltaImproves === true
+    || n(m.deltaImprovementPct, 0) > 0
+    || buyDominance >= 0.55;
 
   const dropVsVol = atrPct != null ? Math.abs(c24) / Math.max(atrPct, 0.1) : null;
   const watchDrop = c24 <= -4 || c12 <= -3.5 || c4 <= -2.5 || btcRel <= -3 || dropVsVol >= 1.8;
@@ -256,14 +280,21 @@ function signalBooleans(m, regime) {
   const sellFade = m.sellAggressionFading === true || (sellRatio != null && sellRatio <= 0.56);
   const lateShorts = m.lateShortsAppearing === true || (oiChange != null && oiChange >= 0 && fundingOk);
   const squeeze = reclaim && (shortLiq >= 1.2 || buyDominance >= 0.56 || higherLow);
-  const retestEntry = reclaim && retestHeld && (m.vwapHeld !== false) && !regime.blocksMeanReversion;
-  const absorptionEntry = absorptionScore >= 70 && (m.aggressiveSellsFailed === true || sellFade) && !regime.blocksMeanReversion;
+  const retestEntry = reclaim && retestHeld && (m.vwapHeld !== false) && (bidsOk || tightSpread) && !regime.blocksMeanReversion;
+  const absorptionConfirmed = absorptionScore >= 70
+    && supportRetest
+    && (m.aggressiveSellsFailed === true || sellFade)
+    && (m.bidAbsorption === true || bidsOk || absorptionScore >= 80)
+    && deltaImproves
+    && tightSpread;
+  const absorptionEntry = absorptionConfirmed && !regime.blocksMeanReversion;
 
   return {
     c24, c12, c4, btcRel, atrPct, volumeSpike, oiChange, funding,
     watchDrop, panicFlush, oiFlush, fundingOk, wickOk, bidsOk, sellFade,
     noNewLows, rangeFormed, lateShorts, squeeze, reclaim, higherLow,
     retestEntry, absorptionEntry, absorptionScore, buyDominance, shortLiq,
+    tightSpread, supportRetest, deltaImproves, absorptionConfirmed,
   };
 }
 
@@ -290,12 +321,14 @@ export function classifyRadarStage(market, regime = evaluateMarketRegime([])) {
     reasons.push('reclaim/squeeze confirmation present');
   }
   let entryType = RADAR_ENTRY_TYPES.NONE;
-  if ((stage === RADAR_STAGES.SQUEEZE_CONFIRMED || stage === RADAR_STAGES.STABILIZING) && (s.retestEntry || s.absorptionEntry)) {
+  if (stage === RADAR_STAGES.SQUEEZE_CONFIRMED && s.retestEntry) {
     stage = RADAR_STAGES.ENTRY_READY;
-    entryType = s.retestEntry ? RADAR_ENTRY_TYPES.RECLAIM_RETEST : RADAR_ENTRY_TYPES.ABSORPTION;
-    reasons.push(entryType === RADAR_ENTRY_TYPES.RECLAIM_RETEST
-      ? 'reclaim retest held with regime not breaking down'
-      : 'support/liquidation low absorbed aggressive sells');
+    entryType = RADAR_ENTRY_TYPES.RECLAIM_RETEST;
+    reasons.push('reclaim retest held with regime not breaking down');
+  } else if (stage === RADAR_STAGES.STABILIZING && s.absorptionEntry) {
+    stage = RADAR_STAGES.ENTRY_READY;
+    entryType = RADAR_ENTRY_TYPES.ABSORPTION;
+    reasons.push('support/liquidation low absorbed aggressive sells');
   }
 
   if (regime.blocksMeanReversion) riskFlags.push('market regime blocks mean reversion');
@@ -554,6 +587,31 @@ function missingForMarket(m) {
   return miss;
 }
 
+function buildPipeline(candidates, universeSize) {
+  const pipeline = {
+    NO_SETUP: Math.max(0, Number(universeSize) || 0),
+    WATCH: 0,
+    LONG_FLUSH_CONFIRMED: 0,
+    STABILIZING: 0,
+    SQUEEZE_CONFIRMED: 0,
+    ENTRY_READY: 0,
+  };
+  for (const c of candidates || []) {
+    if (!c || !pipeline.hasOwnProperty(c.stage)) continue;
+    pipeline[c.stage] += 1;
+    pipeline.NO_SETUP = Math.max(0, pipeline.NO_SETUP - 1);
+  }
+  return pipeline;
+}
+
+function radarStatus(state) {
+  if (!state || state.lastError) return 'ERROR';
+  if (Array.isArray(state.entryReady) && state.entryReady.length) return 'ENTRY_READY';
+  if (Array.isArray(state.watchlist) && state.watchlist.length) return 'WATCHING';
+  if (state.dataFreshnessMs != null && state.dataFreshnessMs > 120000) return 'STALE';
+  return 'SCANNING';
+}
+
 export function evaluateTradingRadar({
   markets = [],
   source = 'unknown',
@@ -591,6 +649,7 @@ export function evaluateTradingRadar({
         takeProfitCheckpoints: levels.takeProfitCheckpoints,
         reasons: stageInfo.reasons,
         riskFlags: stageInfo.riskFlags,
+        missingSignals: missingForMarket(m).slice(0, 8),
         diagnostics: {
           change24hPct: round(n(m.change24hPct ?? m.priceChangePercent), 2),
           spreadPct: round(m.spreadPct, 4),
@@ -620,13 +679,15 @@ export function evaluateTradingRadar({
     state.entryReady = candidates.filter((c) => c.stage === RADAR_STAGES.ENTRY_READY).slice(0, 10);
     state.selected = selected;
     state.exitGuidance = buildExitGuidance({ market: positionMarket, position, regime, now });
+    state.pipeline = buildPipeline(candidates, universe.length);
     state.missingSignals = Array.from(allMissing).sort();
     state.dataCompleteness = completeness(state.missingSignals);
     if (freshnessMs != null && freshnessMs > 120000) {
       state.missingSignals = Array.from(new Set([...state.missingSignals, 'fresh public snapshot'])).sort();
     }
+    state.status = radarStatus(state);
     return state;
   } catch (err) {
-    return { ...state, lastError: err && err.message ? err.message : String(err) };
+    return { ...state, status: 'ERROR', lastError: err && err.message ? err.message : String(err) };
   }
 }

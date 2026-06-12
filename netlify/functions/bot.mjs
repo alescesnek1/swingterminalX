@@ -1979,6 +1979,7 @@ function radarPositionContexts(fleet) {
 
 function refreshTradingRadarFromFleet(fleet, nowMs = Date.now()) {
   const snapshot = fleet && fleet.autoMarketSnapshot;
+  const previousRadar = fleet && fleet.tradingRadar && typeof fleet.tradingRadar === 'object' ? fleet.tradingRadar : null;
   const markets = snapshot ? marketsFromSnapshot(snapshot) : [];
   const radar = evaluateTradingRadar({
     markets,
@@ -1994,6 +1995,9 @@ function refreshTradingRadarFromFleet(fleet, nowMs = Date.now()) {
     radar.dataCompleteness = Math.min(Number(radar.dataCompleteness) || 0, 20);
   }
   radar.sourceFetchedAt = snapshot && snapshot.fetchedAt ? snapshot.fetchedAt : null;
+  radar.telegramAlertState = previousRadar && previousRadar.telegramAlertState
+    ? previousRadar.telegramAlertState
+    : (radar.telegramAlertState || defaultTradingRadarState(new Date(nowMs).toISOString()).telegramAlertState);
   fleet.tradingRadar = radar || defaultTradingRadarState(new Date(nowMs).toISOString());
   return fleet.tradingRadar;
 }

@@ -2618,7 +2618,7 @@ function _applyViewDisplay(target, v) {
   const flex = name === 'heatmap' || name === 'manual' || name === 'calendar';
   target.style.display = flex ? 'flex' : 'block';
   target.style.flexDirection = flex ? 'column' : '';
-  if (name === 'bot') {
+  if (name === 'bot' || name === 'radar') {
     target.style.height = 'calc(100vh - 85px)';
     target.style.overflowY = 'auto';
     target.style.overflowX = 'hidden';
@@ -2662,6 +2662,9 @@ function sv(v, el) {
   if (activeViewName === 'manual') requestAnimationFrame(() => { try { initManual(); } catch(e){} });
   if (activeViewName === 'bot') requestAnimationFrame(() => {
     try { refreshFleet(); _startFleetPoll(); } catch (e) { console.warn('[Fleet] init failed:', e && e.message); }
+  });
+  if (activeViewName === 'radar') requestAnimationFrame(() => {
+    try { refreshFleet(); _startFleetPoll(); renderTradingRadarPanel(); } catch (e) { console.warn('[Trading RADAR] init failed:', e && e.message); }
   });
   if (activeViewName === 'calendar') requestAnimationFrame(() => {
     try { renderCalendar(); } catch(e){}
@@ -4948,12 +4951,14 @@ async function refreshFleet() {
     // testnet/paper item can be opened with its archive banner.
     Fleet.selectedId = _fleetResolveSelectedId(visibleSessions, Fleet.selectedId, Fleet.userSelected === true);
     renderFleet();
+    renderTradingRadarPanel();
   } catch (err) {
     // Do NOT wipe Fleet.data — keep the last stable snapshot on screen.
     console.warn('[Fleet] refresh failed:', err.message);
     Fleet.refreshError = err.message;
     _fleetEnsurePanel();
     if (Fleet.data) { renderFleet(); }
+    renderTradingRadarPanel();
     const status = document.getElementById('fleet-conn');
     if (status) { status.textContent = 'Fleet poll failed (showing last known state): ' + err.message; status.style.color = '#ff8fa2'; }
   }
@@ -5963,11 +5968,15 @@ function _renderTradingRadar(radar, esc) {
   const diag = radar.universeDiagnostics || {};
   const regime = radar.marketRegime || {};
   const exit = radar.exitGuidance || {};
+  const pipeline = radar.pipeline || {};
+  const telegram = radar.telegramAlertState || {};
   const missing = Array.isArray(radar.missingSignals) ? radar.missingSignals.slice(0, 8) : [];
   const stale = Number(radar.dataFreshnessMs) > 120000;
-  const status = radar.lastError ? 'ERROR' : (entryReady.length ? 'ENTRY READY' : (watchlist.length ? 'WATCHING' : 'SCANNING'));
+  const status = radar.status || (radar.lastError ? 'ERROR' : (entryReady.length ? 'ENTRY_READY' : (watchlist.length ? 'WATCHING' : 'SCANNING')));
   const source = radar.source || 'no_public_snapshot';
   const completeness = radar.dataCompleteness != null ? radar.dataCompleteness + '%' : '--';
+  const pipelineOrder = ['NO_SETUP', 'WATCH', 'LONG_FLUSH_CONFIRMED', 'STABILIZING', 'SQUEEZE_CONFIRMED', 'ENTRY_READY'];
+  const pipelineHtml = pipelineOrder.map((stage) => '<div><span>' + esc(stage) + '</span><b>' + esc(pipeline[stage] != null ? pipeline[stage] : 0) + '</b></div>').join('');
   const rowHtml = candidates.length ? candidates.map((c) => {
     const flags = Array.isArray(c.riskFlags) && c.riskFlags.length ? c.riskFlags.slice(0, 2).join(', ') : 'none';
     const reason = Array.isArray(c.reasons) && c.reasons.length ? c.reasons[0] : '--';
@@ -5985,7 +5994,7 @@ function _renderTradingRadar(radar, esc) {
   const detailFlags = selected && Array.isArray(selected.riskFlags) ? selected.riskFlags : [];
   const dz = selected && selected.entryZone;
   const tps = selected && Array.isArray(selected.takeProfitCheckpoints) ? selected.takeProfitCheckpoints : [];
-  let html = '<div class="trading-radar">'
+  let html = '<div class="trading-radar trading-radar--standalone">'
     + '<div class="trading-radar__head">'
     + '<div><div class="trading-radar__kicker">TRADING RADAR</div><div class="trading-radar__state">' + esc(status) + '</div></div>'
     + '<div class="trading-radar__badge">ADVISORY ONLY</div>'
@@ -5993,6 +6002,7 @@ function _renderTradingRadar(radar, esc) {
     + '<div class="trading-radar__copy">Read-only mean-reversion scanner. It never creates orders, execution intents, or live trading gate changes.</div>'
     + (stale ? '<div class="trading-radar__warn">PUBLIC SNAPSHOT STALE</div>' : '')
     + (radar.lastError ? '<div class="trading-radar__warn">' + esc(radar.lastError) + '</div>' : '')
+    + '<div class="fleet-section-title">Overview</div>'
     + '<div class="fleet-live-readiness__caps trading-radar__grid">'
     + '<div><span>Status</span><b>' + esc(status) + '</b></div>'
     + '<div><span>Freshness</span><b>' + esc(_fleetFmtRadarAge(radar.dataFreshnessMs)) + '</b></div>'
@@ -6003,13 +6013,15 @@ function _renderTradingRadar(radar, esc) {
     + '<div><span>Regime</span><b>' + esc(regime.status || 'UNKNOWN') + '</b></div>'
     + '<div><span>Data complete</span><b>' + esc(completeness) + '</b></div>'
     + '</div>'
+    + '<div class="fleet-section-title">Radar Pipeline</div>'
+    + '<div class="trading-radar__pipeline">' + pipelineHtml + '</div>'
     + '<div class="trading-radar__leaderboard"><div class="fleet-section-title">Candidate Leaderboard</div>'
     + '<table class="fleet-table trading-radar__table"><thead><tr><th>Symbol</th><th>Stage</th><th>Setup</th><th>Conf</th><th>Reason</th><th>Risk</th></tr></thead><tbody>'
     + rowHtml
     + '</tbody></table></div>';
 
   html += '<div class="trading-radar__cols">';
-  html += '<div><span>Selected Candidate</span>';
+  html += '<div><span>Selected Candidate Detail</span>';
   if (selected) {
     html += '<div class="trading-radar__selected">'
       + '<b>' + esc(selected.symbol || '--') + '</b> <em>' + esc(selected.stage || '--') + '</em>'
@@ -6020,6 +6032,20 @@ function _renderTradingRadar(radar, esc) {
       + (detailReasons.length ? '<ul>' + detailReasons.map((r) => '<li>' + esc(r) + '</li>').join('') + '</ul>' : '<p>--</p>');
   } else {
     html += '<p>No selected setup.</p>';
+  }
+  html += '</div>';
+
+  html += '<div><span>Entry Guidance</span>';
+  if (selected) {
+    html += '<ul>'
+      + '<li>entryType: <b>' + esc(selected.entryType || '--') + '</b></li>'
+      + '<li>entryZone: ' + esc(dz ? (dz.low + ' - ' + dz.high) : '--') + '</li>'
+      + '<li>invalidationLevel: ' + esc(selected.invalidationLevel != null ? selected.invalidationLevel : '--') + '</li>'
+      + '<li>suggestedStop: ' + esc(selected.suggestedStop != null ? selected.suggestedStop : '--') + '</li>'
+      + '<li>time validity: 15-30 minutes or next public snapshot</li>'
+      + '</ul>';
+  } else {
+    html += '<p>No entry-ready setup. Earlier stages are watch-only.</p>';
   }
   html += '</div>';
 
@@ -6046,8 +6072,24 @@ function _renderTradingRadar(radar, esc) {
     + '<li>Missing: ' + esc(missing.join(', ') || 'none') + '</li>'
     + (detailFlags.length ? detailFlags.slice(0, 4).map((f) => '<li>Flag: ' + esc(f) + '</li>').join('') : '<li>Flags: none</li>')
     + '</ul></div>';
+
+  html += '<div><span>Telegram Alert Status</span>'
+    + '<ul>'
+    + '<li>Mode: <b>' + esc(telegram.mode || 'ENTRY_READY_ONLY') + '</b></li>'
+    + '<li>Last sent: ' + esc(telegram.lastSentAt || '--') + '</li>'
+    + '<li>Sent count: ' + esc(telegram.sentCount != null ? telegram.sentCount : 0) + '</li>'
+    + '<li>Cooldown: ' + esc(telegram.cooldownMs != null ? Math.round(Number(telegram.cooldownMs) / 60000) + 'm' : '60m') + '</li>'
+    + '<li>Error: ' + esc(telegram.lastError || 'none') + '</li>'
+    + '</ul></div>';
   html += '</div></div>';
   return html;
+}
+
+function renderTradingRadarPanel() {
+  const root = document.getElementById('trading-radar-root');
+  if (!root) return;
+  const radar = Fleet && Fleet.data ? Fleet.data.tradingRadar : null;
+  root.innerHTML = _renderTradingRadar(radar, _esc);
 }
 
 // Position rows to render, with stale/duplicate "open" rows removed (spec 3). A
@@ -6590,8 +6632,6 @@ function renderFleet() {
           + '</div>';
       })() : '')
     + '</div>';
-
-  html += _renderTradingRadar(data.tradingRadar, _e);
 
   if (!newEntriesAllowed) {
     html += '<div class="fleet-error-panel fleet-error-panel--danger">'

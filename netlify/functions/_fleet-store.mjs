@@ -17,6 +17,27 @@ let _backendName = 'memory';
 let _storeError = null; // last safe diagnostic message (no secrets)
 const _mem = new Map();
 
+function emptyTradingRadar(nowIso = null) {
+  return {
+    updatedAt: nowIso,
+    source: 'uninitialized',
+    dataFreshnessMs: null,
+    status: 'SCANNING',
+    universeDiagnostics: { fetched: 0, liquid: 0, spreadOk: 0, depthOk: 0, rejected: {}, rejectedSamples: [] },
+    marketRegime: { status: 'UNKNOWN', score: 50, blocksMeanReversion: false, reasons: ['no market data yet'], breadthPct: null, btc: null, eth: null },
+    pipeline: { NO_SETUP: 0, WATCH: 0, LONG_FLUSH_CONFIRMED: 0, STABILIZING: 0, SQUEEZE_CONFIRMED: 0, ENTRY_READY: 0 },
+    candidates: [],
+    watchlist: [],
+    entryReady: [],
+    selected: null,
+    exitGuidance: null,
+    telegramAlertState: { mode: 'ENTRY_READY_ONLY', cooldownMs: 60 * 60 * 1000, sent: {}, lastSentAt: null, lastError: null, sentCount: 0 },
+    missingSignals: [],
+    dataCompleteness: 0,
+    lastError: null,
+  };
+}
+
 // Explicit Blobs credentials, used only if auto-context injection is missing
 // (e.g. a manual/CLI deploy). Never logged.
 function blobCredsFromEnv() {
@@ -52,7 +73,7 @@ function emptyFleet() {
 
     autoTrader: null,      // operator-requested autonomous mode/status; no secrets, no order execution
     autoMarketSnapshot: null, // latest sanitized PUBLIC market snapshot posted by a local worker (no secrets, no orders)
-    tradingRadar: null,    // read-only advisory panel state; no orders, no intents, no gates
+    tradingRadar: emptyTradingRadar(), // read-only advisory panel state; no orders, no intents, no gates
     lastRegime: null,     // { regime, entriesAllowed, reason[], metrics, updatedAt }
     updatedAt: null,
   };
@@ -71,6 +92,22 @@ function normalize(data) {
   if (!Array.isArray(base.events)) base.events = [];
   if (!Array.isArray(base.liveAuditEvents)) base.liveAuditEvents = [];
   if (typeof base.globalKillSwitch !== 'boolean') base.globalKillSwitch = false;
+  if (!base.tradingRadar || typeof base.tradingRadar !== 'object' || Array.isArray(base.tradingRadar)) {
+    base.tradingRadar = emptyTradingRadar();
+  } else {
+    const radar = { ...emptyTradingRadar(), ...base.tradingRadar };
+    radar.universeDiagnostics = { ...emptyTradingRadar().universeDiagnostics, ...(base.tradingRadar.universeDiagnostics || {}) };
+    radar.marketRegime = { ...emptyTradingRadar().marketRegime, ...(base.tradingRadar.marketRegime || {}) };
+    radar.pipeline = { ...emptyTradingRadar().pipeline, ...(base.tradingRadar.pipeline || {}) };
+    radar.telegramAlertState = { ...emptyTradingRadar().telegramAlertState, ...(base.tradingRadar.telegramAlertState || {}) };
+    if (!radar.telegramAlertState.sent || typeof radar.telegramAlertState.sent !== 'object' || Array.isArray(radar.telegramAlertState.sent)) {
+      radar.telegramAlertState.sent = {};
+    }
+    for (const k of ['candidates', 'watchlist', 'entryReady', 'missingSignals']) {
+      if (!Array.isArray(radar[k])) radar[k] = [];
+    }
+    base.tradingRadar = radar;
+  }
   return base;
 }
 

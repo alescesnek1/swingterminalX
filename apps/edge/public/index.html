@@ -144,6 +144,7 @@
     <div id="tabs">
       <div class="tab on" onclick="sv('scanner',this)">SCANNER</div>
       <div class="tab" onclick="sv('bot',this)" data-target="view-bot" title="Paper Trading Sandbox - read-only safety mode">BOT FEED <span class="cnt pb-tab-pip" id="pb-tab-pip"></span></div>
+      <div class="tab" onclick="sv('radar',this)" data-target="view-radar">TRADING RADAR</div>
       <div class="tab" onclick="sv('alerts',this)">ALERTS <span class="cnt" id="abadge"></span></div>
       <div class="tab" onclick="sv('livefeed',this)">LIVE FEED <span class="lf-tab-badge" id="lf-unread"></span></div>
       <div class="tab" onclick="sv('charts',this)">TOP CHARTS</div>
@@ -301,6 +302,19 @@
         </div>
         <div class="bot-ledger" id="pb-ledger">
           <div class="bot-ledger__empty">No closed paper trades yet. Simulated signals appear in Quant Analyst feed above.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TRADING RADAR - independent advisory panel. No orders, no execution intents. -->
+    <div id="v-radar" class="view">
+      <div id="trading-radar-root" class="trading-radar-page">
+        <div class="trading-radar trading-radar--standalone">
+          <div class="trading-radar__head">
+            <div><div class="trading-radar__kicker">TRADING RADAR</div><div class="trading-radar__state">LOADING</div></div>
+            <div class="trading-radar__badge">ADVISORY ONLY</div>
+          </div>
+          <div class="trading-radar__copy">Waiting for fleet public-market snapshot.</div>
         </div>
       </div>
     </div>
