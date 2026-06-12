@@ -22,7 +22,7 @@ test('UI renders Trading RADAR as an independent top-level panel, not inside Bot
 test('UI renders the required Trading RADAR advisory sections', () => {
   assert.match(indexHtml, /TRADING RADAR/);
   assert.match(terminalJs, /ADVISORY ONLY/);
-  assert.match(terminalJs, /Radar Pipeline/);
+  assert.match(terminalJs, /Radar Matrix/);
   assert.match(terminalJs, /Focus Candidate/);
   assert.match(terminalJs, /What to watch now/);
   assert.match(terminalJs, /<details class="radar-diagnostics"/);

@@ -6000,72 +6000,86 @@ function _fleetRadarScoreClass(score) {
 
 function _renderTradingRadar(radar, esc) {
   radar = radar || {};
-  const candidates = Array.isArray(radar.candidates) ? radar.candidates.slice(0, 10) : [];
+  let candidates = Array.isArray(radar.candidates) ? radar.candidates : [];
+  
+  const activeFilter = window._radarFilter || 'ALL';
+  if (activeFilter === 'CLOSEST') candidates = candidates.sort((a,b) => b.distanceToEntryReadyScore - a.distanceToEntryReadyScore);
+  else if (activeFilter === 'ENTRY_READY') candidates = candidates.filter(c => c.actionability === 'ENTRY_READY');
+
   const selected = radar.selected || candidates[0] || null;
   const entryReady = Array.isArray(radar.entryReady) ? radar.entryReady : [];
-  const watchlist = Array.isArray(radar.watchlist) ? radar.watchlist : [];
   const diag = radar.universeDiagnostics || {};
-  const regime = radar.marketRegime || {};
-  const exit = radar.exitGuidance || {};
-  const pipeline = radar.pipeline || {};
   const telegram = radar.telegramAlertState || {};
   const missing = Array.isArray(radar.missingSignals) ? radar.missingSignals.slice(0, 8) : [];
   const stale = Number(radar.dataFreshnessMs) > 120000;
-  const status = radar.status || (radar.lastError ? 'ERROR' : (entryReady.length ? 'ENTRY_READY' : (watchlist.length ? 'WATCHING' : 'SCANNING')));
-  const source = radar.source || 'no_public_snapshot';
-  const completeness = radar.dataCompleteness != null ? radar.dataCompleteness + '%' : '--';
-  // Generate stage columns
-  const stages = [
-    { key: 'WATCH', title: 'WATCH' },
-    { key: 'LONG_FLUSH_CONFIRMED', title: 'LONG FLUSH' },
-    { key: 'STABILIZING', title: 'STABILIZING' },
-    { key: 'SQUEEZE_CONFIRMED', title: 'SQUEEZE / ABSORPTION' },
-    { key: 'ENTRY_READY', title: 'ENTRY READY' }
-  ];
+  const status = radar.status || (radar.lastError ? 'ERROR' : (entryReady.length ? 'ENTRY_READY' : (candidates.length ? 'WATCHING' : 'SCANNING')));
 
-  const pipelineColumnsHtml = stages.map(stage => {
-    const stageCandidates = Array.isArray(radar.candidates) ? radar.candidates.filter(c => c.stage === stage.key) : [];
-    
-    let cardsHtml = stageCandidates.length ? stageCandidates.map(c => {
-      const flags = Array.isArray(c.riskFlags) && c.riskFlags.length ? c.riskFlags.slice(0, 1).join(', ') : 'none';
-      const sourceSig = Array.isArray(c.sourceSignals) && c.sourceSignals.length ? c.sourceSignals[0] : '--';
-      const c12 = c.diagnostics && c.diagnostics.change12hPct != null ? c.diagnostics.change12hPct : '--';
-      const c1 = c.diagnostics && c.diagnostics.change1hPct != null ? c.diagnostics.change1hPct : '--';
-      return `<div class="radar-card radar-card--${c.actionability}">
-        <div class="radar-card__head"><b>${esc(c.symbol)}</b> <span>Dist: ${c.distanceToEntryReadyScore}</span></div>
-        <div class="radar-card__metrics">
-          <span>Score: <b class="radar-score ${_fleetRadarScoreClass(c.setupQualityScore)}">${c.setupQualityScore}</b></span>
-          <span>Conf: <b>${c.confidence}</b></span>
-          <span>1h: <b class="${c1 > 0 ? 'pos' : (c1 < 0 ? 'neg' : '')}">${c1}%</b></span>
-        </div>
-        <div class="radar-card__detail">
-          <div><span>Sig:</span> ${esc(sourceSig)}</div>
-          <div><span>Next:</span> ${esc(c.nextRequiredConfirmation || '--')}</div>
-          <div><span>Risk:</span> ${esc(flags)}</div>
-        </div>
-      </div>`;
-    }).join('') : '<div class="fleet-empty">No candidates</div>';
+  const maxRows = 20;
+  const rowsToRender = candidates.slice(0, maxRows);
+  
+  const pillStatus = (s) => {
+    if (s === 'PASS') return '<span class="radar-pill radar-pill-pass">✓</span>';
+    if (s === 'FAIL') return '<span class="radar-pill radar-pill-fail">✕</span>';
+    if (s === 'MISSING DATA') return '<span class="radar-pill radar-pill-missing">?</span>';
+    return '<span class="radar-pill radar-pill-wait">…</span>';
+  };
+  
+  const matrixHtml = rowsToRender.length ? rowsToRender.map(c => {
+    const cl = c.conditionChecklist || {};
+    return `<tr class="radar-matrix-row ${c.actionability === 'ENTRY_READY' ? 'radar-matrix-row--ready' : ''}" onclick="window._radarSelect('${esc(c.symbol)}')">
+      <td><b>${esc(c.symbol)}</b></td>
+      <td><span class="radar-badge-${c.actionability}">${esc(c.actionability)}</span></td>
+      <td>${c.distanceToEntryReadyScore}</td>
+      <td><b class="${_fleetRadarScoreClass(c.setupQualityScore)}">${c.setupQualityScore}</b></td>
+      <td><b>${c.confidence}</b></td>
+      <td>${pillStatus((cl.relativeDump || {}).status)}</td>
+      <td>${pillStatus((cl.longFlush || {}).status)}</td>
+      <td>${pillStatus((cl.stabilization || {}).status)}</td>
+      <td>${pillStatus((cl.absorption || {}).status)}</td>
+      <td>${pillStatus((cl.squeezeOrReclaim || {}).status)}</td>
+      <td>${pillStatus((cl.marketRegime || {}).status)}</td>
+      <td>${esc((cl.entryVariant || {}).type || '--')}</td>
+      <td class="radar-zone-td">${c.entryZone ? esc(c.entryZone.low) + '–' + esc(c.entryZone.high) : '--'}</td>
+      <td class="radar-zone-td">${esc(c.suggestedStop || '--')}</td>
+      <td class="radar-blocked-by">${esc(c.blockedBy || '--')}</td>
+      <td class="radar-telegram-td">${c.telegramEligible ? '✈️' : '⛔'}</td>
+    </tr>`;
+  }).join('') : `<tr><td colspan="16" class="fleet-empty">No candidates match current filter.</td></tr>`;
 
-    return `<div class="radar-pipeline-col">
-      <div class="radar-pipeline-col__head">${stage.title} <b>${stageCandidates.length}</b></div>
-      <div class="radar-pipeline-col__body">${cardsHtml}</div>
-    </div>`;
-  }).join('');
+  const filtersHtml = `<div class="radar-filters">
+    <button onclick="window._radarFilter='ALL'; renderTradingRadarPanel()" class="${activeFilter==='ALL'?'active':''}">All</button>
+    <button onclick="window._radarFilter='CLOSEST'; renderTradingRadarPanel()" class="${activeFilter==='CLOSEST'?'active':''}">Closest to Entry</button>
+    <button onclick="window._radarFilter='ENTRY_READY'; renderTradingRadarPanel()" class="${activeFilter==='ENTRY_READY'?'active':''}">Entry Ready</button>
+  </div>`;
+
+  const matrixTableHtml = `<div class="radar-matrix-wrap"><table class="radar-matrix">
+    <thead>
+      <tr>
+        <th>Symbol</th><th>Act.</th><th>Dist</th><th>Score</th><th>Conf</th>
+        <th>Dump</th><th>Flush</th><th>Stabil.</th><th>Absorb.</th><th>Reclaim</th><th>Regime</th>
+        <th>Entry</th><th>Zone</th><th>Stop</th><th>Blocked By</th><th>Telegram</th>
+      </tr>
+    </thead>
+    <tbody>${matrixHtml}</tbody>
+  </table></div>`;
 
   // What to watch now (nearest to entry)
   const watchNowCandidates = Array.isArray(radar.candidates) 
     ? [...radar.candidates]
-        .filter(c => c.stage !== 'ENTRY_READY' && c.stage !== 'NO_SETUP')
+        .filter(c => c.actionability !== 'ENTRY_READY' && c.stage !== 'NO_SETUP')
         .sort((a,b) => b.distanceToEntryReadyScore - a.distanceToEntryReadyScore)
         .slice(0, 3) 
     : [];
 
   const watchNowHtml = watchNowCandidates.length ? watchNowCandidates.map(c => {
-    return `<div class="radar-watch-card">
-      <b>${esc(c.symbol)}</b> (Score: ${c.setupQualityScore})<br/>
-      <span>Next confirmation: <b>${esc(c.nextRequiredConfirmation || '--')}</b></span>
+    return `<div class="radar-watch-card" onclick="window._radarSelect('${esc(c.symbol)}')">
+      <div class="radar-watch-card__head"><b>${esc(c.symbol)}</b> <span class="radar-badge-${c.actionability}">${esc(c.actionability)}</span></div>
+      <div class="radar-watch-card__metrics">Dist: ${c.distanceToEntryReadyScore} | Score: ${c.setupQualityScore} | Conf: ${c.confidence}</div>
+      <div class="radar-watch-card__blocker"><b>Blocked By:</b> ${esc(c.blockedBy || '--')}</div>
+      <div class="radar-watch-card__conf"><b>Next:</b> ${esc(c.nextRequiredConfirmation || '--')}</div>
+      ${c.entryZone ? `<div class="radar-watch-card__zone">Zone: ${esc(c.entryZone.low)}–${esc(c.entryZone.high)}</div>` : ''}
     </div>`;
-  }).join('') : '<p class="fleet-empty">No candidates nearing entry.</p>';
+  }).join('') : '<div class="fleet-empty">No candidates nearing entry.</div>';
 
   // Focus Candidate
   let focusHtml = '';
@@ -6073,48 +6087,57 @@ function _renderTradingRadar(radar, esc) {
     const actLabel = selected.actionability === 'ENTRY_READY' ? 'ENTRY READY' : 
                      selected.actionability === 'NEAR_ENTRY' ? 'NEAR ENTRY — WAITING FOR CONFIRMATION' :
                      selected.actionability === 'INVALIDATED' ? 'INVALIDATED' : 'NOT ACTIONABLE YET';
-                     
-    focusHtml = `<div class="trading-radar__selected">
-      <div class="radar-focus-title"><b>${esc(selected.symbol || '--')}</b> <em>${esc(selected.stage || '--')}</em> <span class="radar-badge-${selected.actionability}">${actLabel}</span></div>
+    
+    const cl = selected.conditionChecklist || {};
+    const checklistHtml = Object.keys(cl).map(k => `<li>${pillStatus(cl[k].status)} <b>${k}</b>: ${esc(cl[k].reason)}</li>`).join('');
+
+    focusHtml = `<div class="radar-focus-card">
+      <div class="radar-focus-title"><b>${esc(selected.symbol || '--')}</b> <span class="radar-badge-${selected.actionability}">${actLabel}</span></div>
       <div class="radar-focus-grid">
-        <div><span>Why it is here:</span><p>${esc((selected.reasons && selected.reasons[0]) || '--')}</p></div>
-        <div><span>What confirms next stage:</span><p>${esc(selected.nextRequiredConfirmation || 'none')}</p></div>
-        <div><span>What invalidates setup:</span><p>${esc((selected.riskFlags && selected.riskFlags[0]) || '--')}</p></div>
+        <div><span>Condition Checklist</span><ul class="radar-checklist">${checklistHtml}</ul></div>
+        <div><span>What confirms next stage</span><p>${esc(selected.nextRequiredConfirmation || 'none')}</p></div>
+        <div><span>What invalidates setup</span><p>${esc((selected.riskFlags && selected.riskFlags[0]) || '--')}</p></div>
       </div>
-      ${selected.actionability === 'ENTRY_READY' && dz ? `<p>Suggested entry zone: <b>${esc(dz.low)} - ${esc(dz.high)}</b></p>` : ''}
-      <p>Suggested stop / invalidation: <b>${esc(selected.suggestedStop || '--')}</b> / <b>${esc(selected.invalidationLevel || '--')}</b></p>
-      <p>Missing data: <b>${esc((selected.missingSignals || []).join(', ') || 'none')}</b></p>
+      <div class="radar-focus-levels">
+        ${selected.actionability === 'ENTRY_READY' && selected.entryZone ? `<div><span>Suggested entry zone</span><b>${esc(selected.entryZone.low)}–${esc(selected.entryZone.high)}</b></div>` : ''}
+        <div><span>Suggested stop</span><b>${esc(selected.suggestedStop || '--')}</b></div>
+        <div><span>Invalidation Level</span><b>${esc(selected.invalidationLevel || '--')}</b></div>
+      </div>
+      <p class="radar-focus-missing">Missing data: <b>${esc((selected.missingSignals || []).join(', ') || 'none')}</b></p>
     </div>`;
   } else {
-    focusHtml = '<p class="fleet-empty">No selected setup.</p>';
+    focusHtml = '<div class="fleet-empty radar-focus-card">No selected setup. Click a row to focus.</div>';
   }
 
+  const pipeline = radar.pipeline || {};
   let html = '<div class="trading-radar trading-radar--standalone">'
     + '<div class="trading-radar__head">'
-    + '<div><div class="trading-radar__kicker">RADAR — mean reversion setup pipeline</div><div class="trading-radar__state">' + esc(status) + '</div></div>'
+    + '<div><div class="trading-radar__kicker">TRADING RADAR</div><div class="trading-radar__state">' + esc(status) + '</div></div>'
     + '<div class="trading-radar__badge">ADVISORY ONLY</div>'
     + '</div>'
-    + '<div class="trading-radar__copy">Read-only mean-reversion cockpit. It never creates orders, execution intents, or live trading gate changes.</div>'
     + (stale ? '<div class="trading-radar__warn">PUBLIC SNAPSHOT STALE</div>' : '')
     + (radar.lastError ? '<div class="trading-radar__warn">' + esc(radar.lastError) + '</div>' : '')
-    + '<div class="fleet-live-readiness__caps trading-radar__grid">'
-    + '<div><span>Status</span><b>' + esc(status) + '</b></div>'
-    + '<div><span>Scanner Rows</span><b>' + esc(radar.scannerCandidatesIngested || 0) + '</b></div>'
-    + '<div><span>Candidates Built</span><b>' + esc(Array.isArray(radar.candidates) ? radar.candidates.length : 0) + '</b></div>'
-    + '<div><span>Entry Ready</span><b>' + esc(entryReady.length) + '</b></div>'
+    + '<div class="radar-top-strip">'
+    + '<div><span>Top Watch</span><b>' + esc(pipeline.WATCH || 0) + '</b></div>'
+    + '<div><span>Near Entry</span><b>' + esc(pipeline.SQUEEZE_CONFIRMED || 0) + '</b></div>'
+    + '<div><span>Blocked by Absorption</span><b>' + esc(pipeline.STABILIZING || 0) + '</b></div>'
+    + '<div><span>ENTRY_READY</span><b>' + esc(entryReady.length) + '</b></div>'
     + '<div><span>Telegram Mode</span><b>' + esc(telegram.mode || 'ENTRY_READY_ONLY') + '</b></div>'
-    + '<div><span>Freshness</span><b>' + esc(_fleetFmtRadarAge(radar.dataFreshnessMs)) + '</b></div>'
     + '</div>'
-    + '<div class="fleet-section-title">Radar Pipeline</div>'
-    + '<div class="radar-pipeline-board">' + pipelineColumnsHtml + '</div>'
-    + '<div class="trading-radar__cols">'
-    + '<div><span>Focus Candidate</span>' + focusHtml + '</div>'
-    + '<div><span>What to watch now</span><div class="radar-watch-list">' + watchNowHtml + '</div></div>'
+    + '<div class="radar-top3-section">'
+    + '  <div class="radar-section-title">Top 3 Closest to Entry</div>'
+    + '  <div class="radar-watch-list">' + watchNowHtml + '</div>'
+    + '</div>'
+    + '<div class="radar-section-title">Radar Matrix</div>'
+    + filtersHtml
+    + matrixTableHtml
+    + '<div class="radar-focus-section">'
+    + '  <div class="radar-section-title">Focus Candidate</div>'
+    +    focusHtml
     + '</div>'
     + '<details class="radar-diagnostics"><summary>Diagnostics & Logs</summary>'
     + '<ul>'
     + '<li>Scanner Candidates Ingested: ' + esc(radar.scannerCandidatesIngested || 0) + '</li>'
-    + '<li>Scanner Context Sanitzed/Stored: ' + esc(radar.scannerCandidatesSanitized || radar.scannerCandidatesIngested || 0) + '</li>'
     + '<li>Snapshot Symbols Ingested: ' + esc(radar.snapshotSymbolsIngested || 0) + '</li>'
     + '<li>Radar Candidates Built: ' + esc(radar.candidates ? radar.candidates.length : 0) + '</li>'
     + '<li>Telegram Eligible Count: ' + esc(entryReady.length) + '</li>'
@@ -6129,17 +6152,25 @@ function _renderTradingRadar(radar, esc) {
   
   html += '</details>';
 
-  html += '<div><span>Telegram Alert Status</span>'
+  html += '<details class="radar-diagnostics radar-telegram-diagnostics"><summary>Telegram Alert Status</summary>'
     + '<ul>'
     + '<li>Mode: <b>' + esc(telegram.mode || 'ENTRY_READY_ONLY') + '</b></li>'
     + '<li>Last sent: ' + esc(telegram.lastSentAt || '--') + '</li>'
     + '<li>Sent count: ' + esc(telegram.sentCount != null ? telegram.sentCount : 0) + '</li>'
-    + '<li>Cooldown: ' + esc(telegram.cooldownMs != null ? Math.round(Number(telegram.cooldownMs) / 60000) + 'm' : '60m') + '</li>'
+    + '<li>Legacy Blocked Count: ' + esc(telegram.legacyBlockedCount || 0) + '</li>'
+    + '<li>Last Skipped Reason: ' + esc(telegram.lastRadarSkippedReason || 'none') + '</li>'
     + '<li>Error: ' + esc(telegram.lastError || 'none') + '</li>'
-    + '</ul></div>';
+    + '</ul></details>';
   html += '</div></div>';
   return html;
 }
+
+window._radarSelect = function(sym) {
+  const radar = window.Fleet && window.Fleet.data ? window.Fleet.data.tradingRadar : null;
+  if (!radar || !radar.candidates) return;
+  const c = radar.candidates.find(x => x.symbol === sym);
+  if (c) { radar.selected = c; renderTradingRadarPanel(); }
+};
 
 function renderTradingRadarPanel() {
   const root = document.getElementById('trading-radar-root');

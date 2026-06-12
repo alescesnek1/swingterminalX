@@ -311,72 +311,118 @@ export function classifyRadarStage(market, regime = evaluateMarketRegime([])) {
   const riskFlags = [];
   let stage = RADAR_STAGES.NO_SETUP;
 
-  const isScannerWatch = (market.scannerScore >= 7 || (market.scannerHot && market.scannerHot >= 70) || market.scannerPanic > 50 || s.isScannerFlush || s.isScannerBuy || s.c12 <= -4 || s.c24 <= -6);
+  const cl = {
+    relativeDump: { status: 'WAIT', reason: 'requires relative dump or panic', value: s.c24 },
+    longFlush: { status: 'WAIT', reason: 'requires flush confirmation', value: s.volumeSpike },
+    stabilization: { status: 'WAIT', reason: 'requires new lows paused', value: s.c1 },
+    absorption: { status: 'WAIT', reason: 'requires aggressive sell absorption', value: s.absorptionScore },
+    squeezeOrReclaim: { status: 'WAIT', reason: 'requires structural reclaim', value: s.squeeze },
+    marketRegime: { status: regime.blocksMeanReversion ? 'FAIL' : 'PASS', reason: regime.blocksMeanReversion ? 'regime breakdown' : 'supportive', value: regime.score },
+    entryVariant: { status: 'WAIT', type: 'NONE', reason: 'waiting for entry trigger' },
+    invalidation: { status: 'WAIT', level: null, reason: 'waiting for support level' }
+  };
 
+  const isScannerWatch = (market.scannerScore >= 7 || (market.scannerHot && market.scannerHot >= 70) || market.scannerPanic > 50 || s.isScannerFlush || s.isScannerBuy || s.c12 <= -4 || s.c24 <= -6);
   if ((s.watchDrop && s.volumeSpike >= 1.2) || isScannerWatch) {
     stage = RADAR_STAGES.WATCH;
-    if (isScannerWatch) reasons.push(`scanner context promoted to watch (score ${market.scannerScore || 0}, panic ${market.scannerPanic || 0})`);
-    else reasons.push(`relative flush watched (${round(s.c24, 2)}% 24h, volume x${round(s.volumeSpike, 1)})`);
+    cl.relativeDump.status = 'PASS';
+    cl.relativeDump.reason = isScannerWatch ? `scanner context (score ${market.scannerScore || 0})` : `relative drop (${round(s.c24, 1)}%, vol x${round(s.volumeSpike, 1)})`;
+    reasons.push(cl.relativeDump.reason);
   }
 
   const isScannerLongFlush = s.isScannerFlush || ((s.c12 <= -4 || s.c24 <= -6) && (market.scannerPanic > 50 || market.scannerHot > 70 || s.volumeSpike >= 1.2));
-
-  if (stage === RADAR_STAGES.WATCH && ( (s.panicFlush && s.fundingOk && s.wickOk && (s.oiFlush || s.bidsOk || s.c24 <= -8 || s.isScannerBuy)) || isScannerLongFlush )) {
+  if (stage === RADAR_STAGES.WATCH && ((s.panicFlush && s.fundingOk && s.wickOk && (s.oiFlush || s.bidsOk || s.c24 <= -8 || s.isScannerBuy)) || isScannerLongFlush)) {
     stage = RADAR_STAGES.LONG_FLUSH_CONFIRMED;
-    reasons.push(isScannerLongFlush ? 'scanner FLUSH tag or heavy drawdown confirmed' : 'panic selling/long flush confirmed');
+    cl.longFlush.status = 'PASS';
+    cl.longFlush.reason = isScannerLongFlush ? 'scanner FLUSH tag or heavy drawdown' : 'panic selling with funding reset';
+    reasons.push(cl.longFlush.reason);
   }
 
   const isScannerStabilizing = ((s.c1 > 0 || s.c4 > 0) && (s.c12 < -2 || s.c24 < -2)) || s.isScannerBuy;
-
-  if (stage === RADAR_STAGES.LONG_FLUSH_CONFIRMED && ( (s.noNewLows && s.rangeFormed && (s.sellFade || s.bidsOk || s.lateShorts)) || isScannerStabilizing )) {
+  if (stage === RADAR_STAGES.LONG_FLUSH_CONFIRMED && ((s.noNewLows && s.rangeFormed && (s.sellFade || s.bidsOk || s.lateShorts)) || isScannerStabilizing)) {
     stage = RADAR_STAGES.STABILIZING;
-    reasons.push(isScannerStabilizing ? 'scanner BUY/RECLAIM or short-term improvement after dump' : 'new lows paused and local range formed');
+    cl.stabilization.status = 'PASS';
+    cl.stabilization.reason = isScannerStabilizing ? 'short-term improvement after dump' : 'range formed, no new lows';
+    reasons.push(cl.stabilization.reason);
+  }
+
+  // Variant B: Absorption Path Logic
+  let absorptionProxies = 0;
+  if (s.c12 <= -4 && s.c1 > 0) absorptionProxies++; // aggressive sells fail proxy
+  if (s.tightSpread && s.isScannerBuy) absorptionProxies++; // bid absorption proxy
+  if (s.c4 > 0 && market.scannerScore >= 5) absorptionProxies++; // delta improves proxy
+
+  const realAbsorptionData = market.absorptionScore != null || market.bidDepthRebuildPct != null;
+  const isAbsorption = s.absorptionConfirmed || (absorptionProxies >= 2 && realAbsorptionData) || absorptionProxies >= 3;
+  
+  if (stage === RADAR_STAGES.STABILIZING) {
+    if (realAbsorptionData) {
+      if (isAbsorption) {
+        cl.absorption.status = 'PASS';
+        cl.absorption.reason = 'aggressive sells absorbed at support';
+      } else {
+        cl.absorption.status = 'WAIT';
+        cl.absorption.reason = 'awaiting absorption confirmation';
+      }
+    } else {
+      cl.absorption.status = isAbsorption ? 'PASS' : 'MISSING DATA';
+      cl.absorption.reason = isAbsorption ? 'absorption proxies passed' : 'lacking order book / delta data';
+    }
   }
 
   const hasRecovery = (s.c1 > 1.5 || s.c4 > 2);
   const hasDrawdown = (s.c12 < -3 || s.c24 < -4);
-  
-  // Calculate confidence earlier so we can use it for SQUEEZE rules
+  const isSqueeze = (s.squeeze || (s.isScannerBuy && hasRecovery && hasDrawdown)) && !regime.blocksMeanReversion;
+
+  if (stage === RADAR_STAGES.STABILIZING && (isSqueeze || cl.absorption.status === 'PASS')) {
+    stage = RADAR_STAGES.SQUEEZE_CONFIRMED;
+    if (isSqueeze) {
+      cl.squeezeOrReclaim.status = 'PASS';
+      cl.squeezeOrReclaim.reason = 'reclaim and squeeze confirmed';
+    } else {
+      cl.squeezeOrReclaim.status = 'WAIT';
+      cl.squeezeOrReclaim.reason = 'absorption passed, awaiting reclaim';
+    }
+    reasons.push('setup structural confirmation');
+  }
+
+  // Confidence Calculation
   let confidence = clamp(35 + (stage === RADAR_STAGES.NO_SETUP ? 0 : 10)
     + (market.depthUsd != null ? 8 : 0)
     + (s.oiChange != null ? 6 : 0)
     + (s.funding != null ? 6 : 0)
     + (s.shortLiq != null || s.longLiquidationSpike != null ? 6 : 0)
-    + (market.spreadPct != null ? 5 : 0)
+    + (s.tightSpread ? 5 : 0)
     + (market.scannerScore != null ? clamp((market.scannerScore - 5) * 3, 0, 15) : 0)
     + (s.isScannerBuy ? 8 : (s.isScannerFlush ? 5 : 0))
-    - (regime.blocksMeanReversion ? 15 : 0));
-
-  const isValidSqueeze = (s.squeeze || (s.isScannerBuy && hasRecovery && hasDrawdown)) && !regime.blocksMeanReversion && confidence >= 50;
-
-  if (stage === RADAR_STAGES.STABILIZING && isValidSqueeze) {
-    stage = RADAR_STAGES.SQUEEZE_CONFIRMED;
-    reasons.push('reclaim/squeeze confirmation with high confidence');
-  }
-
-  let nextRequiredConfirmation = null;
-  if (stage === RADAR_STAGES.WATCH) nextRequiredConfirmation = 'panic flush volume + OI flush';
-  if (stage === RADAR_STAGES.LONG_FLUSH_CONFIRMED) nextRequiredConfirmation = 'new lows paused + local range formed';
-  if (stage === RADAR_STAGES.STABILIZING) nextRequiredConfirmation = 'strong short-term recovery + reclaim + confidence > 50';
-  if (stage === RADAR_STAGES.SQUEEZE_CONFIRMED) nextRequiredConfirmation = 'retest held + aggressive sells absorbed';
+    - (regime.blocksMeanReversion ? 15 : 0)
+    - (!realAbsorptionData ? 10 : 0));
 
   let entryType = RADAR_ENTRY_TYPES.NONE;
-  if (stage === RADAR_STAGES.SQUEEZE_CONFIRMED && s.retestEntry) {
+  if (stage === RADAR_STAGES.SQUEEZE_CONFIRMED) {
+    if (cl.absorption.status === 'PASS') {
+      entryType = RADAR_ENTRY_TYPES.ABSORPTION;
+      cl.entryVariant.status = 'PASS';
+      cl.entryVariant.type = 'ABSORPTION_ENTRY';
+      cl.entryVariant.reason = 'absorption sequence validated';
+      reasons.push('support/liquidation low absorbed aggressive sells');
+    } else if (s.retestEntry) {
+      entryType = RADAR_ENTRY_TYPES.RECLAIM_RETEST;
+      cl.entryVariant.status = 'PASS';
+      cl.entryVariant.type = 'RECLAIM_RETEST';
+      cl.entryVariant.reason = 'reclaim retest held';
+    }
+  }
+
+  // Hard Gate
+  if (entryType !== RADAR_ENTRY_TYPES.NONE && cl.marketRegime.status === 'PASS' && confidence >= 75) {
     stage = RADAR_STAGES.ENTRY_READY;
-    entryType = RADAR_ENTRY_TYPES.RECLAIM_RETEST;
-    reasons.push('reclaim retest held with regime not breaking down');
-    nextRequiredConfirmation = 'none';
-  } else if (stage === RADAR_STAGES.STABILIZING && s.absorptionEntry) {
-    stage = RADAR_STAGES.ENTRY_READY;
-    entryType = RADAR_ENTRY_TYPES.ABSORPTION;
-    reasons.push('support/liquidation low absorbed aggressive sells');
-    nextRequiredConfirmation = 'none';
   }
 
   if (regime.blocksMeanReversion) riskFlags.push('market regime blocks mean reversion');
   if (s.funding != null && s.funding > 0.08) riskFlags.push('funding toxic/long crowded');
   if (s.oiChange != null && s.oiChange > 12) riskFlags.push('OI expansion may be leveraged crowding');
-  if (market.spreadPct != null && market.spreadPct > 0.08) riskFlags.push('spread above ideal');
+  if (!s.tightSpread) riskFlags.push('spread above ideal');
   if (stage === RADAR_STAGES.WATCH) riskFlags.push('falling knife risk until stabilization confirms');
 
   // Adjust confidence based on final stage
@@ -399,21 +445,41 @@ export function classifyRadarStage(market, regime = evaluateMarketRegime([])) {
     - (riskFlags.length * 3));
 
   let actionability = 'WATCH_ONLY';
-  if (stage === RADAR_STAGES.STABILIZING || stage === RADAR_STAGES.LONG_FLUSH_CONFIRMED) actionability = 'NEEDS_CONFIRMATION';
+  if (stage === RADAR_STAGES.LONG_FLUSH_CONFIRMED) actionability = 'NEEDS_STABILIZATION';
+  if (stage === RADAR_STAGES.STABILIZING) actionability = cl.absorption.status === 'WAIT' ? 'NEEDS_ABSORPTION' : 'NEEDS_CONFIRMATION';
   if (stage === RADAR_STAGES.SQUEEZE_CONFIRMED) actionability = 'NEAR_ENTRY';
   if (stage === RADAR_STAGES.ENTRY_READY) actionability = 'ENTRY_READY';
   if (regime.blocksMeanReversion && stage !== RADAR_STAGES.NO_SETUP) actionability = 'INVALIDATED';
+
+  let nextRequiredConfirmation = null;
+  if (actionability === 'WATCH_ONLY') nextRequiredConfirmation = 'needs long flush confirmation';
+  if (actionability === 'NEEDS_STABILIZATION') nextRequiredConfirmation = 'needs no-new-low for next 15m candle';
+  if (actionability === 'NEEDS_ABSORPTION') nextRequiredConfirmation = 'needs absorption: sellers fail to break liquidation low';
+  if (actionability === 'NEEDS_CONFIRMATION') nextRequiredConfirmation = 'needs structural reclaim or squeeze confirmation';
+  if (actionability === 'NEAR_ENTRY') nextRequiredConfirmation = confidence < 75 ? 'needs confidence >= 75 via strict data' : 'needs clear invalidation level / hold above entry zone';
+  if (actionability === 'INVALIDATED') nextRequiredConfirmation = 'needs BTC/ETH regime stay supportive';
 
   // Distance to entry ready score (0-100)
   let distanceToEntryReadyScore = clamp(
     baseScore + 
     (actionability === 'NEAR_ENTRY' ? 15 : 0) +
-    (s.bidsOk ? 4 : 0) +
+    (cl.absorption.status === 'PASS' ? 5 : 0) +
     (s.c1 > 0 ? 3 : 0) -
     (regime.blocksMeanReversion ? 40 : 0)
   );
-
   if (actionability === 'ENTRY_READY') distanceToEntryReadyScore = 100;
+
+  let blockedBy = null;
+  if (actionability !== 'ENTRY_READY') {
+    if (regime.blocksMeanReversion) blockedBy = 'regime breakdown';
+    else if (cl.relativeDump.status === 'WAIT') blockedBy = cl.relativeDump.reason;
+    else if (cl.longFlush.status === 'WAIT') blockedBy = cl.longFlush.reason;
+    else if (cl.stabilization.status === 'WAIT') blockedBy = cl.stabilization.reason;
+    else if (cl.absorption.status === 'WAIT') blockedBy = cl.absorption.reason;
+    else if (cl.squeezeOrReclaim.status === 'WAIT') blockedBy = cl.squeezeOrReclaim.reason;
+    else if (confidence < 75) blockedBy = 'confidence < 75';
+    else blockedBy = 'waiting for entry trigger';
+  }
 
   return {
     stage,
@@ -423,8 +489,10 @@ export function classifyRadarStage(market, regime = evaluateMarketRegime([])) {
     confidence: round(confidence, 0),
     entryType,
     nextRequiredConfirmation,
+    blockedBy,
     reasons: compactReasons(reasons.length ? reasons : ['no flush/stabilization sequence confirmed'], 8),
     riskFlags: compactReasons(riskFlags, 8),
+    conditionChecklist: cl,
     _signals: s,
   };
 }
@@ -770,8 +838,11 @@ export function evaluateTradingRadar({
         takeProfitCheckpoints: levels.takeProfitCheckpoints,
         reasons: stageInfo.reasons,
         riskFlags: stageInfo.riskFlags,
+        conditionChecklist: stageInfo.conditionChecklist,
         missingSignals: missingForMarket(m).slice(0, 8),
         nextRequiredConfirmation: stageInfo.nextRequiredConfirmation,
+        blockedBy: stageInfo.blockedBy,
+        telegramEligible: stageInfo.stage === RADAR_STAGES.ENTRY_READY && stageInfo.actionability === 'ENTRY_READY' && stageInfo.confidence >= 75 && levels.entryZone != null && (levels.invalidationLevel != null || levels.suggestedStop != null),
         sourceSignals: Array.isArray(m.scannerTags) ? m.scannerTags : [],
         diagnostics: {
           change24hPct: round(n(m.change24hPct ?? m.priceChangePercent), 2),
@@ -783,8 +854,8 @@ export function evaluateTradingRadar({
       };
     }).filter((c) => c.stage !== RADAR_STAGES.NO_SETUP)
       .sort((a, b) => {
-        const aAction = { ENTRY_READY: 5, NEAR_ENTRY: 4, NEEDS_CONFIRMATION: 3, WATCH_ONLY: 2, INVALIDATED: 1 }[a.actionability] || 0;
-        const bAction = { ENTRY_READY: 5, NEAR_ENTRY: 4, NEEDS_CONFIRMATION: 3, WATCH_ONLY: 2, INVALIDATED: 1 }[b.actionability] || 0;
+        const aAction = { ENTRY_READY: 7, NEAR_ENTRY: 6, NEEDS_ABSORPTION: 5, NEEDS_STABILIZATION: 4, NEEDS_CONFIRMATION: 4, NEEDS_FLUSH_CONFIRMATION: 3, WATCH_ONLY: 2, INVALIDATED: 1 }[a.actionability] || 0;
+        const bAction = { ENTRY_READY: 7, NEAR_ENTRY: 6, NEEDS_ABSORPTION: 5, NEEDS_STABILIZATION: 4, NEEDS_CONFIRMATION: 4, NEEDS_FLUSH_CONFIRMATION: 3, WATCH_ONLY: 2, INVALIDATED: 1 }[b.actionability] || 0;
         if (aAction !== bAction) return bAction - aAction;
         if (a.distanceToEntryReadyScore !== b.distanceToEntryReadyScore) return b.distanceToEntryReadyScore - a.distanceToEntryReadyScore;
         if (a.setupQualityScore !== b.setupQualityScore) return b.setupQualityScore - a.setupQualityScore;

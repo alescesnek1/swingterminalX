@@ -1739,3 +1739,83 @@ html,body{overflow-x:hidden;max-width:100vw}
 .panic-modal__band--extreme-sell {border-color:rgba(255,70,90,.55);background:linear-gradient(135deg,rgba(255,30,60,.10),rgba(180,10,40,.22));}
 .panic-modal__band--extreme-sell b {color:#FFB0C0;}
 .panic-modal__ft{padding:10px 18px;border-top:1px solid var(--b1);color:var(--txt3);font-size:10px;}
+
+ / *   R A D A R   H O R I Z O N T A L   M A T R I X   S T Y L E S   * / 
+ . r a d a r - m a t r i x - w r a p   {   w i d t h :   1 0 0 % ;   o v e r f l o w - x :   a u t o ;   m a r g i n - b o t t o m :   2 0 p x ;   } 
+ . r a d a r - m a t r i x   {   w i d t h :   1 0 0 % ;   b o r d e r - c o l l a p s e :   c o l l a p s e ;   t e x t - a l i g n :   l e f t ;   f o n t - s i z e :   1 1 p x ;   w h i t e - s p a c e :   n o w r a p ;   } 
+ . r a d a r - m a t r i x   t h ,   . r a d a r - m a t r i x   t d   {   p a d d i n g :   6 p x   8 p x ;   b o r d e r - b o t t o m :   1 p x   s o l i d   v a r ( - - b r d ) ;   } 
+ . r a d a r - m a t r i x   t h   {   c o l o r :   v a r ( - - t x t 3 ) ;   f o n t - w e i g h t :   5 0 0 ;   f o n t - s i z e :   1 0 p x ;   t e x t - t r a n s f o r m :   u p p e r c a s e ;   l e t t e r - s p a c i n g :   0 . 0 5 e m ;   b a c k g r o u n d :   r g b a ( 0 , 0 , 0 , 0 . 2 ) ;   } 
+ . r a d a r - r o w - - r e a d y   {   b a c k g r o u n d :   r g b a ( 0 ,   2 5 5 ,   1 2 8 ,   0 . 0 5 ) ;   } 
+ . r a d a r - r o w : h o v e r   {   b a c k g r o u n d :   r g b a ( 2 5 5 ,   2 5 5 ,   2 5 5 ,   0 . 0 3 ) ;   } 
+ 
+ / *   S t a t u s   M a r k e r s   * / 
+ . r a d a r - m k   {   d i s p l a y :   i n l i n e - b l o c k ;   p a d d i n g :   2 p x   6 p x ;   b o r d e r - r a d i u s :   3 p x ;   f o n t - w e i g h t :   7 0 0 ;   f o n t - s i z e :   9 p x ;   l e t t e r - s p a c i n g :   0 . 0 4 e m ;   } 
+ . r a d a r - m k - - P A S S   {   b a c k g r o u n d :   r g b a ( 0 ,   2 5 5 ,   1 2 8 ,   0 . 1 5 ) ;   c o l o r :   # 0 0 f f 8 0 ;   } 
+ . r a d a r - m k - - W A I T   {   b a c k g r o u n d :   r g b a ( 2 5 5 ,   1 7 0 ,   0 ,   0 . 1 5 ) ;   c o l o r :   # f f a a 0 0 ;   } 
+ . r a d a r - m k - - F A I L   {   b a c k g r o u n d :   r g b a ( 2 5 5 ,   7 4 ,   7 4 ,   0 . 1 5 ) ;   c o l o r :   # f f 4 a 4 a ;   } 
+ . r a d a r - m k - - M I S S I N G   {   b a c k g r o u n d :   r g b a ( 1 3 6 ,   1 5 3 ,   1 7 0 ,   0 . 1 5 ) ;   c o l o r :   # 8 8 9 9 a a ;   } 
+ 
+ / *   F i l t e r   B u t t o n s   * / 
+ . r a d a r - f i l t e r s   {   d i s p l a y :   f l e x ;   g a p :   8 p x ;   m a r g i n - b o t t o m :   1 5 p x ;   f l e x - w r a p :   w r a p ;   } 
+ . r a d a r - f i l t e r s   b u t t o n   {   b a c k g r o u n d :   r g b a ( 0 , 0 , 0 , 0 . 3 ) ;   b o r d e r :   1 p x   s o l i d   v a r ( - - b r d ) ;   c o l o r :   v a r ( - - t x t 2 ) ;   p a d d i n g :   5 p x   1 2 p x ;   b o r d e r - r a d i u s :   4 p x ;   f o n t - s i z e :   1 1 p x ;   c u r s o r :   p o i n t e r ;   t r a n s i t i o n :   a l l   0 . 2 s ;   } 
+ . r a d a r - f i l t e r s   b u t t o n : h o v e r   {   b a c k g r o u n d :   r g b a ( 2 5 5 , 2 5 5 , 2 5 5 , 0 . 0 5 ) ;   c o l o r :   v a r ( - - t x t ) ;   b o r d e r - c o l o r :   r g b a ( 2 5 5 , 2 5 5 , 2 5 5 , 0 . 2 ) ;   } 
+ . r a d a r - f i l t e r s   b u t t o n . a c t i v e   {   b a c k g r o u n d :   r g b a ( 0 , 2 5 5 , 1 2 8 , 0 . 1 ) ;   b o r d e r - c o l o r :   r g b a ( 0 , 2 5 5 , 1 2 8 , 0 . 5 ) ;   c o l o r :   # 0 0 f f 8 0 ;   f o n t - w e i g h t :   6 0 0 ;   } 
+ 
+ . r a d a r - c h e c k l i s t   {   l i s t - s t y l e :   n o n e ;   p a d d i n g :   0 ;   m a r g i n :   1 0 p x   0 ;   } 
+ . r a d a r - c h e c k l i s t   l i   {   m a r g i n - b o t t o m :   6 p x ;   f o n t - s i z e :   1 2 p x ;   c o l o r :   v a r ( - - t x t 2 ) ;   } 
+ . r a d a r - c h e c k l i s t   b   {   c o l o r :   v a r ( - - t x t ) ;   t e x t - t r a n s f o r m :   u p p e r c a s e ;   m a r g i n - r i g h t :   5 p x ;   f o n t - s i z e :   1 0 p x ;   d i s p l a y :   i n l i n e - b l o c k ;   w i d t h :   1 2 0 p x ;   } 
+  
+ 
+/* NEW RADAR UI */
+.radar-top-strip { display: flex; gap: 20px; background: rgba(0,0,0,0.2); padding: 12px 16px; border: 1px solid rgba(255,255,255,0.05); border-radius: 6px; margin-bottom: 20px; }
+.radar-top-strip div { display: flex; flex-direction: column; gap: 4px; }
+.radar-top-strip span { font-size: 10px; color: var(--txt3); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700; }
+.radar-top-strip b { font-size: 14px; color: var(--txt); font-family: var(--mono); }
+
+.radar-section-title { font-size: 12px; font-weight: 800; color: var(--txt2); letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 8px; }
+
+.radar-matrix-wrap { overflow-x: auto; margin-bottom: 24px; border: 1px solid var(--b1); border-radius: 6px; background: var(--s2); }
+.radar-matrix { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px; white-space: nowrap; }
+.radar-matrix th { background: rgba(0,0,0,0.3); color: var(--txt3); font-weight: 700; padding: 10px; text-align: left; border-bottom: 1px solid var(--b1); position: sticky; top: 0; }
+.radar-matrix td { padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.02); color: var(--txt2); }
+.radar-matrix-row { cursor: pointer; transition: background 0.15s; }
+.radar-matrix-row:hover { background: rgba(255,255,255,0.03); }
+.radar-matrix-row:nth-child(even) { background: rgba(0,0,0,0.1); }
+.radar-matrix-row--ready { background: rgba(0,255,128,0.04); border-left: 2px solid #00ff80; }
+.radar-matrix-row--ready:hover { background: rgba(0,255,128,0.08); }
+
+.radar-pill { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 4px; font-weight: 900; font-size: 10px; }
+.radar-pill-pass { background: rgba(0,255,128,0.15); color: #00ff80; }
+.radar-pill-wait { background: rgba(61,158,255,0.15); color: #3d9eff; }
+.radar-pill-fail { background: rgba(255,74,74,0.15); color: #ff4a4a; }
+.radar-pill-missing { background: rgba(136,153,170,0.15); color: #8899aa; }
+
+.radar-zone-td { font-size: 10px; opacity: 0.8; }
+.radar-blocked-by { font-size: 10px; color: var(--amb); max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
+.radar-telegram-td { text-align: center; }
+
+.radar-watch-list { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 24px; }
+.radar-watch-card { background: var(--s2); border: 1px solid var(--b1); border-radius: 6px; padding: 12px; cursor: pointer; transition: all 0.2s; display: flex; flex-direction: column; gap: 6px; }
+.radar-watch-card:hover { border-color: rgba(255,255,255,0.2); background: rgba(255,255,255,0.03); transform: translateY(-2px); }
+.radar-watch-card__head { display: flex; justify-content: space-between; align-items: center; }
+.radar-watch-card__head b { font-size: 14px; color: var(--txt); }
+.radar-watch-card__metrics { font-family: var(--mono); font-size: 10px; color: var(--txt3); }
+.radar-watch-card__blocker { font-size: 11px; color: var(--amb); }
+.radar-watch-card__conf { font-size: 11px; color: var(--txt2); }
+.radar-watch-card__zone { font-family: var(--mono); font-size: 10px; padding-top: 4px; border-top: 1px solid rgba(255,255,255,0.05); color: var(--txt); }
+
+.radar-focus-section { margin-bottom: 24px; }
+.radar-focus-card { background: rgba(0,0,0,0.2); border: 1px solid var(--b1); border-radius: 8px; padding: 16px; }
+.radar-focus-title { font-size: 18px; margin-bottom: 16px; display: flex; align-items: center; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.05); }
+.radar-focus-grid { display: grid; grid-template-columns: minmax(300px, 1fr) 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+.radar-focus-grid > div { display: flex; flex-direction: column; gap: 8px; background: rgba(255,255,255,0.02); padding: 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.02); }
+.radar-focus-grid span { font-size: 10px; text-transform: uppercase; color: var(--txt3); font-weight: 700; letter-spacing: 0.05em; }
+.radar-focus-grid p { font-size: 12px; color: var(--txt2); margin: 0; line-height: 1.4; }
+.radar-focus-levels { display: flex; gap: 24px; padding: 12px; background: rgba(0,0,0,0.3); border-radius: 6px; margin-bottom: 12px; }
+.radar-focus-levels div { display: flex; flex-direction: column; gap: 4px; }
+.radar-focus-levels span { font-size: 10px; color: var(--txt3); text-transform: uppercase; }
+.radar-focus-levels b { font-family: var(--mono); font-size: 14px; color: var(--txt); }
+.radar-focus-missing { font-size: 11px; color: var(--amb); padding: 8px 12px; background: rgba(255,176,32,0.1); border-radius: 4px; display: inline-block; }
+
+.radar-telegram-diagnostics { margin-top: 8px; }
+

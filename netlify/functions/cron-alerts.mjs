@@ -33,6 +33,10 @@ export function normalizeRadarTelegramAlertState(input = {}) {
     lastSentAt: state.lastSentAt || null,
     lastError: state.lastError || null,
     sentCount: Number.isFinite(Number(state.sentCount)) ? Number(state.sentCount) : 0,
+    legacyBlockedCount: Number.isFinite(Number(state.legacyBlockedCount)) ? Number(state.legacyBlockedCount) : 0,
+    lastLegacyBlockedAt: state.lastLegacyBlockedAt || null,
+    lastRadarSentAt: state.lastRadarSentAt || null,
+    lastRadarSkippedReason: state.lastRadarSkippedReason || null,
   };
 }
 
@@ -48,11 +52,13 @@ export function shouldSendRadarTelegramAlert(candidate, state = {}, nowMs = Date
 }
 
 export function selectRadarEntryAlerts(radar = {}, state = {}, nowMs = Date.now()) {
-  const entryReady = Array.isArray(radar.entryReady) ? radar.entryReady : [];
-  return entryReady
+  // Use radar.entryReady directly for iteration, assuming trading-radar places true candidates there
+  // Fall back to candidates array if entryReady isn't pre-populated
+  const candidates = (Array.isArray(radar.entryReady) && radar.entryReady.length > 0) ? radar.entryReady : (Array.isArray(radar.candidates) ? radar.candidates : []);
+  
+  return candidates
     .filter((c) => c && String(c.stage || '') === 'ENTRY_READY')
-    .filter((c) => shouldSendRadarTelegramAlert(c, state, nowMs))
-    .slice(0, 5);
+    .slice(0, 5); // Take top 5 potentials, filter strictly later during send
 }
 
 export function buildRadarTelegramMessage(candidate) {
@@ -77,6 +83,7 @@ export function buildRadarTelegramMessage(candidate) {
   ].join('\n');
 }
 
+// PRIVATE: No other module may use this directly
 async function sendTelegram(token, chatId, text) {
   const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: 'POST',
@@ -95,6 +102,59 @@ async function sendTelegram(token, chatId, text) {
   return res.json();
 }
 
+export async function sendRadarEntryReadyTelegram(candidate, state, token, chatId) {
+  const nowIso = new Date().toISOString();
+  
+  // Hard gates
+  if (!candidate || typeof candidate !== 'object') {
+    return { ok: false, reason: 'invalid_candidate', code: 'TELEGRAM_LEGACY_BLOCKED' };
+  }
+  
+  const stage = String(candidate.stage || '');
+  if (['BUY', 'FLUSH+BUY', 'STRONG BUY', 'RECLAIM', 'WATCH', 'LONG_FLUSH_CONFIRMED', 'STABILIZING', 'SQUEEZE_CONFIRMED', 'NEAR_ENTRY'].includes(stage)) {
+    return { ok: false, reason: `legacy_blocked_${stage}`, code: 'TELEGRAM_LEGACY_BLOCKED' };
+  }
+
+  if (stage !== 'ENTRY_READY') {
+    return { ok: false, reason: 'stage_not_entry_ready', code: 'TELEGRAM_RADAR_SKIPPED_NOT_ENTRY_READY' };
+  }
+  
+  if (String(candidate.actionability || '') !== 'ENTRY_READY') {
+    return { ok: false, reason: 'actionability_not_entry_ready', code: 'TELEGRAM_RADAR_SKIPPED_NOT_ENTRY_READY' };
+  }
+
+  if (candidate.telegramEligible !== true) {
+     return { ok: false, reason: 'not_telegram_eligible', code: 'TELEGRAM_RADAR_SKIPPED_NOT_ENTRY_READY' };
+  }
+  
+  if (Number(candidate.confidence) < 75 || !Number.isFinite(Number(candidate.confidence))) {
+    return { ok: false, reason: 'confidence_below_75', code: 'TELEGRAM_RADAR_SKIPPED_NOT_ENTRY_READY' };
+  }
+  
+  if (!candidate.entryZone || typeof candidate.entryZone !== 'object' || candidate.entryZone.low == null || candidate.entryZone.high == null) {
+    return { ok: false, reason: 'missing_entry_zone', code: 'TELEGRAM_RADAR_SKIPPED_NOT_ENTRY_READY' };
+  }
+  
+  if (candidate.invalidationLevel == null && candidate.suggestedStop == null) {
+    return { ok: false, reason: 'missing_stop_invalidation', code: 'TELEGRAM_RADAR_SKIPPED_NOT_ENTRY_READY' };
+  }
+  
+  if (!shouldSendRadarTelegramAlert(candidate, state, Date.now())) {
+    return { ok: false, reason: 'cooldown_active', code: 'TELEGRAM_RADAR_SKIPPED_NOT_ENTRY_READY' };
+  }
+
+  // All gates passed, send
+  const msg = buildRadarTelegramMessage(candidate);
+  const result = await sendTelegram(token, chatId, msg);
+  
+  if (result && result.ok) {
+     return { ok: true, code: 'TELEGRAM_RADAR_SENT' };
+  } else {
+     const errorMsg = result && result.description ? result.description : 'Telegram send failed';
+     return { ok: false, reason: errorMsg, code: 'TELEGRAM_API_ERROR' };
+  }
+}
+
 function markSent(state, candidate, nowIso) {
   const symbol = String(candidate.symbol || '').toUpperCase();
   if (!symbol) return state;
@@ -105,6 +165,7 @@ function markSent(state, candidate, nowIso) {
     setupQualityScore: candidate.setupQualityScore ?? null,
   };
   state.lastSentAt = nowIso;
+  state.lastRadarSentAt = nowIso;
   state.lastError = null;
   state.sentCount = (Number(state.sentCount) || 0) + 1;
   return state;
@@ -118,8 +179,8 @@ export default async () => {
 
   const fleet = await loadFleet();
   const radar = fleet && fleet.tradingRadar ? fleet.tradingRadar : {};
-  const state = normalizeRadarTelegramAlertState(radar.telegramAlertState);
-  const due = selectRadarEntryAlerts(radar, state, nowMs);
+  let state = normalizeRadarTelegramAlertState(radar.telegramAlertState);
+  const potentials = selectRadarEntryAlerts(radar, state, nowMs);
 
   if (!token || !chatId) {
     await mutateFleet((f) => {
@@ -133,7 +194,7 @@ export default async () => {
     return;
   }
 
-  if (!due.length) {
+  if (!potentials.length) {
     await mutateFleet((f) => {
       const current = f.tradingRadar || {};
       f.tradingRadar = { ...current, telegramAlertState: normalizeRadarTelegramAlertState(current.telegramAlertState) };
@@ -143,31 +204,63 @@ export default async () => {
     return;
   }
 
-  let sent = 0;
+  let sentCount = 0;
   let lastError = null;
-  for (const candidate of due) {
-    const result = await sendTelegram(token, chatId, buildRadarTelegramMessage(candidate));
-    if (result && result.ok) {
-      sent += 1;
+  let legacyBlockedCountInc = 0;
+  let lastSkippedReason = null;
+  
+  for (const candidate of potentials) {
+    const res = await sendRadarEntryReadyTelegram(candidate, state, token, chatId);
+    
+    if (res.ok) {
+      sentCount += 1;
       markSent(state, candidate, nowIso);
     } else {
-      lastError = result && result.description ? result.description : 'Telegram send failed';
-      break;
+      if (res.code === 'TELEGRAM_LEGACY_BLOCKED') {
+         legacyBlockedCountInc += 1;
+         state.lastLegacyBlockedAt = nowIso;
+         console.warn(`[cron-alerts] TELEGRAM_LEGACY_BLOCKED: ${candidate.symbol} - ${res.reason}`);
+      } else if (res.code === 'TELEGRAM_RADAR_SKIPPED_NOT_ENTRY_READY') {
+         lastSkippedReason = res.reason;
+         console.log(`[cron-alerts] TELEGRAM_RADAR_SKIPPED_NOT_ENTRY_READY: ${candidate.symbol} - ${res.reason}`);
+      } else {
+         lastError = res.reason;
+         console.error(`[cron-alerts] TELEGRAM_API_ERROR: ${candidate.symbol} - ${res.reason}`);
+      }
     }
   }
 
   await mutateFleet((f) => {
     const current = f.tradingRadar || {};
     const nextState = normalizeRadarTelegramAlertState(current.telegramAlertState);
-    for (const candidate of due.slice(0, sent)) {
-      if (shouldSendRadarTelegramAlert(candidate, nextState, nowMs)) markSent(nextState, candidate, nowIso);
+    
+    // apply sent items
+    for (const [sym, info] of Object.entries(state.sent)) {
+      if (!nextState.sent[sym] || new Date(info.lastSentAt) > new Date(nextState.sent[sym].lastSentAt)) {
+         nextState.sent[sym] = info;
+      }
     }
+    
+    if (sentCount > 0) {
+      nextState.lastSentAt = nowIso;
+      nextState.lastRadarSentAt = nowIso;
+      nextState.sentCount += sentCount;
+    }
+    
+    if (legacyBlockedCountInc > 0) {
+       nextState.legacyBlockedCount += legacyBlockedCountInc;
+       nextState.lastLegacyBlockedAt = nowIso;
+    }
+    
+    if (lastSkippedReason) nextState.lastRadarSkippedReason = lastSkippedReason;
     if (lastError) nextState.lastError = String(lastError).slice(0, 200);
+    else if (sentCount > 0) nextState.lastError = null;
+    
     f.tradingRadar = { ...current, telegramAlertState: nextState };
-    return { ok: !lastError, sent, lastError };
+    return { ok: !lastError, sent: sentCount, lastError };
   });
 
-  console.log(`[cron-alerts] RADAR ENTRY_READY alerts sent: ${sent}`);
+  console.log(`[cron-alerts] RADAR ENTRY_READY alerts sent: ${sentCount}`);
 };
 
 export const config = {

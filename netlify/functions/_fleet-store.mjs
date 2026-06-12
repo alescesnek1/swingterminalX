@@ -35,7 +35,7 @@ function emptyTradingRadar(nowIso = null) {
     entryReady: [],
     selected: null,
     exitGuidance: null,
-    telegramAlertState: { mode: 'ENTRY_READY_ONLY', cooldownMs: 60 * 60 * 1000, sent: {}, lastSentAt: null, lastError: null, sentCount: 0 },
+    telegramAlertState: { mode: 'ENTRY_READY_ONLY', cooldownMs: 60 * 60 * 1000, sent: {}, lastSentAt: null, lastError: null, sentCount: 0, legacyBlockedCount: 0, lastLegacyBlockedAt: null, lastRadarSentAt: null, lastRadarSkippedReason: null },
     missingSignals: [],
     dataCompleteness: 0,
     lastError: null,

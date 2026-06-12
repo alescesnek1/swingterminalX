@@ -147,7 +147,7 @@ test('RADAR confidence varies across candidates and missing data lowers confiden
   assert.ok(highQuality.confidence > lowQuality.confidence);
   assert.ok(lowQuality.confidence > 0);
   assert.equal(highQuality.actionability, 'ENTRY_READY');
-  assert.equal(lowQuality.actionability, 'ENTRY_READY');
+  assert.equal(lowQuality.actionability, 'NEAR_ENTRY');
 });
 
 test('RADAR sorts by distanceToEntryReadyScore correctly', () => {
@@ -170,7 +170,7 @@ test('RADAR sorts by distanceToEntryReadyScore correctly', () => {
   
   assert.equal(solCand.actionability, 'ENTRY_READY');
   assert.equal(btcCand.actionability, 'NEAR_ENTRY');
-  assert.equal(ethCand.actionability, 'NEEDS_CONFIRMATION');
+  assert.equal(ethCand.actionability, 'NEEDS_STABILIZATION');
   assert.ok(solCand.distanceToEntryReadyScore > btcCand.distanceToEntryReadyScore);
   assert.ok(btcCand.distanceToEntryReadyScore > ethCand.distanceToEntryReadyScore);
   
