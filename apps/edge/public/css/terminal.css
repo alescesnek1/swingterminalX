@@ -488,6 +488,49 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .trading-radar__selected{margin-bottom:6px;color:var(--txt2);font-size:10px;line-height:1.4}
 .trading-radar__selected b{font-size:12px;color:var(--txt);font-family:var(--mono)}
 .trading-radar__selected em{font-style:normal;color:var(--acc);font-family:var(--mono);font-size:10px}
+
+/* Pipeline Board & Columns */
+.radar-pipeline-board{display:grid;grid-template-columns:repeat(5, 1fr);gap:8px;margin:12px 0}
+.radar-pipeline-col{background:rgba(0,0,0,.15);border:1px solid rgba(255,255,255,.07);border-radius:6px;display:flex;flex-direction:column;min-height:300px}
+.radar-pipeline-col__head{padding:8px 10px;font-size:10px;font-weight:900;letter-spacing:.08em;color:var(--txt3);border-bottom:1px solid rgba(255,255,255,.05);display:flex;justify-content:space-between;align-items:center}
+.radar-pipeline-col__head b{background:rgba(255,255,255,.1);padding:2px 6px;border-radius:10px;color:var(--txt)}
+.radar-pipeline-col__body{padding:8px;display:flex;flex-direction:column;gap:8px}
+
+/* Candidate Cards */
+.radar-card{background:var(--s2);border:1px solid rgba(255,255,255,.05);border-radius:4px;padding:8px;font-family:var(--mono);font-size:10px;cursor:pointer;transition:background .15s}
+.radar-card:hover{background:rgba(255,255,255,.04)}
+.radar-card--WATCH_ONLY{border-left:2px solid var(--txt3)}
+.radar-card--NEEDS_CONFIRMATION{border-left:2px solid var(--blu)}
+.radar-card--NEAR_ENTRY{border-left:2px solid var(--amb);background:rgba(255,176,32,.05)}
+.radar-card--ENTRY_READY{border-left:2px solid var(--grn);background:rgba(0,255,128,.05)}
+.radar-card--INVALIDATED{border-left:2px solid var(--red);opacity:0.6}
+.radar-card__head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.radar-card__head b{font-size:12px;color:var(--txt)}
+.radar-card__head span{color:var(--acc);font-size:9px}
+.radar-card__metrics{display:flex;justify-content:space-between;margin-bottom:6px;color:var(--txt2);font-size:9px}
+.radar-card__metrics b{color:var(--txt)}
+.radar-card__detail div{margin-bottom:3px;color:var(--txt2);font-size:9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.radar-card__detail span{color:var(--txt3)}
+
+/* Focus Panel */
+.radar-focus-title{display:flex;align-items:center;gap:10px;margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid rgba(255,255,255,.1)}
+.radar-focus-grid{display:grid;grid-template-columns:1fr;gap:10px;margin-bottom:12px}
+.radar-focus-grid div{background:rgba(0,0,0,.2);padding:8px;border-radius:4px;border:1px solid rgba(255,255,255,.05)}
+.radar-badge-ENTRY_READY{background:rgba(0,255,128,.15);color:var(--grn);padding:2px 6px;border-radius:4px;font-size:9px;font-weight:900}
+.radar-badge-NEAR_ENTRY{background:rgba(255,176,32,.15);color:var(--amb);padding:2px 6px;border-radius:4px;font-size:9px;font-weight:900}
+.radar-badge-NEEDS_CONFIRMATION{background:rgba(61,158,255,.15);color:var(--blu);padding:2px 6px;border-radius:4px;font-size:9px;font-weight:900}
+.radar-badge-INVALIDATED{background:rgba(255,51,86,.15);color:var(--red);padding:2px 6px;border-radius:4px;font-size:9px;font-weight:900}
+.radar-badge-WATCH_ONLY{background:rgba(255,255,255,.1);color:var(--txt3);padding:2px 6px;border-radius:4px;font-size:9px;font-weight:900}
+
+/* What to watch now */
+.radar-watch-list{display:flex;flex-direction:column;gap:8px}
+.radar-watch-card{background:rgba(255,176,32,.08);border:1px solid rgba(255,176,32,.2);border-radius:4px;padding:8px;font-size:11px;color:var(--txt2)}
+.radar-watch-card b{color:var(--txt)}
+
+/* Diagnostics */
+.radar-diagnostics{margin-top:12px;padding:10px;background:var(--s2);border:1px solid var(--b1);border-radius:6px;font-size:10px;color:var(--txt3)}
+.radar-diagnostics summary{font-weight:700;color:var(--txt2);cursor:pointer;outline:none;margin-bottom:6px}
+.radar-diagnostics ul{margin:0;padding-left:16px}
 .bot-confirm__phrase{margin-bottom:8px;padding:8px;border:1px solid rgba(255,255,255,.08);border-radius:4px;background:rgba(0,0,0,.22);color:#fff;font-size:11px;font-weight:800;word-break:break-word}
 .bot-confirm__input{width:100%;font-family:var(--mono);font-size:11px;color:#fff;background:rgba(0,0,0,.24);border:1px solid rgba(255,255,255,.16);border-radius:4px;padding:8px;outline:none}
 .bot-confirm__input:focus{border-color:rgba(255,176,32,.65);box-shadow:0 0 0 1px rgba(255,176,32,.14)}

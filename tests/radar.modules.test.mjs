@@ -42,10 +42,10 @@ const FLUSH = {
   retestHeld: true,
   shortLiquidationSpike: 1.5,
   marketBuyVolumeDominance: 0.59,
-  higherLowHeld: true,
   vwap: 140,
   flushLow: 132,
   depthUsdWithin1Pct: 1_800_000,
+  depthUsd: 2_000_000,
 };
 
 test('RADAR universe filters liquid stablecoin spot pairs and rejects weird/thin books', () => {
@@ -80,10 +80,103 @@ test('RADAR can classify absorption entry-ready without buying a falling knife',
     retestHeld: false,
     absorptionScore: 82,
     aggressiveSellsFailed: true,
+    supportRetested: true,
+    bidAbsorption: true,
+    deltaImproves: true,
   }, { blocksMeanReversion: false, score: 70 });
   assert.equal(ready.stage, RADAR_STAGES.ENTRY_READY);
   assert.equal(ready.entryType, RADAR_ENTRY_TYPES.ABSORPTION);
   assert.ok(ready.reasons.some((r) => /absorbed/.test(r)));
+});
+
+test('RADAR never marks ENTRY_READY without stabilization plus squeeze or absorption confirmation', () => {
+  const panicOnly = classifyRadarStage({
+    ...FLUSH,
+    noNewLowMinutes: 0,
+    rangeFormed: false,
+    reclaimConfirmed: true,
+    retestHeld: true,
+    shortLiquidationSpike: 1.8,
+  }, { blocksMeanReversion: false, score: 80 });
+  assert.notEqual(panicOnly.stage, RADAR_STAGES.ENTRY_READY);
+
+  const stableWithoutConfirmation = classifyRadarStage({
+    ...FLUSH,
+    reclaimConfirmed: false,
+    retestHeld: false,
+    shortLiquidationSpike: 0,
+    marketBuyVolumeDominance: 0.5,
+    higherLowHeld: false,
+    absorptionScore: 90,
+    aggressiveSellsFailed: true,
+    supportRetested: false,
+    bidAbsorption: false,
+    deltaImproves: false,
+  }, { blocksMeanReversion: false, score: 80 });
+  assert.equal(stableWithoutConfirmation.stage, RADAR_STAGES.STABILIZING);
+});
+
+test('RADAR SQUEEZE_CONFIRMED is strict and not triggered by BUY alone', () => {
+  const pureBuy = classifyRadarStage({
+    symbol: 'DOGEUSDT',
+    scannerBuy: true,
+    isScannerBuy: true,
+    c1: 0.1,
+    c4: -0.5,
+    c12: -1.0,
+    c24: -1.0,
+    scannerScore: 8,
+    depthUsd: 1000000,
+    scannerTags: ['BUY']
+  }, { blocksMeanReversion: false, score: 80 });
+  // Should not be SQUEEZE_CONFIRMED because lacks hasRecovery and hasDrawdown
+  assert.notEqual(pureBuy.stage, RADAR_STAGES.SQUEEZE_CONFIRMED);
+  assert.equal(pureBuy.actionability, 'WATCH_ONLY');
+});
+
+test('RADAR confidence varies across candidates and missing data lowers confidence without removing them', () => {
+  const highQuality = classifyRadarStage(FLUSH, { blocksMeanReversion: false, score: 80 });
+  const lowQuality = classifyRadarStage({
+    ...FLUSH,
+    depthUsd: undefined,
+    funding: undefined,
+    oiChange: undefined,
+    shortLiq: undefined
+  }, { blocksMeanReversion: false, score: 80 });
+  
+  assert.ok(highQuality.confidence > lowQuality.confidence);
+  assert.ok(lowQuality.confidence > 0);
+  assert.equal(highQuality.actionability, 'ENTRY_READY');
+  assert.equal(lowQuality.actionability, 'ENTRY_READY');
+});
+
+test('RADAR sorts by distanceToEntryReadyScore correctly', () => {
+  const state = evaluateTradingRadar({
+    markets: [
+      { ...BTC, diagnostics: { change1hPct: 2, change12hPct: -5 }, scannerTags: ['FLUSH', 'BUY'], depthUsd: 1e6 }, // SQUEEZE (NEAR_ENTRY)
+      { ...ETH, diagnostics: { change12hPct: -6 }, scannerPanic: 60, depthUsd: 1e6 }, // WATCH
+      FLUSH // ENTRY_READY
+    ],
+    source: 'test',
+    fetchedAt: new Date(NOW).toISOString(),
+    now: NOW,
+  });
+  
+  console.log('CANDIDATES:', state.candidates.map(c => [c.symbol, c.actionability, c.stage, c.confidence, c.reasons]));
+  
+  const btcCand = state.candidates.find(c => c.symbol === 'BTCUSDT');
+  const ethCand = state.candidates.find(c => c.symbol === 'ETHUSDT');
+  const solCand = state.candidates.find(c => c.symbol === 'SOLUSDT');
+  
+  assert.equal(solCand.actionability, 'ENTRY_READY');
+  assert.equal(btcCand.actionability, 'NEAR_ENTRY');
+  assert.equal(ethCand.actionability, 'NEEDS_CONFIRMATION');
+  assert.ok(solCand.distanceToEntryReadyScore > btcCand.distanceToEntryReadyScore);
+  assert.ok(btcCand.distanceToEntryReadyScore > ethCand.distanceToEntryReadyScore);
+  
+  assert.equal(state.candidates[0].symbol, 'SOLUSDT');
+  assert.equal(state.candidates[1].symbol, 'BTCUSDT');
+  assert.equal(state.candidates[2].symbol, 'ETHUSDT');
 });
 
 test('RADAR market-regime breakdown downgrades entry candidates', () => {
@@ -107,6 +200,7 @@ test('RADAR returns concrete price zones, missing-signal diagnostics, and stale 
   });
   assert.ok(state.selected.entryZone.low > 0);
   assert.ok(state.selected.invalidationLevel > 0);
+  assert.ok(Array.isArray(state.selected.missingSignals));
   assert.ok(state.missingSignals.includes('orderBookDepthWithin1Pct'));
   assert.ok(state.missingSignals.includes('fresh public snapshot'));
   assert.ok(state.dataCompleteness < 100);
@@ -149,6 +243,10 @@ test('RADAR emergency profit protection exits on regime/structure failure', () =
 test('fleet empty state persists tradingRadar top-level field', () => {
   const fleet = emptyFleet();
   assert.ok(Object.hasOwn(fleet, 'tradingRadar'));
+  assert.ok(Object.hasOwn(fleet.tradingRadar, 'pipeline'));
+  assert.ok(Object.hasOwn(fleet.tradingRadar, 'telegramAlertState'));
   fleet.tradingRadar = evaluateTradingRadar({ markets: [BTC, ETH, FLUSH], source: 'test', fetchedAt: new Date(NOW).toISOString(), now: NOW });
   assert.equal(fleet.tradingRadar.selected.symbol, 'SOLUSDT');
+  assert.equal(fleet.tradingRadar.status, 'ENTRY_READY');
+  assert.equal(fleet.tradingRadar.pipeline.ENTRY_READY, 1);
 });

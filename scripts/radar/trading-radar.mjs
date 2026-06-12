@@ -244,9 +244,10 @@ export function evaluateMarketRegime(markets = []) {
 }
 
 function signalBooleans(m, regime) {
-  const c24 = n(m.change24hPct ?? m.priceChangePercent, 0);
-  const c12 = n(m.change12hPct);
-  const c4 = n(m.change4hPct);
+  const c24 = n(m.change24hPct ?? m.priceChangePercent ?? m.diagnostics?.change24hPct, 0);
+  const c12 = n(m.change12hPct ?? m.diagnostics?.change12hPct);
+  const c4 = n(m.change4hPct ?? m.diagnostics?.change4hPct);
+  const c1 = n(m.change1hPct ?? m.diagnostics?.change1hPct);
   const btcRel = n(m.btcRelativeChangePct ?? m.relativeToBtcPct);
   const atrPct = n(m.atrPct ?? m.realizedVolatilityPct);
   const volumeSpike = n(m.volumeSpike, Math.abs(c24) >= 6 ? 1.6 : 1);
@@ -295,7 +296,7 @@ function signalBooleans(m, regime) {
   const absorptionEntry = absorptionConfirmed && !regime.blocksMeanReversion;
 
   return {
-    c24, c12, c4, btcRel, atrPct, volumeSpike, oiChange, funding,
+    c24, c12, c4, c1, btcRel, atrPct, volumeSpike, oiChange, funding,
     watchDrop, panicFlush, oiFlush, fundingOk, wickOk, bidsOk, sellFade,
     noNewLows, rangeFormed, lateShorts, squeeze, reclaim, higherLow,
     retestEntry, absorptionEntry, absorptionScore, buyDominance, shortLiq,
@@ -332,28 +333,44 @@ export function classifyRadarStage(market, regime = evaluateMarketRegime([])) {
     reasons.push(isScannerStabilizing ? 'scanner BUY/RECLAIM or short-term improvement after dump' : 'new lows paused and local range formed');
   }
 
-  const isScannerSqueeze = s.isScannerBuy || ((s.c1 > 1.5 || s.c4 > 2) && (s.c12 < -3 || s.c24 < -4));
+  const hasRecovery = (s.c1 > 1.5 || s.c4 > 2);
+  const hasDrawdown = (s.c12 < -3 || s.c24 < -4);
+  
+  // Calculate confidence earlier so we can use it for SQUEEZE rules
+  let confidence = clamp(35 + (stage === RADAR_STAGES.NO_SETUP ? 0 : 10)
+    + (market.depthUsd != null ? 8 : 0)
+    + (s.oiChange != null ? 6 : 0)
+    + (s.funding != null ? 6 : 0)
+    + (s.shortLiq != null || s.longLiquidationSpike != null ? 6 : 0)
+    + (market.spreadPct != null ? 5 : 0)
+    + (market.scannerScore != null ? clamp((market.scannerScore - 5) * 3, 0, 15) : 0)
+    + (s.isScannerBuy ? 8 : (s.isScannerFlush ? 5 : 0))
+    - (regime.blocksMeanReversion ? 15 : 0));
 
-  if (stage === RADAR_STAGES.STABILIZING && (s.squeeze || isScannerSqueeze)) {
+  const isValidSqueeze = (s.squeeze || (s.isScannerBuy && hasRecovery && hasDrawdown)) && !regime.blocksMeanReversion && confidence >= 50;
+
+  if (stage === RADAR_STAGES.STABILIZING && isValidSqueeze) {
     stage = RADAR_STAGES.SQUEEZE_CONFIRMED;
-    reasons.push('reclaim/squeeze confirmation present');
+    reasons.push('reclaim/squeeze confirmation with high confidence');
   }
 
   let nextRequiredConfirmation = null;
   if (stage === RADAR_STAGES.WATCH) nextRequiredConfirmation = 'panic flush volume + OI flush';
   if (stage === RADAR_STAGES.LONG_FLUSH_CONFIRMED) nextRequiredConfirmation = 'new lows paused + local range formed';
-  if (stage === RADAR_STAGES.STABILIZING) nextRequiredConfirmation = 'absorption or squeeze confirmed';
-  if (stage === RADAR_STAGES.SQUEEZE_CONFIRMED) nextRequiredConfirmation = 'retest held';
+  if (stage === RADAR_STAGES.STABILIZING) nextRequiredConfirmation = 'strong short-term recovery + reclaim + confidence > 50';
+  if (stage === RADAR_STAGES.SQUEEZE_CONFIRMED) nextRequiredConfirmation = 'retest held + aggressive sells absorbed';
 
   let entryType = RADAR_ENTRY_TYPES.NONE;
   if (stage === RADAR_STAGES.SQUEEZE_CONFIRMED && s.retestEntry) {
     stage = RADAR_STAGES.ENTRY_READY;
     entryType = RADAR_ENTRY_TYPES.RECLAIM_RETEST;
     reasons.push('reclaim retest held with regime not breaking down');
+    nextRequiredConfirmation = 'none';
   } else if (stage === RADAR_STAGES.STABILIZING && s.absorptionEntry) {
     stage = RADAR_STAGES.ENTRY_READY;
     entryType = RADAR_ENTRY_TYPES.ABSORPTION;
     reasons.push('support/liquidation low absorbed aggressive sells');
+    nextRequiredConfirmation = 'none';
   }
 
   if (regime.blocksMeanReversion) riskFlags.push('market regime blocks mean reversion');
@@ -361,6 +378,9 @@ export function classifyRadarStage(market, regime = evaluateMarketRegime([])) {
   if (s.oiChange != null && s.oiChange > 12) riskFlags.push('OI expansion may be leveraged crowding');
   if (market.spreadPct != null && market.spreadPct > 0.08) riskFlags.push('spread above ideal');
   if (stage === RADAR_STAGES.WATCH) riskFlags.push('falling knife risk until stabilization confirms');
+
+  // Adjust confidence based on final stage
+  confidence = clamp(confidence + (stage === RADAR_STAGES.ENTRY_READY ? 15 : (stage === RADAR_STAGES.SQUEEZE_CONFIRMED ? 8 : 0)));
 
   const baseScore = {
     [RADAR_STAGES.NO_SETUP]: 0,
@@ -370,22 +390,35 @@ export function classifyRadarStage(market, regime = evaluateMarketRegime([])) {
     [RADAR_STAGES.SQUEEZE_CONFIRMED]: 76,
     [RADAR_STAGES.ENTRY_READY]: 84,
   }[stage];
+  
   const setupQualityScore = clamp(baseScore
     + Math.min(8, Math.max(0, (s.volumeSpike - 1.2) * 4))
     + (s.bidsOk ? 5 : 0)
     + (s.buyDominance >= 0.58 ? 5 : 0)
     - (regime.blocksMeanReversion ? 25 : 0)
     - (riskFlags.length * 3));
-  const confidence = clamp(35 + (stage === RADAR_STAGES.NO_SETUP ? 0 : 10)
-    + (market.depthUsd != null ? 10 : 0)
-    + (s.oiChange != null ? 8 : 0)
-    + (s.funding != null ? 8 : 0)
-    + (s.shortLiq != null || s.longLiquidationSpike != null ? 8 : 0)
-    + (market.spreadPct != null ? 5 : 0)
-    - (regime.blocksMeanReversion ? 12 : 0));
+
+  let actionability = 'WATCH_ONLY';
+  if (stage === RADAR_STAGES.STABILIZING || stage === RADAR_STAGES.LONG_FLUSH_CONFIRMED) actionability = 'NEEDS_CONFIRMATION';
+  if (stage === RADAR_STAGES.SQUEEZE_CONFIRMED) actionability = 'NEAR_ENTRY';
+  if (stage === RADAR_STAGES.ENTRY_READY) actionability = 'ENTRY_READY';
+  if (regime.blocksMeanReversion && stage !== RADAR_STAGES.NO_SETUP) actionability = 'INVALIDATED';
+
+  // Distance to entry ready score (0-100)
+  let distanceToEntryReadyScore = clamp(
+    baseScore + 
+    (actionability === 'NEAR_ENTRY' ? 15 : 0) +
+    (s.bidsOk ? 4 : 0) +
+    (s.c1 > 0 ? 3 : 0) -
+    (regime.blocksMeanReversion ? 40 : 0)
+  );
+
+  if (actionability === 'ENTRY_READY') distanceToEntryReadyScore = 100;
 
   return {
     stage,
+    actionability,
+    distanceToEntryReadyScore: round(distanceToEntryReadyScore, 0),
     setupQualityScore: round(setupQualityScore, 0),
     confidence: round(confidence, 0),
     entryType,
@@ -726,6 +759,8 @@ export function evaluateTradingRadar({
       return {
         symbol: m.symbol,
         stage: stageInfo.stage,
+        actionability: stageInfo.actionability,
+        distanceToEntryReadyScore: stageInfo.distanceToEntryReadyScore,
         setupQualityScore: stageInfo.setupQualityScore,
         confidence: stageInfo.confidence,
         entryType: stageInfo.entryType,
@@ -747,7 +782,16 @@ export function evaluateTradingRadar({
         },
       };
     }).filter((c) => c.stage !== RADAR_STAGES.NO_SETUP)
-      .sort((a, b) => (b.setupQualityScore - a.setupQualityScore) || (b.confidence - a.confidence));
+      .sort((a, b) => {
+        const aAction = { ENTRY_READY: 5, NEAR_ENTRY: 4, NEEDS_CONFIRMATION: 3, WATCH_ONLY: 2, INVALIDATED: 1 }[a.actionability] || 0;
+        const bAction = { ENTRY_READY: 5, NEAR_ENTRY: 4, NEEDS_CONFIRMATION: 3, WATCH_ONLY: 2, INVALIDATED: 1 }[b.actionability] || 0;
+        if (aAction !== bAction) return bAction - aAction;
+        if (a.distanceToEntryReadyScore !== b.distanceToEntryReadyScore) return b.distanceToEntryReadyScore - a.distanceToEntryReadyScore;
+        if (a.setupQualityScore !== b.setupQualityScore) return b.setupQualityScore - a.setupQualityScore;
+        const aLiq = (a.diagnostics && a.diagnostics.quoteVolume) || 0;
+        const bLiq = (b.diagnostics && b.diagnostics.quoteVolume) || 0;
+        return bLiq - aLiq;
+      });
 
     const selected = selectedSymbol
       ? candidates.find((c) => c.symbol === String(selectedSymbol).toUpperCase()) || candidates[0] || null
@@ -765,7 +809,7 @@ export function evaluateTradingRadar({
     state.scannerCandidatesIngested = scannerCandidates.length;
     state.snapshotSymbolsIngested = markets.length;
     state.candidatesByStage = state.pipeline;
-    state.candidates = candidates.slice(0, 10);
+    state.candidates = candidates;
     state.watchlist = candidates.filter((c) => c.stage !== RADAR_STAGES.ENTRY_READY).slice(0, 20);
     state.entryReady = candidates.filter((c) => c.stage === RADAR_STAGES.ENTRY_READY).slice(0, 10);
     state.selected = selected;
