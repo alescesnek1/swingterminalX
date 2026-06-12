@@ -272,6 +272,7 @@ function signalBooleans(m, regime) {
 
   const dropVsVol = atrPct != null ? Math.abs(c24) / Math.max(atrPct, 0.1) : null;
   const isScannerFlush = Array.isArray(m.scannerTags) && m.scannerTags.includes('FLUSH');
+  const isScannerBuy = Array.isArray(m.scannerTags) && m.scannerTags.includes('BUY');
   const watchDrop = c24 <= -4 || c12 <= -3.5 || c4 <= -2.5 || btcRel <= -3 || dropVsVol >= 1.8 || isScannerFlush || (m.scannerPanic > 50);
   const panicFlush = (longLiq != null && longLiq >= 1.5) || (sellRatio != null && sellRatio >= 0.62) || (volumeSpike >= 1.8 && c24 <= -6) || isScannerFlush;
   const oiFlush = oiChange != null && oiChange <= -4;
@@ -296,6 +297,7 @@ function signalBooleans(m, regime) {
     noNewLows, rangeFormed, lateShorts, squeeze, reclaim, higherLow,
     retestEntry, absorptionEntry, absorptionScore, buyDominance, shortLiq,
     tightSpread, supportRetest, deltaImproves, absorptionConfirmed,
+    isScannerFlush, isScannerBuy
   };
 }
 
@@ -305,13 +307,16 @@ export function classifyRadarStage(market, regime = evaluateMarketRegime([])) {
   const riskFlags = [];
   let stage = RADAR_STAGES.NO_SETUP;
 
-  if (s.watchDrop && s.volumeSpike >= 1.2) {
+  const isScannerWatch = (market.scannerScore >= 70 || market.scannerPanic > 50 || s.isScannerFlush);
+
+  if ((s.watchDrop && s.volumeSpike >= 1.2) || isScannerWatch) {
     stage = RADAR_STAGES.WATCH;
-    reasons.push(`relative flush watched (${round(s.c24, 2)}% 24h, volume x${round(s.volumeSpike, 1)})`);
+    if (isScannerWatch) reasons.push(`scanner context promoted to watch (score ${market.scannerScore || 0}, panic ${market.scannerPanic || 0})`);
+    else reasons.push(`relative flush watched (${round(s.c24, 2)}% 24h, volume x${round(s.volumeSpike, 1)})`);
   }
-  if (stage === RADAR_STAGES.WATCH && s.panicFlush && s.fundingOk && s.wickOk && (s.oiFlush || s.bidsOk || s.c24 <= -8)) {
+  if (stage === RADAR_STAGES.WATCH && s.panicFlush && s.fundingOk && s.wickOk && (s.oiFlush || s.bidsOk || s.c24 <= -8 || s.isScannerBuy)) {
     stage = RADAR_STAGES.LONG_FLUSH_CONFIRMED;
-    reasons.push('panic selling/long flush confirmed');
+    reasons.push(s.isScannerBuy ? 'scanner BUY tag confirmed flush' : 'panic selling/long flush confirmed');
   }
   if (stage === RADAR_STAGES.LONG_FLUSH_CONFIRMED && s.noNewLows && s.rangeFormed && (s.sellFade || s.bidsOk || s.lateShorts)) {
     stage = RADAR_STAGES.STABILIZING;

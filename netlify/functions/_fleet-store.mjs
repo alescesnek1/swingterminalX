@@ -114,6 +114,11 @@ function normalize(data) {
     }
     base.tradingRadar = radar;
   }
+  if (!base.radarContext || typeof base.radarContext !== 'object' || Array.isArray(base.radarContext)) {
+    base.radarContext = { scannerCandidates: [], receivedAt: null };
+  } else if (!Array.isArray(base.radarContext.scannerCandidates)) {
+    base.radarContext.scannerCandidates = [];
+  }
   return base;
 }
 

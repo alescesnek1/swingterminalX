@@ -2243,43 +2243,7 @@ async function handleFleetWorker(req, base, body) {
     });
   }
 
-  if (base === 'radar-context') {
-    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
-    
-    // Strict sanitization of incoming payload
-    const rawCandidates = Array.isArray(body.scannerCandidates) ? body.scannerCandidates : [];
-    if (rawCandidates.length > 250) {
-      return json(req, { ok: false, error: 'Payload too large (max 250 rows)' }, 400);
-    }
-    
-    const sanitized = rawCandidates.map(c => {
-      if (!c || typeof c !== 'object') return null;
-      return {
-        symbol: String(c.symbol || '').toUpperCase().slice(0, 24),
-        score: Number.isFinite(Number(c.score)) ? Number(c.score) : 0,
-        signal: c.signal ? String(c.signal).slice(0, 40) : null,
-        panic: Number.isFinite(Number(c.panic)) ? Number(c.panic) : 0,
-        c1: Number.isFinite(Number(c.c1)) ? Number(c.c1) : null,
-        c4: Number.isFinite(Number(c.c4)) ? Number(c.c4) : null,
-        c12: Number.isFinite(Number(c.c12)) ? Number(c.c12) : null,
-        c24: Number.isFinite(Number(c.c24)) ? Number(c.c24) : null,
-        c7d: Number.isFinite(Number(c.c7d)) ? Number(c.c7d) : null,
-        price: Number.isFinite(Number(c.price)) ? Number(c.price) : 0,
-        volume: Number.isFinite(Number(c.volume)) ? Number(c.volume) : 0,
-        hot: Number.isFinite(Number(c.hot)) ? Number(c.hot) : null,
-        tags: Array.isArray(c.tags) ? c.tags.slice(0, 10).map(t => String(t).slice(0, 20)) : []
-      };
-    }).filter(Boolean);
 
-    return await mutateFleet(async (fleet) => {
-      fleet.radarContext = {
-        scannerCandidates: sanitized,
-        receivedAt: new Date().toISOString()
-      };
-      refreshTradingRadarFromFleet(fleet);
-      return json(req, { ok: true, stored: sanitized.length });
-    });
-  }
 
   if (base === 'auto-decision') {
     if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
@@ -2882,6 +2846,46 @@ async function handleFleetWorker(req, base, body) {
 
 // ── Browser-facing fleet routes (Origin + identity; owner/admin authz) ────────
 async function handleFleetBrowser(req, base, segments, identity, body) {
+  if (base === 'radar-context') {
+    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    
+    // Strict sanitization of incoming payload
+    const rawCandidates = Array.isArray(body.scannerCandidates) ? body.scannerCandidates : [];
+    if (rawCandidates.length > 250) {
+      console.warn(`[radar-context] Rejected payload: ${rawCandidates.length} rows > 250 limit.`);
+      return json(req, { ok: false, error: 'Payload too large (max 250 rows)' }, 400);
+    }
+    
+    const sanitized = rawCandidates.map(c => {
+      if (!c || typeof c !== 'object') return null;
+      return {
+        symbol: String(c.symbol || '').toUpperCase().slice(0, 24),
+        score: Number.isFinite(Number(c.score)) ? Number(c.score) : 0,
+        signal: c.signal ? String(c.signal).slice(0, 40) : null,
+        panic: Number.isFinite(Number(c.panic)) ? Number(c.panic) : 0,
+        c1: Number.isFinite(Number(c.c1)) ? Number(c.c1) : null,
+        c4: Number.isFinite(Number(c.c4)) ? Number(c.c4) : null,
+        c12: Number.isFinite(Number(c.c12)) ? Number(c.c12) : null,
+        c24: Number.isFinite(Number(c.c24)) ? Number(c.c24) : null,
+        c7d: Number.isFinite(Number(c.c7d)) ? Number(c.c7d) : null,
+        price: Number.isFinite(Number(c.price)) ? Number(c.price) : 0,
+        volume: Number.isFinite(Number(c.volume)) ? Number(c.volume) : 0,
+        hot: Number.isFinite(Number(c.hot)) ? Number(c.hot) : null,
+        tags: Array.isArray(c.tags) ? c.tags.slice(0, 10).map(t => String(t).slice(0, 20)) : []
+      };
+    }).filter(Boolean);
+
+    console.log(`[radar-context] Received ${rawCandidates.length} rows, sanitized ${sanitized.length}, rejected ${rawCandidates.length - sanitized.length}`);
+
+    return await mutateFleet(async (fleet) => {
+      fleet.radarContext = {
+        scannerCandidates: sanitized,
+        receivedAt: new Date().toISOString()
+      };
+      refreshTradingRadarFromFleet(fleet);
+      return json(req, { ok: true, received: rawCandidates.length, stored: sanitized.length, rejected: rawCandidates.length - sanitized.length });
+    });
+  }
   // POST /api/bot/create-worker-pairing-code
   // Mints a short-lived, single-use pairing code for first-time worker install.
   // Owner-only: the code is bound to the caller's identity. No secrets returned.

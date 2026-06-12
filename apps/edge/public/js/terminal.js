@@ -2664,7 +2664,7 @@ function sv(v, el) {
     try { refreshFleet(); _startFleetPoll(); } catch (e) { console.warn('[Fleet] init failed:', e && e.message); }
   });
   if (activeViewName === 'radar') requestAnimationFrame(() => {
-    try { refreshFleet(); _startFleetPoll(); renderTradingRadarPanel(); } catch (e) { console.warn('[Trading RADAR] init failed:', e && e.message); }
+    try { refreshFleet(); _startFleetPoll(); renderTradingRadarPanel(); window.__lastRadarContextPush = null; pushScannerContextToRadar(); } catch (e) { console.warn('[Trading RADAR] init failed:', e && e.message); }
   });
   if (activeViewName === 'calendar') requestAnimationFrame(() => {
     try { renderCalendar(); } catch(e){}
@@ -3297,23 +3297,7 @@ async function doRefresh() {
   } catch (e) { console.warn('[MOM] compute failed:', e.message); }
 
   if (!window.__lastRadarContextPush || (Date.now() - window.__lastRadarContextPush > 45000)) {
-    window.__lastRadarContextPush = Date.now();
-    try {
-      const payload = DATA.slice(0, 250).map(d => ({
-        symbol: String(d.symbol || '').toUpperCase(),
-        score: Number(d.score) || 0,
-        signal: d._sig ? String(d._sig.label) : null,
-        panic: Number(d._panic) || 0,
-        c1: d._c1, c4: d._c4, c12: d._c12, c24: d._c24, c7d: d._c7d,
-        price: Number(d.current_price) || 0,
-        volume: Number(d.total_volume) || 0,
-        hot: d._mom ? Number(d._mom.hotScore) : null,
-        tags: d._sig && Array.isArray(d._sig.tags) ? d._sig.tags : []
-      }));
-      _fleetFetch('POST', '/api/bot/radar-context', { scannerCandidates: payload }).catch(() => {});
-    } catch (err) {
-      console.warn('[RADAR] Failed to push context:', err);
-    }
+    pushScannerContextToRadar();
   }
 
   renderTopbar();
@@ -3352,6 +3336,41 @@ async function doRefresh() {
   });
 
   if (SEL) pickCoin(SEL);
+}
+
+window.__lastRadarContextPush = null;
+window.__lastRadarContextPostStatus = 'none';
+
+function pushScannerContextToRadar() {
+  if (!DATA || !DATA.length) return;
+  window.__lastRadarContextPush = Date.now();
+  try {
+    const payload = DATA.slice(0, 250).map(d => ({
+      symbol: String(d.symbol || '').toUpperCase(),
+      score: Number(d.score) || 0,
+      signal: d._sig ? String(d._sig.label) : null,
+      panic: Number(d._panic) || 0,
+      c1: d._c1, c4: d._c4, c12: d._c12, c24: d._c24, c7d: d._c7d,
+      price: Number(d.current_price) || 0,
+      volume: Number(d.total_volume) || 0,
+      hot: d._mom ? Number(d._mom.hotScore) : null,
+      tags: d._sig && Array.isArray(d._sig.tags) ? d._sig.tags : []
+    }));
+    window.__lastRadarContextPostStatus = 'posting...';
+    console.log(`[RADAR] Posting scanner context to /api/bot/radar-context (${payload.length} rows)...`);
+    _fleetFetch('POST', '/api/bot/radar-context', { scannerCandidates: payload })
+      .then((res) => {
+         window.__lastRadarContextPostStatus = `ok (${res.stored} stored)`;
+         console.log(`[RADAR] Scanner context post successful. Server stored: ${res.stored}`);
+      })
+      .catch((err) => {
+         window.__lastRadarContextPostStatus = `error: ${err.message || 'unknown'}`;
+         console.warn('[RADAR] Scanner context post failed:', err);
+      });
+  } catch (err) {
+    window.__lastRadarContextPostStatus = `error: local catch`;
+    console.warn('[RADAR] Failed to push context:', err);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -6093,9 +6112,13 @@ function _renderTradingRadar(radar, esc) {
   html += '<div><span>Diagnostics</span>'
     + '<ul>'
     + '<li>Scanner Candidates Ingested: ' + esc(radar.scannerCandidatesIngested || 0) + '</li>'
+    + '<li>Scanner Context Sanitzed/Stored: ' + esc(radar.scannerCandidatesSanitized || radar.scannerCandidatesIngested || 0) + '</li>'
+    + '<li>Last Scanner Post Age: ' + esc(window.__lastRadarContextPush ? Math.floor((Date.now() - window.__lastRadarContextPush) / 1000) + 's' : 'never') + '</li>'
+    + '<li>Scanner Post Status: ' + esc(window.__lastRadarContextPostStatus || 'none') + '</li>'
     + '<li>Snapshot Symbols Ingested: ' + esc(radar.snapshotSymbolsIngested || 0) + '</li>'
     + '<li>Radar Candidates Built: ' + esc(radar.candidates ? radar.candidates.length : 0) + '</li>'
     + '<li>Telegram Eligible Count: ' + esc(entryReady.length) + '</li>'
+    + '<li>Last Radar Refresh: ' + esc(radar.updatedAt ? new Date(radar.updatedAt).toLocaleTimeString() : 'never') + '</li>'
     + '<li>Rejected: ' + esc(Object.entries(diag.rejected || {}).slice(0, 4).map(([k, v]) => k + ':' + v).join(', ') || 'none') + '</li>'
     + '<li>Missing: ' + esc(missing.join(', ') || 'none') + '</li>'
     + (detailFlags.length ? detailFlags.slice(0, 4).map((f) => '<li>Flag: ' + esc(f) + '</li>').join('') : '<li>Flags: none</li>')
