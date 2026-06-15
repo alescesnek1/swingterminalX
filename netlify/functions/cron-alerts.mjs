@@ -65,7 +65,9 @@ export function isRadarTelegramQualifiedCandidate(candidate) {
     && ['EARLY_ENTRY_READY', 'STANDARD_ENTRY_READY', 'AGGRESSIVE_ENTRY_READY', 'ENTRY_READY'].includes(status)
     && String(candidate.actionability || '') === 'ENTRY_READY'
     && candidate.telegramEligible === true
-    && String(candidate.safetyStatus || 'UNKNOWN') !== 'DANGER'
+    // Fail-closed safety: only a strictly SAFE token is alertable. UNKNOWN
+    // (unverifiable / missing chain data) and DANGER can never fire Telegram.
+    && String(candidate.safetyStatus || 'UNKNOWN') === 'SAFE'
     && radarConditionsPassed(candidate)
     && Number.isFinite(Number(candidate.confidence))
     && Number(candidate.confidence) >= 75
@@ -169,8 +171,9 @@ export async function sendRadarEntryReadyTelegram(candidate, state, token, chatI
     if (candidate.telegramEligible !== true) {
      return { ok: false, reason: 'not_telegram_eligible', code: 'TELEGRAM_RADAR_SKIPPED_NOT_ENTRY_READY' };
     }
-    if (String(candidate.safetyStatus || 'UNKNOWN') === 'DANGER') {
-      return { ok: false, reason: 'safety_danger', code: 'TELEGRAM_RADAR_SKIPPED_NOT_ENTRY_READY' };
+    if (String(candidate.safetyStatus || 'UNKNOWN') !== 'SAFE') {
+      const isDanger = String(candidate.safetyStatus || 'UNKNOWN') === 'DANGER';
+      return { ok: false, reason: isDanger ? 'safety_danger' : 'safety_not_clear', code: 'TELEGRAM_RADAR_SKIPPED_NOT_ENTRY_READY' };
     }
     if (!radarConditionsPassed(candidate)) {
       return { ok: false, reason: 'radar_conditions_not_passed', code: 'TELEGRAM_RADAR_SKIPPED_NOT_ENTRY_READY' };

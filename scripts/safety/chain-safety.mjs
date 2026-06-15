@@ -120,7 +120,15 @@ function parseBscScanSource(source) {
   if (!source || typeof source !== 'object') return null;
   const result = Array.isArray(source.result) ? source.result[0] : null;
   if (!result || typeof result !== 'object') return null;
-  const verified = !!String(result.SourceCode || '').trim() || String(result.ABI || '').trim() !== 'Contract source code not verified';
+  // A contract is "verified" only if BscScan returns actual source code, or an
+  // ABI that is both non-empty AND not the explicit "not verified" sentinel.
+  // (Honesty fix: an empty/missing ABI must NOT be treated as verified — the
+  // previous `ABI !== sentinel` test marked empty ABIs as verified.)
+  const sourceCode = String(result.SourceCode || '').trim();
+  const abi = String(result.ABI || '').trim();
+  const hasSourceCode = sourceCode.length > 0;
+  const hasRealAbi = abi.length > 0 && abi !== 'Contract source code not verified';
+  const verified = hasSourceCode || hasRealAbi;
   const ownerPrivilegeRisk = /owner|onlyOwner|pause|mint|blacklist|whitelist|excludeFromFee/i.test(
     [result.SourceCode, result.Proxy, result.Implementation].filter(Boolean).join('\n')
   );

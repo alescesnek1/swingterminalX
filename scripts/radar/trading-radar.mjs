@@ -549,8 +549,11 @@ export function classifyRadarStage(market, regime = evaluateMarketRegime([])) {
     missingCriticalCount * 1.4 +
     (precisionMod * 0.8)
   );
-  if (actionability === 'ENTRY_READY') distanceToEntryReadyScore = 100;
-  else distanceToEntryReadyScore = Math.min(distanceToEntryReadyScore, 97);
+  // distanceToEntryReadyScore is capped strictly below 100 here. The reserved
+  // 100 value is assigned later in evaluateTradingRadar ONLY when the V1/spec
+  // ENTRY_READY gate (buildRadarV1Output) actually passes — never from this
+  // heuristic stage machine. This keeps "100 == real ENTRY_READY" single-sourced.
+  distanceToEntryReadyScore = Math.min(distanceToEntryReadyScore, 97);
 
   let blockedBy = null;
   if (actionability !== 'ENTRY_READY') {
@@ -672,11 +675,19 @@ function radarScorePack(market, regime, stageInfo, levels, safety) {
     + (market.positiveDeltaNoAdvance === true ? -25 : 0)
     + (market.perpsOnlyMove === true ? -18 : 0)
   );
+  // Derivatives risk: high score == low risk. Missing funding/OI/liquidation
+  // data must NOT be treated as "safe" — unknown derivatives risk is neutral at
+  // best and is penalised, never credited. (Honesty fix: previously missing
+  // funding scored the same +6 as a confirmed-healthy funding reset.)
+  const fundingPresent = s.funding != null;
+  const oiPresent = s.oiChange != null;
+  const liqPresent = s.shortLiq != null || s.longLiq != null;
+  const derivDataPresent = fundingPresent || oiPresent || liqPresent;
   const deriv = clamp(
-    72
-    + (s.fundingOk ? 6 : -24)
+    (derivDataPresent ? 72 : 48)
+    + (fundingPresent ? (s.funding <= 0.03 ? 6 : -24) : -12)
     + (s.shortLiq >= 1.2 ? 8 : 0)
-    + (s.oiChange != null && s.oiChange > 12 ? -26 : 0)
+    + (oiPresent && s.oiChange > 12 ? -26 : 0)
     + (market.leveragedLongCrowding === true ? -28 : 0)
     + (market.perpsOnlyMove === true ? -16 : 0)
   );
@@ -689,9 +700,25 @@ function radarScorePack(market, regime, stageInfo, levels, safety) {
     + ((s.c1 > 4 || s.c4 > 8) ? -18 : 0)
     + (market.nearestSupplyDistancePct != null && Number(market.nearestSupplyDistancePct) < 4 ? -16 : 0)
   );
+  // Execution confidence must drop when the live microstructure EXECUTION
+  // depends on (order book depth/spread + trade flow + derivatives) is missing.
+  // Without it we cannot honestly claim a good entry, so execution is explicitly
+  // penalised and the gap is surfaced in missingSignals / blocked reasons.
+  const execMissing = [];
+  if (market.depthUsd == null && market.orderBookDepthUsd == null) execMissing.push('orderBookDepth');
+  if (market.spreadPct == null) execMissing.push('spread');
+  if (!derivDataPresent) execMissing.push('derivatives');
+  if (market.buyVolumeDominance == null && market.marketBuyVolumeDominance == null
+      && market.cumulativeDelta == null && market.takerBuySellRatio == null
+      && market.deltaImprovementPct == null) execMissing.push('flow');
+  const execMissingPenalty = Math.min(30, execMissing.length * 8);
+
   const setup = clamp(dislocation * 0.20 + flush * 0.20 + stabilization * 0.20 + reclaim * 0.15 + deriv * 0.10 + marketRegime * 0.15);
-  const execution = clamp(orderBook * 0.25 + flow * 0.25 + reclaim * 0.15 + riskReward * 0.25 + marketRegime * 0.10);
-  const safetyPenalty = safety.safetyStatus === 'DANGER' ? 45 : safety.safetyStatus === 'CAUTION' ? 14 : safety.safetyStatus === 'UNKNOWN' ? 8 : 0;
+  const execution = clamp(orderBook * 0.25 + flow * 0.25 + reclaim * 0.15 + riskReward * 0.25 + marketRegime * 0.10 - execMissingPenalty);
+  // UNKNOWN safety is no longer a near-free pass: an unverifiable token cannot
+  // be implicitly trusted, so it carries a real confidence penalty (and blocks
+  // Telegram eligibility downstream — only SAFE is alertable).
+  const safetyPenalty = safety.safetyStatus === 'DANGER' ? 45 : safety.safetyStatus === 'CAUTION' ? 14 : safety.safetyStatus === 'UNKNOWN' ? 18 : 0;
   const confidence = clamp(setup * 0.40 + execution * 0.35 + marketRegime * 0.15 + (100 - missingPenalty) * 0.10 - safetyPenalty);
 
   return {
@@ -708,6 +735,7 @@ function radarScorePack(market, regime, stageInfo, levels, safety) {
     EXECUTION_SCORE: round(execution, 0),
     FINAL_CONFIDENCE: round(confidence, 0),
     dataMissingPenalty: missingPenalty,
+    executionDataMissing: execMissing,
     rr,
     riskPct,
     tp1Distance,
@@ -802,10 +830,12 @@ function buildRadarV1Output(market, regime, stageInfo, levels, safety) {
     action = 'Reclaim detected. Wait for execution score and risk/reward to align.';
   }
 
+  const execMissing = Array.isArray(scores.executionDataMissing) ? scores.executionDataMissing : [];
+  const allMissingForReason = Array.from(new Set([...missing, ...execMissing]));
   const reason = [
     `setup ${scores.SETUP_SCORE}/100, execution ${scores.EXECUTION_SCORE}/100`,
     safety.safetyStatus === 'SAFE' ? 'safety check clear' : `safety ${safety.safetyStatus}: ${(safety.reasons || [])[0] || 'missing chain data'}`,
-    missing.length ? `missing data: ${missing.slice(0, 3).join(', ')}` : 'critical market data present',
+    allMissingForReason.length ? `missing data: ${allMissingForReason.slice(0, 4).join(', ')}` : 'critical market data present',
     regime.blocksMeanReversion ? 'market regime blocks longs' : `market regime ${scores.MARKET_REGIME_SCORE}/100`,
   ];
 
@@ -1164,6 +1194,11 @@ export function evaluateTradingRadar({
       safety.symbol = m.symbol;
       safetyResults.push(safety);
       const v1 = buildRadarV1Output(m, regime, stageInfo, levels, safety);
+      // SINGLE SOURCE OF TRUTH: a candidate is ENTRY_READY only when the V1/spec
+      // gate in buildRadarV1Output passes. The heuristic stage machine
+      // (classifyRadarStage) can suggest a stage but can NEVER, on its own,
+      // promote a candidate to ENTRY_READY in actionability, the entryReady list,
+      // the banner, counts, filters, distance=100, or Telegram eligibility.
       const entryReadyV1 = ['EARLY_ENTRY_READY', 'STANDARD_ENTRY_READY', 'AGGRESSIVE_ENTRY_READY'].includes(v1.STATUS);
       const adjustedConfidence = Math.min(stageInfo.confidence, v1.FINAL_CONFIDENCE);
       const effectiveActionability = entryReadyV1 ? 'ENTRY_READY'
@@ -1171,12 +1206,19 @@ export function evaluateTradingRadar({
         : v1.STATUS === 'WAIT_FOR_RECLAIM' ? 'NEEDS_CONFIRMATION'
         : v1.STATUS === 'LONG_FLUSH_CONFIRMED' ? 'NEEDS_STABILIZATION'
         : v1.STATUS === 'RISK_OFF_BLOCKED' || v1.STATUS === 'INVALIDATED' || safety.safetyStatus === 'DANGER' ? 'INVALIDATED'
+        // Never let a heuristic stage-machine ENTRY_READY leak through the fallback.
+        : stageInfo.actionability === 'ENTRY_READY' ? 'NEAR_ENTRY'
         : stageInfo.actionability;
+      // distanceToEntryReadyScore = 100 is reserved exclusively for confirmed V1
+      // ENTRY_READY. All other candidates are capped below 100 by classifyRadarStage.
+      const distanceToEntryReadyScore = entryReadyV1
+        ? 100
+        : Math.min(stageInfo.distanceToEntryReadyScore, 97);
       return {
         symbol: m.symbol,
         stage: stageInfo.stage,
         actionability: effectiveActionability,
-        distanceToEntryReadyScore: stageInfo.distanceToEntryReadyScore,
+        distanceToEntryReadyScore,
         setupQualityScore: stageInfo.setupQualityScore,
         confidence: adjustedConfidence,
         entryType: stageInfo.entryType,
@@ -1193,13 +1235,19 @@ export function evaluateTradingRadar({
         reasons: stageInfo.reasons,
         riskFlags: compactReasons([
           ...(stageInfo.riskFlags || []),
-          ...(safety.safetyStatus === 'SAFE' ? [] : [`safety ${safety.safetyStatus}`]),
+          ...(safety.safetyStatus === 'SAFE' ? [] : [`safety ${safety.safetyStatus} — entry/alert blocked until verified`]),
+          ...((v1.executionDataMissing || []).length ? [`missing execution data: ${(v1.executionDataMissing || []).join(', ')}`] : []),
         ], 8),
         conditionChecklist: stageInfo.conditionChecklist,
         missingSignals: missingForMarket(m).slice(0, 8),
         nextRequiredConfirmation: stageInfo.nextRequiredConfirmation,
-        blockedBy: v1.STATUS === 'INVALIDATED' || v1.STATUS === 'RISK_OFF_BLOCKED' ? v1.INVALIDATION : stageInfo.blockedBy,
-        telegramEligible: entryReadyV1 && v1.allRadarConditionsPassed && adjustedConfidence >= 75 && levels.entryZone != null && (levels.invalidationLevel != null || levels.suggestedStop != null) && safety.safetyStatus !== 'DANGER',
+        blockedBy: v1.STATUS === 'INVALIDATED' || v1.STATUS === 'RISK_OFF_BLOCKED' ? v1.INVALIDATION
+          : safety.safetyStatus !== 'SAFE' && entryReadyV1 ? `safety ${safety.safetyStatus} (not SAFE) blocks entry/alert`
+          : stageInfo.blockedBy,
+        // Telegram eligibility is fail-safe: V1 ENTRY_READY + all conditions +
+        // confidence>=75 + concrete entry/stop + safety strictly SAFE. UNKNOWN or
+        // DANGER safety can never be alertable here.
+        telegramEligible: entryReadyV1 && v1.allRadarConditionsPassed && adjustedConfidence >= 75 && levels.entryZone != null && (levels.invalidationLevel != null || levels.suggestedStop != null) && safety.safetyStatus === 'SAFE',
         sourceSignals: Array.isArray(m.scannerTags) ? m.scannerTags : [],
         diagnostics: {
           change24hPct: round(n(m.change24hPct ?? m.priceChangePercent), 2),
@@ -1255,8 +1303,11 @@ export function evaluateTradingRadar({
     state.snapshotSymbolsIngested = markets.length;
     state.candidatesByStage = state.pipeline;
     state.candidates = candidates;
-    state.watchlist = candidates.filter((c) => c.stage !== RADAR_STAGES.ENTRY_READY).slice(0, 20);
-    state.entryReady = candidates.filter((c) => ['EARLY_ENTRY_READY', 'STANDARD_ENTRY_READY', 'AGGRESSIVE_ENTRY_READY'].includes(c.STATUS) || c.stage === RADAR_STAGES.ENTRY_READY).slice(0, 10);
+    state.watchlist = candidates.filter((c) => c.actionability !== 'ENTRY_READY').slice(0, 20);
+    // entryReady is single-sourced from V1 actionability. A heuristic stage of
+    // ENTRY_READY is NOT sufficient — this prevents the banner/count/status from
+    // ever claiming ENTRY_READY without a real V1/spec pass.
+    state.entryReady = candidates.filter((c) => c.actionability === 'ENTRY_READY').slice(0, 10);
     state.selected = selected;
     state.exitGuidance = buildExitGuidance({ market: positionMarket, position, regime, now });
     state.pipeline = buildPipeline(candidates, universe.length);

@@ -20,23 +20,42 @@ function componentScore(positive = [], negative = [], fallback = 55) {
   return clamp(score);
 }
 
+// Honest cockpit evaluation. Mini-scores are computed ONLY from real data that
+// is actually present on the market snapshot. When the inputs for a component
+// (order book, flow, derivatives) are absent we return null ("N/A") instead of
+// fabricating a neutral-positive default, the health score is re-normalised over
+// the components we genuinely have, and `lowConfidence` is flagged. When there is
+// no live price at all we never fall back to the entry price (that would show a
+// fake 0% PnL); the trade is marked NO_LIVE_PRICE instead.
+function present(...vals) {
+  return vals.some((v) => v !== null && v !== undefined);
+}
+
 export function evaluateTradeCockpit(trade = {}, market = {}, regime = {}) {
   const entry = n(trade.entryPrice ?? trade.entry);
   const qty = n(trade.quantity ?? trade.qty ?? trade.size);
-  const current = n(market.currentPrice ?? market.price ?? market.lastPrice ?? trade.currentPrice, entry);
+  const current = n(market.currentPrice ?? market.price ?? market.lastPrice ?? trade.currentPrice); // NO entry fallback
   const stop = n(trade.stopLoss ?? trade.stop);
   const tp1 = n(trade.tp1);
   const tp2 = n(trade.tp2);
   const tp3 = n(trade.tp3);
   const realizedPnl = n(trade.realizedPnl, 0);
-  const value = current != null && qty != null ? current * qty : null;
-  const pnlUsd = entry != null && current != null && qty != null ? (current - entry) * qty : 0;
-  const pnlPct = entry > 0 && current != null ? ((current - entry) / entry) * 100 : 0;
-  const distanceToStopPct = stop > 0 && current > 0 ? ((stop - current) / current) * 100 : null;
-  const tpDistances = [tp1, tp2, tp3].map((tp) => tp > 0 && current > 0 ? ((tp - current) / current) * 100 : null);
+  const hasPrice = current != null && current > 0;
+  const value = hasPrice && qty != null ? current * qty : null;
+  const pnlUsd = entry != null && hasPrice && qty != null ? (current - entry) * qty : null;
+  const pnlPct = entry > 0 && hasPrice ? ((current - entry) / entry) * 100 : null;
+  const distanceToStopPct = stop > 0 && hasPrice ? ((stop - current) / current) * 100 : null;
+  const tpDistances = [tp1, tp2, tp3].map((tp) => tp > 0 && hasPrice ? ((tp - current) / current) * 100 : null);
   const ageMs = trade.entryTime ? Math.max(0, Date.now() - new Date(trade.entryTime).getTime()) : 0;
 
-  const momentum = componentScore([
+  // ── Component presence: only score what we actually have ──
+  const momentumPresent = present(market.change1hPct, market.change4hPct, market.higherLowHeld, market.vwapHeld, market.lowerHigh, market.vwapLost, market.reclaimLost);
+  const bookPresent = present(market.spreadPct, market.bidDepthRebuildPct, market.askWallsAbsorbed, market.bidsVanished, market.askWallsReloaded);
+  const flowPresent = present(market.buyVolumeDominance, market.marketBuyVolumeDominance, market.sellVolumeFading, market.deltaImproves, market.positiveDeltaNoAdvance, market.perpsOnlyMove, market.sellVolumeSpike);
+  const derivPresent = present(market.fundingRate, market.openInterestChangePct, market.spotLed, market.leveragedLongCrowding);
+  const marketPresent = present(regime.score, market.marketRegimeScore);
+
+  const momentum = momentumPresent ? componentScore([
     n(market.change1hPct, 0) > 0,
     n(market.change4hPct, 0) > 0,
     market.higherLowHeld === true,
@@ -45,17 +64,17 @@ export function evaluateTradeCockpit(trade = {}, market = {}, regime = {}) {
     market.lowerHigh === true,
     market.vwapLost === true,
     market.reclaimLost === true,
-  ]);
-  const book = componentScore([
+  ]) : null;
+  const book = bookPresent ? componentScore([
     n(market.bidDepthRebuildPct, 0) > 8,
-    n(market.spreadPct, 0.05) <= 0.08,
+    market.spreadPct != null && n(market.spreadPct) <= 0.08,
     market.askWallsAbsorbed === true,
   ], [
     market.bidsVanished === true,
     market.askWallsReloaded === true,
-    n(market.spreadPct, 0) > 0.18,
-  ]);
-  const flow = componentScore([
+    market.spreadPct != null && n(market.spreadPct) > 0.18,
+  ]) : null;
+  const flow = flowPresent ? componentScore([
     n(market.buyVolumeDominance ?? market.marketBuyVolumeDominance, 0) >= 0.55,
     market.sellVolumeFading === true,
     market.deltaImproves === true,
@@ -63,8 +82,8 @@ export function evaluateTradeCockpit(trade = {}, market = {}, regime = {}) {
     market.positiveDeltaNoAdvance === true,
     market.perpsOnlyMove === true,
     market.sellVolumeSpike === true,
-  ]);
-  const derivatives = componentScore([
+  ]) : null;
+  const derivatives = derivPresent ? componentScore([
     n(market.fundingRate, 0) <= 0.05,
     n(market.openInterestChangePct, 0) < 10,
     market.spotLed === true,
@@ -72,15 +91,51 @@ export function evaluateTradeCockpit(trade = {}, market = {}, regime = {}) {
     n(market.fundingRate, 0) > 0.08,
     n(market.openInterestChangePct, 0) > 18,
     market.leveragedLongCrowding === true,
-  ]);
-  const marketScore = clamp(regime.score == null ? n(market.marketRegimeScore, 55) : regime.score);
-  const progress = clamp(55 + Math.min(25, Math.max(-20, pnlPct * 2)) + (tp1 && current >= tp1 ? 10 : 0) + (tp2 && current >= tp2 ? 10 : 0));
+  ]) : null;
+  const marketScore = marketPresent ? clamp(regime.score == null ? n(market.marketRegimeScore, 55) : regime.score) : null;
+  const progress = hasPrice ? clamp(55 + Math.min(25, Math.max(-20, (pnlPct || 0) * 2)) + (tp1 && current >= tp1 ? 10 : 0) + (tp2 && current >= tp2 ? 10 : 0)) : null;
 
-  let health = clamp(momentum * 0.20 + book * 0.20 + flow * 0.20 + derivatives * 0.15 + marketScore * 0.15 + progress * 0.10);
+  // Re-normalise health over the components we actually have (no fabricated fill).
+  const WEIGHTS = { momentum: 0.20, orderBook: 0.20, flow: 0.20, derivatives: 0.15, market: 0.15, progress: 0.10 };
+  const comps = { momentum, orderBook: book, flow, derivatives, market: marketScore, progress };
+  let wSum = 0; let acc = 0;
+  for (const k of Object.keys(comps)) {
+    if (comps[k] != null) { acc += comps[k] * WEIGHTS[k]; wSum += WEIGHTS[k]; }
+  }
+  const missingComponents = ['orderBook', 'flow', 'derivatives'].filter((k) => comps[k] == null);
+  const lowConfidence = missingComponents.length > 0;
+  let health = wSum > 0 ? clamp(acc / wSum) : null;
+
   let status = 'HOLD_BUT_WATCH';
   let action = 'Hold but do not add. Tighten monitoring.';
   let mode = 'caution';
   const reasons = [];
+
+  // No live price → never fake a 0% PnL by falling back to entry.
+  if (!hasPrice) {
+    return {
+      symbol: String(trade.symbol || '').toUpperCase(),
+      status: 'NO_LIVE_PRICE',
+      action: 'Live price unavailable — symbol not in scanner universe. Cannot evaluate trade health.',
+      mode: 'manual',
+      priceUnavailable: true,
+      lowConfidence: true,
+      missingComponents: ['price', 'orderBook', 'flow', 'derivatives'],
+      tradeHealthScore: null,
+      pnlPct: null,
+      pnlUsd: null,
+      realizedPnl: round(realizedPnl, 2),
+      totalPnl: realizedPnl ? round(realizedPnl, 2) : null,
+      positionValue: null,
+      distanceToStopPct: null,
+      distanceToTpPct: [null, null, null],
+      timeInTradeMs: ageMs,
+      nextDecisionLevel: 'await live price / not in scanner universe',
+      scores: { momentum: null, orderBook: null, flow: null, derivatives: null, market: marketScore, progress: null },
+      reason: ['live price unavailable (not in scanner universe)'],
+      invalidation: stop ? `loss of ${stop}` : 'missing stop loss',
+    };
+  }
 
   if (!stop) {
     status = 'MISSING_RISK_DATA';
@@ -103,14 +158,14 @@ export function evaluateTradeCockpit(trade = {}, market = {}, regime = {}) {
     mode = 'emergency';
     reasons.push('hard invalidation active');
   }
-  if (marketScore < 25) {
+  if (marketScore != null && marketScore < 25) {
     status = health <= 20 ? 'EMERGENCY_EXIT' : 'RISK_OFF_EXIT';
     action = 'Close or heavily reduce. Market regime disaster.';
     health = Math.min(health, 30);
     mode = 'exit';
     reasons.push('market regime disaster');
   }
-  if ((book < 20 && n(market.spreadPct, 0) > 0.18) || market.orderBookCollapse === true) {
+  if ((book != null && book < 20 && market.spreadPct != null && n(market.spreadPct) > 0.18) || market.orderBookCollapse === true) {
     status = health <= 20 ? 'EMERGENCY_EXIT' : 'EXIT_ALL';
     action = 'Exit all or heavily reduce. Order book support collapsed.';
     health = Math.min(health, 25);
@@ -127,7 +182,7 @@ export function evaluateTradeCockpit(trade = {}, market = {}, regime = {}) {
 
   const tpReached = (tp3 && current >= tp3) ? 3 : (tp2 && current >= tp2) ? 2 : (tp1 && current >= tp1) ? 1 : 0;
   if (!['EMERGENCY_EXIT', 'EXIT_ALL', 'RISK_OFF_EXIT', 'MANUAL_REVIEW', 'MISSING_RISK_DATA'].includes(status)) {
-    if (tpReached && (flow < 50 || book < 50)) {
+    if (tpReached && ((flow != null && flow < 50) || (book != null && book < 50))) {
       status = tpReached >= 2 ? 'TAKE_PROFIT_AGGRESSIVE' : 'TAKE_PROFIT';
       action = tpReached >= 2 ? 'Take profit 50-70% and trail rest tightly.' : 'Take profit 25-40% and trail rest structurally.';
       health = Math.min(health, tpReached >= 2 ? 50 : 58);
@@ -160,15 +215,23 @@ export function evaluateTradeCockpit(trade = {}, market = {}, regime = {}) {
     }
   }
 
+  // round() coerces null→0; preserve genuine "no data" as null instead.
+  const r0 = (v) => (v == null ? null : round(v, 0));
+  const r2 = (v) => (v == null ? null : round(v, 2));
+  const fmtScore = (v) => (v == null ? 'N/A' : round(v, 0));
+
   const nextTp = [tp1, tp2, tp3].find((tp) => tp > current);
   const nextDecisionLevel = status === 'EMERGENCY_EXIT' || status === 'EXIT_ALL'
     ? 'immediate close'
-    : stop && Math.abs(distanceToStopPct) < Math.abs(tpDistances.find((x) => x != null) ?? 999)
+    : stop && distanceToStopPct != null && Math.abs(distanceToStopPct) < Math.abs(tpDistances.find((x) => x != null) ?? 999)
       ? `stop ${stop}`
       : nextTp ? `TP ${nextTp}` : 'trail structure / next candle';
 
   if (!reasons.length) {
-    reasons.push(`momentum ${round(momentum, 0)}, book ${round(book, 0)}, flow ${round(flow, 0)}, market ${round(marketScore, 0)}`);
+    reasons.push(`momentum ${fmtScore(momentum)}, book ${fmtScore(book)}, flow ${fmtScore(flow)}, market ${fmtScore(marketScore)}`);
+  }
+  if (lowConfidence) {
+    reasons.push(`low-confidence: missing ${missingComponents.join('/')} data`);
   }
 
   return {
@@ -176,23 +239,26 @@ export function evaluateTradeCockpit(trade = {}, market = {}, regime = {}) {
     status,
     action,
     mode,
-    tradeHealthScore: round(health, 0),
-    pnlPct: round(pnlPct, 2),
-    pnlUsd: round(pnlUsd, 2),
+    lowConfidence,
+    missingComponents,
+    priceUnavailable: false,
+    tradeHealthScore: r0(health),
+    pnlPct: r2(pnlPct),
+    pnlUsd: r2(pnlUsd),
     realizedPnl: round(realizedPnl, 2),
-    totalPnl: round(pnlUsd + realizedPnl, 2),
-    positionValue: round(value, 2),
-    distanceToStopPct: round(distanceToStopPct, 2),
-    distanceToTpPct: tpDistances.map((x) => round(x, 2)),
+    totalPnl: pnlUsd == null ? (realizedPnl ? round(realizedPnl, 2) : null) : round(pnlUsd + realizedPnl, 2),
+    positionValue: r2(value),
+    distanceToStopPct: r2(distanceToStopPct),
+    distanceToTpPct: tpDistances.map((x) => r2(x)),
     timeInTradeMs: ageMs,
     nextDecisionLevel,
     scores: {
-      momentum: round(momentum, 0),
-      orderBook: round(book, 0),
-      flow: round(flow, 0),
-      derivatives: round(derivatives, 0),
-      market: round(marketScore, 0),
-      progress: round(progress, 0),
+      momentum: r0(momentum),
+      orderBook: r0(book),
+      flow: r0(flow),
+      derivatives: r0(derivatives),
+      market: r0(marketScore),
+      progress: r0(progress),
     },
     reason: reasons.slice(0, 4),
     invalidation: status === 'EMERGENCY_EXIT' || status === 'EXIT_ALL' ? 'none before close' : (stop ? `loss of ${stop} or market regime below 40` : 'missing stop loss'),
@@ -214,7 +280,8 @@ export function summarizeCockpit(evaluations = []) {
     cautionCount: count(['HOLD_BUT_WATCH', 'MISSING_RISK_DATA', 'MANUAL_REVIEW']),
     takeProfitCount: count(['TAKE_PROFIT', 'TAKE_PROFIT_AGGRESSIVE']),
     exitCount: count(['EXIT_ALL', 'EMERGENCY_EXIT', 'RISK_OFF_EXIT']),
-    biggestRisk: rows.slice().sort((a, b) => a.tradeHealthScore - b.tradeHealthScore)[0]?.symbol || '--',
-    biggestWinner: rows.slice().sort((a, b) => b.pnlUsd - a.pnlUsd)[0]?.symbol || '--',
+    // Trades with no live price / no health score are not ranked as risk or winner.
+    biggestRisk: rows.filter((r) => r.tradeHealthScore != null).sort((a, b) => a.tradeHealthScore - b.tradeHealthScore)[0]?.symbol || '--',
+    biggestWinner: rows.filter((r) => r.pnlUsd != null).sort((a, b) => b.pnlUsd - a.pnlUsd)[0]?.symbol || '--',
   };
 }

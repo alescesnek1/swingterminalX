@@ -3494,7 +3494,7 @@ function _cpNum(v, fallback = null) {
 function _cpClamp(v, lo = 0, hi = 100) { return Math.max(lo, Math.min(hi, Number(v) || 0)); }
 function _cpFmt(v) { const x = Number(v); return Number.isFinite(x) ? fmt(x) : '--'; }
 function _cpPct(v) { const x = Number(v); return Number.isFinite(x) ? (x >= 0 ? '+' : '') + x.toFixed(2) + '%' : '--'; }
-function _cpScoreClass(v) { return v >= 70 ? 'good' : v >= 50 ? 'neutral' : v >= 35 ? 'warning' : 'bad'; }
+function _cpScoreClass(v) { return v == null ? 'na' : v >= 70 ? 'good' : v >= 50 ? 'neutral' : v >= 35 ? 'warning' : 'bad'; }
 
 function loadCockpitTrades() {
   try {
@@ -3505,72 +3505,116 @@ function loadCockpitTrades() {
 function saveCockpitTrades() {
   try { localStorage.setItem(COCKPIT_STORAGE_KEY, JSON.stringify(Cockpit.trades)); } catch {}
 }
+// Honest market lookup: returns only fields actually present on the live scanner
+// row. Microstructure we do not have (spread/depth/funding/flow) is left null —
+// never fabricated with a neutral-positive default. `found` is false when the
+// symbol is not in the current scanner universe (no live price).
 function _cpMarketFor(symbol) {
   const sym = String(symbol || '').replace(/USDT$|USDC$/i, '').toUpperCase();
   const row = (DATA || []).find(d => String(d.symbol || '').toUpperCase() === sym || String(d.symbol || '').toUpperCase() + 'USDT' === String(symbol || '').toUpperCase());
-  if (!row) return {};
+  if (!row) return { found: false };
+  const pick = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+  const bool = (v) => (v === true ? true : (v === false ? false : null));
   return {
-    currentPrice: _cpNum(row.current_price),
-    change1hPct: _cpNum(row._c1),
-    change4hPct: _cpNum(row._c4),
-    spreadPct: _cpNum(row.spreadPct, 0.06),
-    bidDepthRebuildPct: _cpNum(row.bidDepthRebuildPct, 8),
-    buyVolumeDominance: _cpNum(row.buyVolumeDominance ?? row.marketBuyVolumeDominance, 0.52),
-    fundingRate: _cpNum(row.fundingRate, 0.01),
-    openInterestChangePct: _cpNum(row.openInterestChangePct, 0),
-    marketRegimeScore: REGIME && Number.isFinite(Number(REGIME.score)) ? Number(REGIME.score) : 55,
-    higherLowHeld: row.higherLowHeld === true,
-    vwapHeld: row.vwapHeld === true,
-    bidsVanished: row.bidsVanished === true,
-    sellVolumeFading: row.sellVolumeFading === true,
-    deltaImproves: row.deltaImproves === true,
+    found: true,
+    currentPrice: pick(row.current_price),
+    change1hPct: pick(row._c1),
+    change4hPct: pick(row._c4),
+    spreadPct: pick(row.spreadPct),
+    bidDepthRebuildPct: pick(row.bidDepthRebuildPct),
+    buyVolumeDominance: pick(row.buyVolumeDominance ?? row.marketBuyVolumeDominance),
+    fundingRate: pick(row.fundingRate),
+    openInterestChangePct: pick(row.openInterestChangePct),
+    marketRegimeScore: (REGIME && Number.isFinite(Number(REGIME.score))) ? Number(REGIME.score) : null,
+    higherLowHeld: bool(row.higherLowHeld),
+    vwapHeld: bool(row.vwapHeld),
+    bidsVanished: bool(row.bidsVanished),
+    sellVolumeFading: bool(row.sellVolumeFading),
+    deltaImproves: bool(row.deltaImproves),
     newsRisk: row.newsRisk,
     exploitRisk: row.exploitRisk === true,
     hackRisk: row.hackRisk === true,
     delistingRisk: row.delistingRisk === true,
   };
 }
+function _cpPresent(...vals) { return vals.some(v => v !== null && v !== undefined); }
+// Mirrors scripts/cockpit/trade-cockpit.mjs evaluateTradeCockpit (kept in sync).
 function evaluateCockpitTrade(trade) {
   const market = _cpMarketFor(trade.symbol);
   const entry = _cpNum(trade.entryPrice);
   const qty = _cpNum(trade.quantity);
-  const current = _cpNum(market.currentPrice, entry);
+  const current = _cpNum(market.currentPrice); // NO entry fallback — never fake a 0% PnL
+  const hasPrice = current != null && current > 0;
   const stop = _cpNum(trade.stopLoss);
   const tps = [_cpNum(trade.tp1), _cpNum(trade.tp2), _cpNum(trade.tp3)];
-  const pnlUsd = entry > 0 && qty > 0 && current > 0 ? (current - entry) * qty : 0;
-  const pnlPct = entry > 0 && current > 0 ? ((current - entry) / entry) * 100 : 0;
-  const value = current > 0 && qty > 0 ? current * qty : 0;
+
+  // Live price missing → mark explicitly, do not invent PnL or scores.
+  if (!hasPrice) {
+    return {
+      trade, market, status: 'NO_LIVE_PRICE',
+      action: market.found ? 'Live price unavailable for this symbol.' : 'Not in scanner universe — live price unavailable.',
+      mode: 'manual', priceUnavailable: true, lowConfidence: true,
+      health: null, pnlUsd: null, pnlPct: null, value: null, distStop: null,
+      tpDistances: [null, null, null],
+      scores: { momentum: null, orderBook: null, flow: null, derivatives: null, market: (market.marketRegimeScore ?? null), progress: null },
+      reason: [market.found ? 'live price unavailable' : 'not in scanner universe'],
+      current: null, nextDecisionLevel: 'await live price', missingComponents: ['price', 'orderBook', 'flow', 'derivatives'],
+    };
+  }
+
+  const pnlUsd = entry > 0 && qty > 0 ? (current - entry) * qty : null;
+  const pnlPct = entry > 0 ? ((current - entry) / entry) * 100 : null;
+  const value = qty > 0 ? current * qty : null;
   const scoreBlock = (pos, neg, base = 55) => _cpClamp(base + pos.filter(Boolean).length * 10 - neg.filter(Boolean).length * 14);
-  const momentum = scoreBlock([market.change1hPct > 0, market.change4hPct > 0, market.higherLowHeld, market.vwapHeld], [market.vwapLost, market.reclaimLost]);
-  const book = scoreBlock([market.bidDepthRebuildPct > 8, market.spreadPct <= 0.08, market.askWallsAbsorbed], [market.bidsVanished, market.askWallsReloaded, market.spreadPct > 0.18]);
-  const flow = scoreBlock([market.buyVolumeDominance >= 0.55, market.sellVolumeFading, market.deltaImproves], [market.positiveDeltaNoAdvance, market.perpsOnlyMove, market.sellVolumeSpike]);
-  const derivatives = scoreBlock([market.fundingRate <= 0.05, market.openInterestChangePct < 10, market.spotLed], [market.fundingRate > 0.08, market.openInterestChangePct > 18, market.leveragedLongCrowding]);
-  const marketScore = _cpClamp(market.marketRegimeScore == null ? 55 : market.marketRegimeScore);
-  const progress = _cpClamp(55 + Math.min(25, Math.max(-20, pnlPct * 2)) + (tps[0] && current >= tps[0] ? 10 : 0) + (tps[1] && current >= tps[1] ? 10 : 0));
-  let health = _cpClamp(momentum * .2 + book * .2 + flow * .2 + derivatives * .15 + marketScore * .15 + progress * .1);
+
+  // Component presence — only score microstructure we actually have.
+  const momentumPresent = _cpPresent(market.change1hPct, market.change4hPct);
+  const bookPresent = _cpPresent(market.spreadPct, market.bidDepthRebuildPct);
+  const flowPresent = _cpPresent(market.buyVolumeDominance);
+  const derivPresent = _cpPresent(market.fundingRate, market.openInterestChangePct);
+  const marketPresent = market.marketRegimeScore != null;
+
+  const momentum = momentumPresent ? scoreBlock([market.change1hPct > 0, market.change4hPct > 0, market.higherLowHeld === true, market.vwapHeld === true], [market.vwapLost === true, market.reclaimLost === true]) : null;
+  const book = bookPresent ? scoreBlock([market.bidDepthRebuildPct > 8, market.spreadPct != null && market.spreadPct <= 0.08, market.askWallsAbsorbed === true], [market.bidsVanished === true, market.askWallsReloaded === true, market.spreadPct != null && market.spreadPct > 0.18]) : null;
+  const flow = flowPresent ? scoreBlock([market.buyVolumeDominance >= 0.55, market.sellVolumeFading === true, market.deltaImproves === true], [market.positiveDeltaNoAdvance === true, market.perpsOnlyMove === true, market.sellVolumeSpike === true]) : null;
+  const derivatives = derivPresent ? scoreBlock([market.fundingRate != null && market.fundingRate <= 0.05, market.openInterestChangePct != null && market.openInterestChangePct < 10, market.spotLed === true], [market.fundingRate != null && market.fundingRate > 0.08, market.openInterestChangePct != null && market.openInterestChangePct > 18, market.leveragedLongCrowding === true]) : null;
+  const marketScore = marketPresent ? _cpClamp(market.marketRegimeScore) : null;
+  const progress = _cpClamp(55 + Math.min(25, Math.max(-20, (pnlPct || 0) * 2)) + (tps[0] && current >= tps[0] ? 10 : 0) + (tps[1] && current >= tps[1] ? 10 : 0));
+
+  // Re-normalise health over present components only (no fabricated fill).
+  const W = { momentum: .2, orderBook: .2, flow: .2, derivatives: .15, market: .15, progress: .1 };
+  const comps = { momentum, orderBook: book, flow, derivatives, market: marketScore, progress };
+  let wSum = 0, acc = 0;
+  for (const k in comps) { if (comps[k] != null) { acc += comps[k] * W[k]; wSum += W[k]; } }
+  let health = wSum > 0 ? _cpClamp(acc / wSum) : null;
+  const missingComponents = ['orderBook', 'flow', 'derivatives'].filter(k => comps[k] == null);
+  const lowConfidence = missingComponents.length > 0;
+
   let status = 'HOLD_BUT_WATCH', action = 'Hold, no add, prepare stop update.', mode = 'caution';
   const reasons = [];
   if (!stop) { status = 'MISSING_RISK_DATA'; action = 'Define stop loss / invalidation before tracking decision quality.'; health = Math.min(health, 55); reasons.push('missing stop loss'); }
   if (stop > 0 && current <= stop) { status = 'EXIT_ALL'; action = 'Exit all immediately. Stop loss level is breached.'; health = Math.min(health, 20); mode = 'exit'; reasons.push('price below stop'); }
   if (trade.hardInvalidationActive === true) { status = 'EMERGENCY_EXIT'; action = 'Exit all immediately. Hard invalidation is active.'; health = Math.min(health, 15); mode = 'emergency'; reasons.push('hard invalidation active'); }
-  if (marketScore < 25) { status = health <= 20 ? 'EMERGENCY_EXIT' : 'RISK_OFF_EXIT'; action = 'Close or heavily reduce. Market regime disaster.'; health = Math.min(health, 30); mode = 'exit'; reasons.push('market regime disaster'); }
-  if ((book < 20 && market.spreadPct > 0.18) || market.orderBookCollapse) { status = health <= 20 ? 'EMERGENCY_EXIT' : 'EXIT_ALL'; action = 'Exit all or heavily reduce. Order book support collapsed.'; health = Math.min(health, 25); mode = 'exit'; reasons.push('order book support collapsed'); }
+  if (marketScore != null && marketScore < 25) { status = health <= 20 ? 'EMERGENCY_EXIT' : 'RISK_OFF_EXIT'; action = 'Close or heavily reduce. Market regime disaster.'; health = Math.min(health, 30); mode = 'exit'; reasons.push('market regime disaster'); }
+  if ((book != null && book < 20 && market.spreadPct != null && market.spreadPct > 0.18) || market.orderBookCollapse) { status = health <= 20 ? 'EMERGENCY_EXIT' : 'EXIT_ALL'; action = 'Exit all or heavily reduce. Order book support collapsed.'; health = Math.min(health, 25); mode = 'exit'; reasons.push('order book support collapsed'); }
   if (market.newsRisk === 'high' || market.exploitRisk || market.hackRisk || market.delistingRisk) { status = 'MANUAL_REVIEW'; action = 'Manual review now. Fundamental/news risk is active.'; health = Math.min(health, 40); mode = 'manual'; reasons.push('fundamental/news risk active'); }
   const tpReached = (tps[2] && current >= tps[2]) ? 3 : (tps[1] && current >= tps[1]) ? 2 : (tps[0] && current >= tps[0]) ? 1 : 0;
   if (!['EMERGENCY_EXIT','EXIT_ALL','RISK_OFF_EXIT','MANUAL_REVIEW','MISSING_RISK_DATA'].includes(status)) {
-    if (tpReached && (flow < 50 || book < 50)) { status = tpReached >= 2 ? 'TAKE_PROFIT_AGGRESSIVE' : 'TAKE_PROFIT'; action = tpReached >= 2 ? 'Take profit 50-70% and trail rest tightly.' : 'Take profit 25-40% and trail rest structurally.'; health = Math.min(health, tpReached >= 2 ? 50 : 58); mode = 'profit'; reasons.push(`TP${tpReached} reached with weakening support`); }
+    if (tpReached && ((flow != null && flow < 50) || (book != null && book < 50))) { status = tpReached >= 2 ? 'TAKE_PROFIT_AGGRESSIVE' : 'TAKE_PROFIT'; action = tpReached >= 2 ? 'Take profit 50-70% and trail rest tightly.' : 'Take profit 25-40% and trail rest structurally.'; health = Math.min(health, tpReached >= 2 ? 50 : 58); mode = 'profit'; reasons.push(`TP${tpReached} reached with weakening support`); }
     else if (health >= 91 && trade.addRulesValid === true) { status = 'ADD_ALLOWED'; action = 'Add partial only on valid pullback / higher low.'; mode = 'add'; }
     else if (health >= 81) { status = 'HOLD_STRONG'; action = 'Hold, do not take early profit unless at supply.'; mode = 'strong'; }
     else if (health >= 66) { status = 'HOLD'; action = 'Hold and trail structurally.'; mode = 'hold'; }
     else if (health < 36) { status = 'EXIT_ALL'; action = 'Close or reduce 80-100%.'; mode = 'exit'; }
     else if (health < 51) { status = 'TAKE_PROFIT_AGGRESSIVE'; action = pnlPct > 0 ? 'Take profit 50-70% and trail rest tightly.' : 'Tighten stop or exit if next candle fails.'; mode = 'profit'; }
   }
-  if (!reasons.length) reasons.push(`momentum ${Math.round(momentum)}, book ${Math.round(book)}, flow ${Math.round(flow)}, market ${Math.round(marketScore)}`);
-  const distStop = stop > 0 && current > 0 ? ((stop - current) / current) * 100 : null;
-  const tpDistances = tps.map(tp => tp > 0 && current > 0 ? ((tp - current) / current) * 100 : null);
+  const naFmt = (v) => (v == null ? 'N/A' : Math.round(v));
+  if (!reasons.length) reasons.push(`momentum ${naFmt(momentum)}, book ${naFmt(book)}, flow ${naFmt(flow)}, market ${naFmt(marketScore)}`);
+  if (lowConfidence) reasons.push(`low-confidence: missing ${missingComponents.join('/')} data`);
+  const distStop = stop > 0 ? ((stop - current) / current) * 100 : null;
+  const tpDistances = tps.map(tp => tp > 0 ? ((tp - current) / current) * 100 : null);
   const nextTp = tps.find(tp => tp > current);
-  const nextDecisionLevel = status === 'EXIT_ALL' || status === 'EMERGENCY_EXIT' ? 'immediate close' : (stop && Math.abs(distStop) < Math.abs(tpDistances.find(x => x != null) ?? 999) ? `stop ${stop}` : (nextTp ? `TP ${nextTp}` : 'trail structure / next candle'));
-  return { trade, market, status, action, mode, health: Math.round(health), pnlUsd, pnlPct, value, distStop, tpDistances, scores: { momentum, orderBook: book, flow, derivatives, market: marketScore, progress }, reason: reasons, current, nextDecisionLevel };
+  const nextDecisionLevel = status === 'EXIT_ALL' || status === 'EMERGENCY_EXIT' ? 'immediate close' : (stop && distStop != null && Math.abs(distStop) < Math.abs(tpDistances.find(x => x != null) ?? 999) ? `stop ${stop}` : (nextTp ? `TP ${nextTp}` : 'trail structure / next candle'));
+  return { trade, market, status, action, mode, priceUnavailable: false, lowConfidence, missingComponents, health: health == null ? null : Math.round(health), pnlUsd, pnlPct, value, distStop, tpDistances, scores: { momentum, orderBook: book, flow, derivatives, market: marketScore, progress }, reason: reasons, current, nextDecisionLevel };
 }
 function _cpPriority(status) {
   return { EMERGENCY_EXIT:1, EXIT_ALL:2, RISK_OFF_EXIT:2, TAKE_PROFIT_AGGRESSIVE:3, TAKE_PROFIT:4, MANUAL_REVIEW:4, MISSING_RISK_DATA:5, HOLD_BUT_WATCH:5, ADD_ALLOWED:6, HOLD:7, HOLD_STRONG:8 }[status] || 9;
@@ -3606,7 +3650,7 @@ function renderCockpit() {
     if (sort === 'ageDesc') return new Date(a.trade.entryTime || 0) - new Date(b.trade.entryTime || 0);
     return _cpPriority(a.status) - _cpPriority(b.status);
   });
-  const totalValue = rows.reduce((s,r)=>s+r.value,0), totalPnl = rows.reduce((s,r)=>s+r.pnlUsd,0);
+  const totalValue = rows.reduce((s,r)=>s+(r.value||0),0), totalPnl = rows.reduce((s,r)=>s+(r.pnlUsd||0),0);
   const count = names => rows.filter(r => names.includes(r.status)).length;
   summary.innerHTML = [
     ['OPEN', rows.length],
@@ -3618,21 +3662,24 @@ function renderCockpit() {
   ].map(([k,v]) => `<div class="cockpit-summary__item"><span>${_esc(k)}</span><b>${_esc(v)}</b></div>`).join('');
   list.innerHTML = rows.slice(0, 25).map(r => {
     const t = r.trade;
-    const pnlCls = r.pnlUsd >= 0 ? 'pos' : 'neg';
-    const gaugeColor = r.mode === 'emergency' || r.mode === 'exit' ? 'var(--red)' : r.mode === 'profit' ? 'var(--amb)' : r.mode === 'caution' ? '#e5d65c' : r.mode === 'strong' || r.mode === 'add' ? 'var(--grn)' : 'var(--blu)';
-    const scoreChip = (label, val) => `<div class="cockpit-score ${_cpScoreClass(val)}"><span>${label}</span><b>${Math.round(val)}</b></div>`;
+    const pnlCls = r.priceUnavailable ? '' : (r.pnlUsd >= 0 ? 'pos' : 'neg');
+    const gaugeColor = r.priceUnavailable ? 'var(--txt3)' : r.mode === 'emergency' || r.mode === 'exit' ? 'var(--red)' : r.mode === 'profit' ? 'var(--amb)' : r.mode === 'caution' ? '#e5d65c' : r.mode === 'strong' || r.mode === 'add' ? 'var(--grn)' : 'var(--blu)';
+    const scoreChip = (label, val) => `<div class="cockpit-score ${_cpScoreClass(val)}"><span>${label}</span><b>${val == null ? 'N/A' : Math.round(val)}</b></div>`;
+    const pnlText = r.priceUnavailable ? 'no live price' : `${_esc(_cpPct(r.pnlPct))} / ${_esc(_cpFmt(r.pnlUsd))}`;
+    const healthText = r.health == null ? 'N/A' : r.health;
+    const lowConfBadge = r.lowConfidence ? '<span class="cockpit-lowconf" title="Health is low-confidence: live order book / flow / derivatives data unavailable">LOW-CONFIDENCE</span>' : '';
     return `<div class="cockpit-card" data-id="${_esc(t.id)}" data-mode="${_esc(r.mode)}">
       <div class="cockpit-main">
         <div><div class="cockpit-symbol">${_esc(t.symbol)}</div><div class="cockpit-meta">${_esc(t.venue || 'Binance')} - ${_esc(t.entryType || 'manual')} - ${_esc(_cpAge(t.entryTime))}</div></div>
-        <div class="cockpit-pnl ${pnlCls}">${_esc(_cpPct(r.pnlPct))} / ${_esc(_cpFmt(r.pnlUsd))}</div>
+        <div class="cockpit-pnl ${pnlCls}">${pnlText}</div>
         <div class="cockpit-grid">
-          <div class="cockpit-kv"><span>Entry</span>${_esc(_cpFmt(t.entryPrice))}</div><div class="cockpit-kv"><span>Current</span>${_esc(_cpFmt(r.current))}</div>
-          <div class="cockpit-kv"><span>Qty</span>${_esc(t.quantity)}</div><div class="cockpit-kv"><span>Value</span>${_esc(_cpFmt(r.value))}</div>
+          <div class="cockpit-kv"><span>Entry</span>${_esc(_cpFmt(t.entryPrice))}</div><div class="cockpit-kv"><span>Current</span>${r.priceUnavailable ? 'unavailable' : _esc(_cpFmt(r.current))}</div>
+          <div class="cockpit-kv"><span>Qty</span>${_esc(t.quantity)}</div><div class="cockpit-kv"><span>Value</span>${r.priceUnavailable ? '--' : _esc(_cpFmt(r.value))}</div>
         </div>
       </div>
       <div class="cockpit-gauge">
-        <div class="cockpit-gauge__dial" style="--score:${r.health};--gauge-color:${gaugeColor}"><b>${r.health}</b></div>
-        <div class="cockpit-status">${_esc(r.status)}</div>
+        <div class="cockpit-gauge__dial" style="--score:${r.health == null ? 0 : r.health};--gauge-color:${gaugeColor}"><b>${healthText}</b></div>
+        <div class="cockpit-status">${_esc(r.status)} ${lowConfBadge}</div>
         <div class="cockpit-action">${_esc(r.action)}</div>
       </div>
       <div class="cockpit-right">
