@@ -23,7 +23,11 @@
       "WebFetch(domain:glint.trade)",
       "Bash(ls ..)",
       "Bash(node --check ../terminal-v7/index.html)",
-      "Bash(node --check apps/edge/public/js/terminal.js)"
+      "Bash(node --check apps/edge/public/js/terminal.js)",
+      "Bash(node --input-type=module -e ' *)",
+      "Bash(node --test \"tests/**/*.test.mjs\")",
+      "Bash(node tests/e2e-close.mjs)",
+      "Bash(node --input-type=module -e \"import {isTelegramHardDisabled} from './netlify/functions/cron-alerts.mjs'; console.log\\('no env set -> disabled:', isTelegramHardDisabled\\({}\\)\\); console.log\\('RADAR_TELEGRAM_ENABLED=true only -> disabled:', isTelegramHardDisabled\\({RADAR_TELEGRAM_ENABLED:'true'}\\)\\);\")"
     ]
   }
 }
