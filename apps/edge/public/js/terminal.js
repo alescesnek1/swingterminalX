@@ -1592,6 +1592,19 @@ function renderList() {
     if (!label || (label.toUpperCase() === 'NEUT' && !(Number(s && s.score) > 0))) return emptySignal;
     return `<span class="bdg ${_esc(s.cls || 'neut')}">${_esc(label)}</span>`;
   };
+  const safetyOf = (row) => {
+    const status = String(row.safetyStatus || row.safety_status || '').toUpperCase();
+    if (['SAFE','CAUTION','DANGER','UNKNOWN'].includes(status)) {
+      return { status, reason: row.safetyReason || row.safety_reason || (Array.isArray(row.safetyReasons) ? row.safetyReasons[0] : '') || status };
+    }
+    if (!(row.contractAddress || row.contract_address || row.token_address)) return { status: 'UNKNOWN', reason: 'missing contract address' };
+    if (!(row.chain || row.network || row.contract_chain)) return { status: 'UNKNOWN', reason: 'missing chain data' };
+    return { status: 'UNKNOWN', reason: 'chain safety not checked' };
+  };
+  const safetyMarkup = (row) => {
+    const s = safetyOf(row || {});
+    return `<span class="safety-pill safety-${_esc(s.status.toLowerCase())}" title="${_esc(s.reason)}">${_esc(s.status)}</span>`;
+  };
   // V7.4.5 — defensive timeframe extractor. The upstream payload
   // shape varies depending on which build branch in markets.js
   // produced the row (CoinGecko-merged vs. Binance-only spot vs.
@@ -1669,6 +1682,7 @@ function renderList() {
       const v_c7d = _pct(d, 'c7d');
       const expandRow = `<div class="trow-expand" data-coin-id="${idAttr}">
         <div class="te-cell"><span class="te-lbl">SIG</span><span class="te-val">${signalMarkup(s)}</span></div>
+        <div class="te-cell"><span class="te-lbl">SAFETY</span><span class="te-val">${safetyMarkup(d)}</span></div>
         <div class="te-cell"><span class="te-lbl">1H</span><span class="te-val">${tfCell(v_c1)}</span></div>
         <div class="te-cell"><span class="te-lbl">4H</span><span class="te-val">${tfCell(v_c4)}</span></div>
         <div class="te-cell"><span class="te-lbl">12H</span><span class="te-val">${tfCell(v_c12)}</span></div>
@@ -1695,6 +1709,7 @@ function renderList() {
         rank:   `<span data-col="rank" class="rn" style="${cs('rank')}">${start + i + 1}</span>`,
         coin:   `<div data-col="coin" class="coin-cell" style="${cs('coin')}"><span class="csym">${escSym}${exchBadge}</span><span class="cnm">${escName}</span></div>`,
         signal: `<span data-col="signal" class="sig-cell" style="${cs('signal')}">${signalMarkup(s)}${divTag}${snipTag}</span>`,
+        safety: `<span data-col="safety" class="sig-cell" style="${cs('safety')}">${safetyMarkup(d)}</span>`,
         score:  `<span data-col="score" data-cell="score" class="tr" style="${cs('score')}color:${s.score>=6?'var(--grn)':'var(--txt2)'}"><b>${s.score}/10</b></span>`,
         panic:  `<span data-col="panic" data-cell="panic" class="tr" style="${cs('panic')}">${panicHTML}</span>`,
         price:  `<span data-col="price" data-cell="price" class="tr" style="${cs('price')}">${safeMetric(price, fmt)}</span>`,
@@ -1763,6 +1778,16 @@ function pickCoin(id) {
   const sym = (d.symbol || '').toUpperCase();
   const validity = getSetupValidity(d);
   const binance = getBinanceLink(d);
+  const detailSafety = (() => {
+    const status = String(d.safetyStatus || d.safety_status || '').toUpperCase();
+    if (['SAFE','CAUTION','DANGER','UNKNOWN'].includes(status)) {
+      return { status, reason: d.safetyReason || d.safety_reason || (Array.isArray(d.safetyReasons) ? d.safetyReasons[0] : '') || status };
+    }
+    if (!(d.contractAddress || d.contract_address || d.token_address)) return { status: 'UNKNOWN', reason: 'missing contract address' };
+    if (!(d.chain || d.network || d.contract_chain)) return { status: 'UNKNOWN', reason: 'missing chain data' };
+    return { status: 'UNKNOWN', reason: 'chain safety not checked' };
+  })();
+  const detailSafetyHtml = `<span class="safety-pill safety-${_esc(detailSafety.status.toLowerCase())}" title="${_esc(detailSafety.reason)}">${_esc(detailSafety.status)}</span>`;
 
   // V6.8 Sprint 1 (FIX-3): sym, d.name, d.id are upstream strings.
   // textContent on dlbl is already safe; every other interpolation
@@ -1796,6 +1821,7 @@ function pickCoin(id) {
     <div class="mgrid">
       <div class="mc"><div class="ml">SIGNAL</div><div class="mv"><span class="bdg ${_esc(s.cls)}" data-detail="signal">${_esc(s.label)}</span></div></div>
       <div class="mc"><div class="ml">SCORE</div><div class="mv" data-detail="score">${s.score}/10</div></div>
+      <div class="mc"><div class="ml">SAFETY</div><div class="mv">${detailSafetyHtml}</div><div class="ms">${_esc(detailSafety.reason)}</div></div>
       <div class="mc"><div class="ml">PANIC</div><div class="mv" data-detail="panic">${panicBadge(Number.isFinite(d._panic) ? d._panic : calcPanic(d))}</div></div>
       <div class="mc"><div class="ml">24H VOL</div><div class="mv" data-detail="qv">${_esc(fmt(d.total_volume || 0))}</div></div>
       <div class="mc"><div class="ml">24H RANGE</div><div class="mv">${_esc(fmt(d.low_24h || 0))}–${_esc(fmt(d.high_24h || 0))}</div></div>
@@ -2258,12 +2284,23 @@ function _hmDraw(canvas) {
     ctx.font = `700 ${fontSym}px var(--mono, monospace)`;
     const cx = r.x + r.w / 2;
     const cy = r.y + r.h / 2;
-    if (r.h > 38 && r.w > 44) {
+    if (r.h > 52 && r.w > 48) {
       ctx.fillText(symFit, cx, cy - fontChg * 0.65);
       ctx.font = `600 ${fontChg}px var(--mono, monospace)`;
-      ctx.fillText((c >= 0 ? '+' : '') + c.toFixed(1) + '%', cx, cy + fontSym * 0.55);
+      ctx.fillText((c >= 0 ? '+' : '') + c.toFixed(1) + '%', cx, cy + fontSym * 0.45);
+      ctx.font = `500 ${Math.max(6, Math.min(11, fontChg * 0.75))}px var(--mono, monospace)`;
+      ctx.fillText(_hmFmtCap(Number(r.d.total_volume) || 0).replace('$', ''), cx, cy + fontSym * 1.25);
+    } else if (r.h > 24 && r.w > 28) {
+      const tinySym = sym.length > Math.max(1, Math.floor((r.w - 4) / (fontSym * 0.55))) ? sym.slice(0, Math.max(1, Math.floor((r.w - 4) / (fontSym * 0.55)))) : sym;
+      ctx.font = `700 ${Math.max(7, Math.min(13, fontSym))}px var(--mono, monospace)`;
+      ctx.fillText(tinySym, cx, cy - fontChg * 0.45);
+      ctx.font = `600 ${Math.max(7, Math.min(11, fontChg))}px var(--mono, monospace)`;
+      ctx.fillText((c >= 0 ? '+' : '') + c.toFixed(1) + '%', cx, cy + fontChg * 0.75);
     } else {
-      ctx.fillText(symFit, cx, cy);
+      ctx.font = `700 ${Math.max(6, Math.min(10, fontSym))}px var(--mono, monospace)`;
+      ctx.fillText(symFit, cx, cy - 3);
+      ctx.font = `600 ${Math.max(6, Math.min(9, fontChg))}px var(--mono, monospace)`;
+      ctx.fillText((c >= 0 ? '+' : '') + c.toFixed(0) + '%', cx, cy + 5);
     }
   }
 
@@ -2618,7 +2655,7 @@ function _applyViewDisplay(target, v) {
   const flex = name === 'heatmap' || name === 'manual' || name === 'calendar';
   target.style.display = flex ? 'flex' : 'block';
   target.style.flexDirection = flex ? 'column' : '';
-  if (name === 'bot' || name === 'radar') {
+  if (name === 'bot' || name === 'radar' || name === 'cockpit') {
     target.style.height = 'calc(100vh - 85px)';
     target.style.overflowY = 'auto';
     target.style.overflowX = 'hidden';
@@ -2665,6 +2702,9 @@ function sv(v, el) {
   });
   if (activeViewName === 'radar') requestAnimationFrame(() => {
     try { refreshFleet(); _startFleetPoll(); renderTradingRadarPanel(); window.__lastRadarContextPush = null; pushScannerContextToRadar(); } catch (e) { console.warn('[Trading RADAR] init failed:', e && e.message); }
+  });
+  if (activeViewName === 'cockpit') requestAnimationFrame(() => {
+    try { renderCockpit(); } catch (e) { console.warn('[Cockpit] render failed:', e && e.message); }
   });
   if (activeViewName === 'calendar') requestAnimationFrame(() => {
     try { renderCalendar(); } catch(e){}
@@ -3307,6 +3347,7 @@ async function doRefresh() {
   renderHeatmap();
   renderTopCharts();
   renderMovers();
+  renderCockpit();
 
   // LiveFeed: push refresh event
   LiveFeed.push(`Data refreshed — ${DATA.length} coins loaded`, 'info');
@@ -3394,7 +3435,19 @@ function pushScannerContextToRadar() {
         price: _radarFiniteOrNull(d && d.current_price),
         volume: _radarFiniteOrNull(d && d.total_volume),
         hot: _radarFiniteOrNull(d && d._mom && d._mom.hotScore),
-        tags: sigMeta && Array.isArray(sigMeta.tags) ? sigMeta.tags : []
+        tags: sigMeta && Array.isArray(sigMeta.tags) ? sigMeta.tags : [],
+        chain: d && (d.chain || d.network || d.contract_chain) ? String(d.chain || d.network || d.contract_chain) : null,
+        contractAddress: d && (d.contractAddress || d.contract_address || d.token_address) ? String(d.contractAddress || d.contract_address || d.token_address) : null,
+        topHolderPercent: _radarFiniteOrNull(d && (d.topHolderPercent ?? d.top_holder_percent)),
+        contractVerified: d && typeof d.contractVerified === 'boolean' ? d.contractVerified : null,
+        ownerPrivilegeRisk: !!(d && d.ownerPrivilegeRisk),
+        liquidityRisk: !!(d && d.liquidityRisk),
+        unlockRisk: !!(d && d.unlockRisk),
+        hackRisk: !!(d && d.hackRisk),
+        exploitRisk: !!(d && d.exploitRisk),
+        delistingRisk: !!(d && d.delistingRisk),
+        newsRisk: d && d.newsRisk ? String(d.newsRisk) : null,
+        safetySource: d && d.safetySource ? String(d.safetySource) : null
       };
     });
 
@@ -3430,6 +3483,251 @@ function pushScannerContextToRadar() {
 //     winRate, wins, losses, openCount, cautionMultiplier,
 //     openPositions:[…], recentTrades:[…], ts }
 // ─────────────────────────────────────────────────────────────
+// Trade Tracker Cockpit - local, advisory-only, no execution intents.
+const COCKPIT_STORAGE_KEY = 'terminal_x_trade_cockpit_v1';
+let Cockpit = { trades: [], sort: 'priority', compact: false };
+
+function _cpNum(v, fallback = null) {
+  const x = Number(v);
+  return Number.isFinite(x) ? x : fallback;
+}
+function _cpClamp(v, lo = 0, hi = 100) { return Math.max(lo, Math.min(hi, Number(v) || 0)); }
+function _cpFmt(v) { const x = Number(v); return Number.isFinite(x) ? fmt(x) : '--'; }
+function _cpPct(v) { const x = Number(v); return Number.isFinite(x) ? (x >= 0 ? '+' : '') + x.toFixed(2) + '%' : '--'; }
+function _cpScoreClass(v) { return v >= 70 ? 'good' : v >= 50 ? 'neutral' : v >= 35 ? 'warning' : 'bad'; }
+
+function loadCockpitTrades() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(COCKPIT_STORAGE_KEY) || '[]');
+    Cockpit.trades = Array.isArray(arr) ? arr.filter(t => t && t.status !== 'closed') : [];
+  } catch { Cockpit.trades = []; }
+}
+function saveCockpitTrades() {
+  try { localStorage.setItem(COCKPIT_STORAGE_KEY, JSON.stringify(Cockpit.trades)); } catch {}
+}
+function _cpMarketFor(symbol) {
+  const sym = String(symbol || '').replace(/USDT$|USDC$/i, '').toUpperCase();
+  const row = (DATA || []).find(d => String(d.symbol || '').toUpperCase() === sym || String(d.symbol || '').toUpperCase() + 'USDT' === String(symbol || '').toUpperCase());
+  if (!row) return {};
+  return {
+    currentPrice: _cpNum(row.current_price),
+    change1hPct: _cpNum(row._c1),
+    change4hPct: _cpNum(row._c4),
+    spreadPct: _cpNum(row.spreadPct, 0.06),
+    bidDepthRebuildPct: _cpNum(row.bidDepthRebuildPct, 8),
+    buyVolumeDominance: _cpNum(row.buyVolumeDominance ?? row.marketBuyVolumeDominance, 0.52),
+    fundingRate: _cpNum(row.fundingRate, 0.01),
+    openInterestChangePct: _cpNum(row.openInterestChangePct, 0),
+    marketRegimeScore: REGIME && Number.isFinite(Number(REGIME.score)) ? Number(REGIME.score) : 55,
+    higherLowHeld: row.higherLowHeld === true,
+    vwapHeld: row.vwapHeld === true,
+    bidsVanished: row.bidsVanished === true,
+    sellVolumeFading: row.sellVolumeFading === true,
+    deltaImproves: row.deltaImproves === true,
+    newsRisk: row.newsRisk,
+    exploitRisk: row.exploitRisk === true,
+    hackRisk: row.hackRisk === true,
+    delistingRisk: row.delistingRisk === true,
+  };
+}
+function evaluateCockpitTrade(trade) {
+  const market = _cpMarketFor(trade.symbol);
+  const entry = _cpNum(trade.entryPrice);
+  const qty = _cpNum(trade.quantity);
+  const current = _cpNum(market.currentPrice, entry);
+  const stop = _cpNum(trade.stopLoss);
+  const tps = [_cpNum(trade.tp1), _cpNum(trade.tp2), _cpNum(trade.tp3)];
+  const pnlUsd = entry > 0 && qty > 0 && current > 0 ? (current - entry) * qty : 0;
+  const pnlPct = entry > 0 && current > 0 ? ((current - entry) / entry) * 100 : 0;
+  const value = current > 0 && qty > 0 ? current * qty : 0;
+  const scoreBlock = (pos, neg, base = 55) => _cpClamp(base + pos.filter(Boolean).length * 10 - neg.filter(Boolean).length * 14);
+  const momentum = scoreBlock([market.change1hPct > 0, market.change4hPct > 0, market.higherLowHeld, market.vwapHeld], [market.vwapLost, market.reclaimLost]);
+  const book = scoreBlock([market.bidDepthRebuildPct > 8, market.spreadPct <= 0.08, market.askWallsAbsorbed], [market.bidsVanished, market.askWallsReloaded, market.spreadPct > 0.18]);
+  const flow = scoreBlock([market.buyVolumeDominance >= 0.55, market.sellVolumeFading, market.deltaImproves], [market.positiveDeltaNoAdvance, market.perpsOnlyMove, market.sellVolumeSpike]);
+  const derivatives = scoreBlock([market.fundingRate <= 0.05, market.openInterestChangePct < 10, market.spotLed], [market.fundingRate > 0.08, market.openInterestChangePct > 18, market.leveragedLongCrowding]);
+  const marketScore = _cpClamp(market.marketRegimeScore == null ? 55 : market.marketRegimeScore);
+  const progress = _cpClamp(55 + Math.min(25, Math.max(-20, pnlPct * 2)) + (tps[0] && current >= tps[0] ? 10 : 0) + (tps[1] && current >= tps[1] ? 10 : 0));
+  let health = _cpClamp(momentum * .2 + book * .2 + flow * .2 + derivatives * .15 + marketScore * .15 + progress * .1);
+  let status = 'HOLD_BUT_WATCH', action = 'Hold, no add, prepare stop update.', mode = 'caution';
+  const reasons = [];
+  if (!stop) { status = 'MISSING_RISK_DATA'; action = 'Define stop loss / invalidation before tracking decision quality.'; health = Math.min(health, 55); reasons.push('missing stop loss'); }
+  if (stop > 0 && current <= stop) { status = 'EXIT_ALL'; action = 'Exit all immediately. Stop loss level is breached.'; health = Math.min(health, 20); mode = 'exit'; reasons.push('price below stop'); }
+  if (trade.hardInvalidationActive === true) { status = 'EMERGENCY_EXIT'; action = 'Exit all immediately. Hard invalidation is active.'; health = Math.min(health, 15); mode = 'emergency'; reasons.push('hard invalidation active'); }
+  if (marketScore < 25) { status = health <= 20 ? 'EMERGENCY_EXIT' : 'RISK_OFF_EXIT'; action = 'Close or heavily reduce. Market regime disaster.'; health = Math.min(health, 30); mode = 'exit'; reasons.push('market regime disaster'); }
+  if ((book < 20 && market.spreadPct > 0.18) || market.orderBookCollapse) { status = health <= 20 ? 'EMERGENCY_EXIT' : 'EXIT_ALL'; action = 'Exit all or heavily reduce. Order book support collapsed.'; health = Math.min(health, 25); mode = 'exit'; reasons.push('order book support collapsed'); }
+  if (market.newsRisk === 'high' || market.exploitRisk || market.hackRisk || market.delistingRisk) { status = 'MANUAL_REVIEW'; action = 'Manual review now. Fundamental/news risk is active.'; health = Math.min(health, 40); mode = 'manual'; reasons.push('fundamental/news risk active'); }
+  const tpReached = (tps[2] && current >= tps[2]) ? 3 : (tps[1] && current >= tps[1]) ? 2 : (tps[0] && current >= tps[0]) ? 1 : 0;
+  if (!['EMERGENCY_EXIT','EXIT_ALL','RISK_OFF_EXIT','MANUAL_REVIEW','MISSING_RISK_DATA'].includes(status)) {
+    if (tpReached && (flow < 50 || book < 50)) { status = tpReached >= 2 ? 'TAKE_PROFIT_AGGRESSIVE' : 'TAKE_PROFIT'; action = tpReached >= 2 ? 'Take profit 50-70% and trail rest tightly.' : 'Take profit 25-40% and trail rest structurally.'; health = Math.min(health, tpReached >= 2 ? 50 : 58); mode = 'profit'; reasons.push(`TP${tpReached} reached with weakening support`); }
+    else if (health >= 91 && trade.addRulesValid === true) { status = 'ADD_ALLOWED'; action = 'Add partial only on valid pullback / higher low.'; mode = 'add'; }
+    else if (health >= 81) { status = 'HOLD_STRONG'; action = 'Hold, do not take early profit unless at supply.'; mode = 'strong'; }
+    else if (health >= 66) { status = 'HOLD'; action = 'Hold and trail structurally.'; mode = 'hold'; }
+    else if (health < 36) { status = 'EXIT_ALL'; action = 'Close or reduce 80-100%.'; mode = 'exit'; }
+    else if (health < 51) { status = 'TAKE_PROFIT_AGGRESSIVE'; action = pnlPct > 0 ? 'Take profit 50-70% and trail rest tightly.' : 'Tighten stop or exit if next candle fails.'; mode = 'profit'; }
+  }
+  if (!reasons.length) reasons.push(`momentum ${Math.round(momentum)}, book ${Math.round(book)}, flow ${Math.round(flow)}, market ${Math.round(marketScore)}`);
+  const distStop = stop > 0 && current > 0 ? ((stop - current) / current) * 100 : null;
+  const tpDistances = tps.map(tp => tp > 0 && current > 0 ? ((tp - current) / current) * 100 : null);
+  const nextTp = tps.find(tp => tp > current);
+  const nextDecisionLevel = status === 'EXIT_ALL' || status === 'EMERGENCY_EXIT' ? 'immediate close' : (stop && Math.abs(distStop) < Math.abs(tpDistances.find(x => x != null) ?? 999) ? `stop ${stop}` : (nextTp ? `TP ${nextTp}` : 'trail structure / next candle'));
+  return { trade, market, status, action, mode, health: Math.round(health), pnlUsd, pnlPct, value, distStop, tpDistances, scores: { momentum, orderBook: book, flow, derivatives, market: marketScore, progress }, reason: reasons, current, nextDecisionLevel };
+}
+function _cpPriority(status) {
+  return { EMERGENCY_EXIT:1, EXIT_ALL:2, RISK_OFF_EXIT:2, TAKE_PROFIT_AGGRESSIVE:3, TAKE_PROFIT:4, MANUAL_REVIEW:4, MISSING_RISK_DATA:5, HOLD_BUT_WATCH:5, ADD_ALLOWED:6, HOLD:7, HOLD_STRONG:8 }[status] || 9;
+}
+function _cpAge(ts) {
+  const t = ts ? new Date(ts).getTime() : 0;
+  if (!Number.isFinite(t) || t <= 0) return '--';
+  const min = Math.max(0, Math.floor((Date.now() - t) / 60000));
+  if (min < 60) return min + 'm';
+  const h = Math.floor(min / 60), m = min % 60;
+  if (h < 48) return h + 'h ' + m + 'm';
+  return Math.floor(h / 24) + 'd ' + (h % 24) + 'h';
+}
+function renderCockpit() {
+  const list = document.getElementById('cockpit-list');
+  const summary = document.getElementById('cockpit-summary');
+  if (!list || !summary) return;
+  if (!Cockpit.trades.length) {
+    summary.innerHTML = '';
+    list.innerHTML = '<div class="cockpit-empty">No open trades yet. Add a manual position above to start tracking.</div>';
+    return;
+  }
+  let rows = Cockpit.trades.map(evaluateCockpitTrade);
+  const sort = Cockpit.sort || 'priority';
+  rows.sort((a,b) => {
+    if (sort === 'pnlDesc') return b.pnlUsd - a.pnlUsd;
+    if (sort === 'pnlAsc') return a.pnlUsd - b.pnlUsd;
+    if (sort === 'sizeDesc') return b.value - a.value;
+    if (sort === 'healthDesc') return b.health - a.health;
+    if (sort === 'healthAsc') return a.health - b.health;
+    if (sort === 'stopNear') return Math.abs(a.distStop ?? 999) - Math.abs(b.distStop ?? 999);
+    if (sort === 'tpNear') return Math.abs(a.tpDistances.find(x => x != null) ?? 999) - Math.abs(b.tpDistances.find(x => x != null) ?? 999);
+    if (sort === 'ageDesc') return new Date(a.trade.entryTime || 0) - new Date(b.trade.entryTime || 0);
+    return _cpPriority(a.status) - _cpPriority(b.status);
+  });
+  const totalValue = rows.reduce((s,r)=>s+r.value,0), totalPnl = rows.reduce((s,r)=>s+r.pnlUsd,0);
+  const count = names => rows.filter(r => names.includes(r.status)).length;
+  summary.innerHTML = [
+    ['OPEN', rows.length],
+    ['VALUE', _cpFmt(totalValue)],
+    ['P&L', `${_cpFmt(totalPnl)} / ${_cpPct(totalValue ? totalPnl / totalValue * 100 : 0)}`],
+    ['HOLD', count(['HOLD','HOLD_STRONG','ADD_ALLOWED'])],
+    ['CAUTION', count(['HOLD_BUT_WATCH','MISSING_RISK_DATA','MANUAL_REVIEW'])],
+    ['EXIT/TP', count(['EXIT_ALL','EMERGENCY_EXIT','RISK_OFF_EXIT','TAKE_PROFIT','TAKE_PROFIT_AGGRESSIVE'])],
+  ].map(([k,v]) => `<div class="cockpit-summary__item"><span>${_esc(k)}</span><b>${_esc(v)}</b></div>`).join('');
+  list.innerHTML = rows.slice(0, 25).map(r => {
+    const t = r.trade;
+    const pnlCls = r.pnlUsd >= 0 ? 'pos' : 'neg';
+    const gaugeColor = r.mode === 'emergency' || r.mode === 'exit' ? 'var(--red)' : r.mode === 'profit' ? 'var(--amb)' : r.mode === 'caution' ? '#e5d65c' : r.mode === 'strong' || r.mode === 'add' ? 'var(--grn)' : 'var(--blu)';
+    const scoreChip = (label, val) => `<div class="cockpit-score ${_cpScoreClass(val)}"><span>${label}</span><b>${Math.round(val)}</b></div>`;
+    return `<div class="cockpit-card" data-id="${_esc(t.id)}" data-mode="${_esc(r.mode)}">
+      <div class="cockpit-main">
+        <div><div class="cockpit-symbol">${_esc(t.symbol)}</div><div class="cockpit-meta">${_esc(t.venue || 'Binance')} - ${_esc(t.entryType || 'manual')} - ${_esc(_cpAge(t.entryTime))}</div></div>
+        <div class="cockpit-pnl ${pnlCls}">${_esc(_cpPct(r.pnlPct))} / ${_esc(_cpFmt(r.pnlUsd))}</div>
+        <div class="cockpit-grid">
+          <div class="cockpit-kv"><span>Entry</span>${_esc(_cpFmt(t.entryPrice))}</div><div class="cockpit-kv"><span>Current</span>${_esc(_cpFmt(r.current))}</div>
+          <div class="cockpit-kv"><span>Qty</span>${_esc(t.quantity)}</div><div class="cockpit-kv"><span>Value</span>${_esc(_cpFmt(r.value))}</div>
+        </div>
+      </div>
+      <div class="cockpit-gauge">
+        <div class="cockpit-gauge__dial" style="--score:${r.health};--gauge-color:${gaugeColor}"><b>${r.health}</b></div>
+        <div class="cockpit-status">${_esc(r.status)}</div>
+        <div class="cockpit-action">${_esc(r.action)}</div>
+      </div>
+      <div class="cockpit-right">
+        <div class="cockpit-levels">
+          <div class="cockpit-level"><span>STOP</span><b>${_esc(_cpFmt(t.stopLoss))}</b></div>
+          <div class="cockpit-level"><span>TP1</span><b>${_esc(_cpFmt(t.tp1))}</b></div>
+          <div class="cockpit-level"><span>TP2</span><b>${_esc(_cpFmt(t.tp2))}</b></div>
+          <div class="cockpit-level"><span>TP3</span><b>${_esc(_cpFmt(t.tp3))}</b></div>
+          <div class="cockpit-level"><span>DIST STOP</span><b>${_esc(_cpPct(r.distStop))}</b></div>
+          <div class="cockpit-level"><span>NEXT</span><b>${_esc(r.nextDecisionLevel)}</b></div>
+        </div>
+        <div class="cockpit-scores">${scoreChip('MOM',r.scores.momentum)}${scoreChip('BOOK',r.scores.orderBook)}${scoreChip('FLOW',r.scores.flow)}${scoreChip('DERIV',r.scores.derivatives)}${scoreChip('MKT',r.scores.market)}${scoreChip('PROG',r.scores.progress)}</div>
+        <div class="cockpit-next"><b>Reason:</b> ${_esc(r.reason.join(' | '))}</div>
+      </div>
+      <div class="cockpit-actions">
+        <button type="button" data-cp-edit="${_esc(t.id)}">EDIT</button>
+        <button type="button" data-cp-close="${_esc(t.id)}">CLOSE</button>
+        <button type="button" data-cp-delete="${_esc(t.id)}">DELETE</button>
+      </div>
+      <div class="cockpit-card__detail"><div><b>Thesis:</b><br>${_esc(t.notes || '--')}</div><div><b>Invalidation:</b><br>${_esc(t.stopLoss ? `Loss of ${t.stopLoss} or market regime below 40` : 'missing stop loss')}</div></div>
+    </div>`;
+  }).join('');
+}
+function resetCockpitForm() {
+  const form = document.getElementById('cockpit-form');
+  if (form) form.reset();
+  const id = document.getElementById('cockpit-id');
+  if (id) id.value = '';
+  const venue = document.getElementById('cockpit-venue');
+  if (venue) venue.value = 'Binance';
+}
+function saveCockpitFromForm(e) {
+  if (e) e.preventDefault();
+  const id = document.getElementById('cockpit-id').value || ('cp_' + Date.now());
+  const trade = {
+    id,
+    symbol: String(document.getElementById('cockpit-symbol').value || '').toUpperCase(),
+    venue: document.getElementById('cockpit-venue').value || 'Binance',
+    entryType: document.getElementById('cockpit-entry-type').value || 'manual',
+    entryPrice: _cpNum(document.getElementById('cockpit-entry').value),
+    quantity: _cpNum(document.getElementById('cockpit-qty').value),
+    stopLoss: _cpNum(document.getElementById('cockpit-stop').value),
+    tp1: _cpNum(document.getElementById('cockpit-tp1').value),
+    tp2: _cpNum(document.getElementById('cockpit-tp2').value),
+    tp3: _cpNum(document.getElementById('cockpit-tp3').value),
+    notes: document.getElementById('cockpit-notes').value || '',
+    entryTime: (Cockpit.trades.find(t => t.id === id) || {}).entryTime || new Date().toISOString(),
+  };
+  if (!trade.symbol || !(trade.entryPrice > 0) || !(trade.quantity > 0)) return;
+  Cockpit.trades = Cockpit.trades.filter(t => t.id !== id).concat(trade);
+  saveCockpitTrades();
+  resetCockpitForm();
+  renderCockpit();
+}
+function initCockpit() {
+  loadCockpitTrades();
+  document.getElementById('cockpit-form')?.addEventListener('submit', saveCockpitFromForm);
+  document.getElementById('cockpit-reset')?.addEventListener('click', resetCockpitForm);
+  document.getElementById('cockpit-sort')?.addEventListener('change', (e) => { Cockpit.sort = e.target.value; renderCockpit(); });
+  document.getElementById('cockpit-compact-toggle')?.addEventListener('click', () => { Cockpit.compact = !Cockpit.compact; document.getElementById('v-cockpit')?.classList.toggle('cockpit-compact', Cockpit.compact); });
+  document.getElementById('cockpit-list')?.addEventListener('click', (e) => {
+    const edit = e.target.closest('[data-cp-edit]');
+    const del = e.target.closest('[data-cp-delete]');
+    const close = e.target.closest('[data-cp-close]');
+    if (edit) {
+      e.stopPropagation();
+      const t = Cockpit.trades.find(x => x.id === edit.dataset.cpEdit);
+      if (!t) return;
+      document.getElementById('cockpit-id').value = t.id;
+      document.getElementById('cockpit-symbol').value = t.symbol || '';
+      document.getElementById('cockpit-venue').value = t.venue || 'Binance';
+      document.getElementById('cockpit-entry-type').value = t.entryType || 'manual';
+      document.getElementById('cockpit-entry').value = t.entryPrice || '';
+      document.getElementById('cockpit-qty').value = t.quantity || '';
+      document.getElementById('cockpit-stop').value = t.stopLoss || '';
+      document.getElementById('cockpit-tp1').value = t.tp1 || '';
+      document.getElementById('cockpit-tp2').value = t.tp2 || '';
+      document.getElementById('cockpit-tp3').value = t.tp3 || '';
+      document.getElementById('cockpit-notes').value = t.notes || '';
+      return;
+    }
+    if (del || close) {
+      e.stopPropagation();
+      const id = del ? del.dataset.cpDelete : close.dataset.cpClose;
+      Cockpit.trades = Cockpit.trades.filter(t => t.id !== id);
+      saveCockpitTrades();
+      renderCockpit();
+      return;
+    }
+    const card = e.target.closest('.cockpit-card');
+    if (card) card.classList.toggle('expanded');
+  });
+  renderCockpit();
+}
+
 const PB_LEDGER_DOM_CAP = 50;
 const _pbRowKeys = new Set(); // de-dupe by closedAt|symbol|pnl
 const _pbAdvisoryKeys = new Set();
@@ -5629,7 +5927,7 @@ function _fleetCopy(text) {
 
 function _fleetLaunchUrl(sessionId) {
   if (!sessionId) return null;
-  const origin = (window.location && window.location.origin) || 'https://swing-terminal-v6.netlify.app';
+  const origin = (window.location && window.location.origin) || 'https://swing-terminal-x.netlify.app';
   return 'swingworker://start?session=' + encodeURIComponent(sessionId) + '&control=' + encodeURIComponent(origin);
 }
 
@@ -6151,10 +6449,12 @@ function _renderTradingRadar(radar, esc) {
     const cl = c.conditionChecklist || {};
     return `<tr class="radar-matrix-row ${c.actionability === 'ENTRY_READY' ? 'radar-matrix-row--ready' : ''}" onclick="window._radarSelect('${esc(c.symbol)}')">
       <td><b>${esc(c.symbol)}</b></td>
-      <td><span class="${_fleetRadarBadgeClass(c.actionability)}">${esc(c.actionability)}</span></td>
+      <td><span class="${_fleetRadarBadgeClass(c.STATUS || c.actionability)}">${esc(c.STATUS || c.actionability)}</span></td>
+      <td><span class="safety-pill safety-${esc(String(c.safetyStatus || 'UNKNOWN').toLowerCase())}" title="${esc((c.safetyReasons || [])[0] || 'missing chain safety data')}">${esc(c.safetyStatus || 'UNKNOWN')}</span></td>
       <td>${esc(_fleetFmtRadarValue(c.distanceToEntryReadyScore, 0))}</td>
-      <td><b class="${_fleetRadarScoreClass(c.setupQualityScore)}">${esc(_fleetFmtRadarValue(c.setupQualityScore, 0))}</b></td>
-      <td><b>${esc(_fleetFmtRadarValue(c.confidence, 0))}</b></td>
+      <td><b class="${_fleetRadarScoreClass(c.SETUP_SCORE ?? c.setupQualityScore)}">${esc(_fleetFmtRadarValue(c.SETUP_SCORE ?? c.setupQualityScore, 0))}</b></td>
+      <td><b>${esc(_fleetFmtRadarValue(c.EXECUTION_SCORE, 0))}</b></td>
+      <td><b>${esc(_fleetFmtRadarValue(c.FINAL_CONFIDENCE ?? c.confidence, 0))}</b></td>
       <td>${pillStatus((cl.relativeDump || {}).status)}</td>
       <td>${pillStatus((cl.longFlush || {}).status)}</td>
       <td>${pillStatus((cl.stabilization || {}).status)}</td>
@@ -6167,7 +6467,7 @@ function _renderTradingRadar(radar, esc) {
       <td class="radar-blocked-by">${esc(c.blockedBy || '--')}</td>
       <td class="radar-telegram-td">${c.telegramEligible ? '<span class="radar-telegram-ready">ready</span>' : '<span class="radar-telegram-no">no</span>'}</td>
     </tr>`;
-  }).join('') : `<tr><td colspan="16" class="fleet-empty">No candidates match current filter.</td></tr>`;
+  }).join('') : `<tr><td colspan="18" class="fleet-empty">No candidates match current filter.</td></tr>`;
 
   const filterButton = (key, label, count) =>
     `<button type="button" onclick="window._radarFilter='${key}'; renderTradingRadarPanel()" class="radar-filter-chip ${activeFilter===key?'radar-filter-chip--active':''}">${label} <b>${count}</b></button>`;
@@ -6191,7 +6491,7 @@ function _renderTradingRadar(radar, esc) {
   const matrixTableHtml = `<div class="radar-matrix-wrap"><table class="radar-matrix">
     <thead>
       <tr>
-        <th>Symbol</th><th>Act.</th><th>Dist</th><th>Score</th><th>Conf</th>
+        <th>Symbol</th><th>Status</th><th>Safety</th><th>Dist</th><th>Setup</th><th>Exec</th><th>Conf</th>
         <th>Dump</th><th>Flush</th><th>Stabil.</th><th>Absorb.</th><th>Reclaim</th><th>Regime</th>
         <th>Entry</th><th>Zone</th><th>Stop</th><th>Blocked By</th><th>Telegram</th>
       </tr>
@@ -6224,9 +6524,9 @@ function _renderTradingRadar(radar, esc) {
   // Focus Candidate
   let focusHtml = '';
   if (selected) {
-    const actLabel = selected.actionability === 'ENTRY_READY' ? 'ENTRY READY' : 
+    const actLabel = selected.STATUS || (selected.actionability === 'ENTRY_READY' ? 'ENTRY READY' : 
                      selected.actionability === 'NEAR_ENTRY' ? 'NEAR ENTRY - WAITING FOR CONFIRMATION' :
-                     selected.actionability === 'INVALIDATED' ? 'INVALIDATED' : 'NOT ACTIONABLE YET';
+                     selected.actionability === 'INVALIDATED' ? 'INVALIDATED' : 'NOT ACTIONABLE YET');
     
     const cl = selected.conditionChecklist || {};
     const checklistHtml = Object.keys(cl).map(k => `<li>${pillStatus(cl[k].status)} <b>${k}</b>: ${esc(cl[k].reason)}</li>`).join('');
@@ -6234,7 +6534,16 @@ function _renderTradingRadar(radar, esc) {
 
     focusHtml = `<div class="radar-focus-card">
       <div class="radar-focus-title"><b>${esc(selected.symbol || '--')}</b> <span class="${_fleetRadarBadgeClass(selected.actionability)}">${actLabel}</span></div>
+      <div class="radar-focus-blocked"><span>Action</span><b>${esc(selected.ACTION || '--')}</b></div>
       <div class="radar-focus-blocked"><span>Blocked by</span><b>${esc(selected.blockedBy || 'none')}</b></div>
+      <div class="radar-focus-levels">
+        <div><span>Setup</span><b>${esc(_fleetFmtRadarValue(selected.SETUP_SCORE, 0))}</b></div>
+        <div><span>Execution</span><b>${esc(_fleetFmtRadarValue(selected.EXECUTION_SCORE, 0))}</b></div>
+        <div><span>Risk/Reward</span><b>${esc(_fleetFmtRadarValue(selected.RISK_REWARD_SCORE, 0))}</b></div>
+        <div><span>Regime</span><b>${esc(_fleetFmtRadarValue(selected.MARKET_REGIME_SCORE, 0))}</b></div>
+        <div><span>Safety</span><b>${esc(selected.safetyStatus || 'UNKNOWN')} ${esc(selected.safetyScore != null ? selected.safetyScore : '')}</b></div>
+        <div><span>Size</span><b>${esc(selected.POSITION_SIZE_GUIDANCE || '--')}</b></div>
+      </div>
       <div class="radar-focus-grid">
         <div><span>Passed</span><div class="radar-chip-row">${chipList(groups.passed, 'radar-status-chip radar-status-chip--pass')}</div></div>
         <div><span>Waiting</span><div class="radar-chip-row">${chipList(groups.waiting, 'radar-status-chip radar-status-chip--wait')}</div></div>
@@ -6243,9 +6552,10 @@ function _renderTradingRadar(radar, esc) {
       <div class="radar-next-trigger"><span>Next trigger</span><b>${esc(selected.nextRequiredConfirmation || 'none')}</b></div>
       <div class="radar-focus-levels">
         <div><span>Entry zone</span><b>${esc(zoneText(selected.entryZone))}</b></div>
-        <div><span>Suggested stop</span><b>${esc(_fleetFmtRadarPrice(selected.suggestedStop))}</b></div>
-        <div><span>Invalidation</span><b>${esc(_fleetFmtRadarPrice(selected.invalidationLevel))}</b></div>
+        <div><span>Suggested stop</span><b>${esc(_fleetFmtRadarPrice(selected.STOP_LOSS_LEVEL ?? selected.suggestedStop))}</b></div>
+        <div><span>Invalidation</span><b>${esc(_fleetFmtRadarPrice(selected.HARD_INVALIDATION ?? selected.invalidationLevel))}</b></div>
       </div>
+      <div class="radar-next-trigger"><span>TP zones</span><b>${esc((selected.TAKE_PROFIT_LEVELS || selected.takeProfitCheckpoints || []).map(tp => `${tp.label || 'TP'} ${_fleetFmtRadarPrice(tp.level)}`).join(' / ') || '--')}</b></div>
     </div>`;
   } else {
     focusHtml = '<div class="fleet-empty radar-focus-card">No selected setup. Click a row to focus.</div>';
@@ -6287,6 +6597,8 @@ function _renderTradingRadar(radar, esc) {
     + '<li>Scanner Rows Rejected: ' + esc(diag.scannerRowsRejected || 0) + '</li>'
     + '<li>Radar Rows Evaluated: ' + esc(diag.radarRowsEvaluated || 0) + '</li>'
     + '<li>Radar Rows Displayed: ' + esc(rowsToRender.length || 0) + '</li>'
+    + '<li>Safety: checked ' + esc(diag.safetyRowsChecked || 0) + ', unknown ' + esc(diag.safetyRowsUnknown || 0) + ', caution ' + esc(diag.safetyRowsCaution || 0) + ', danger ' + esc(diag.safetyRowsDanger || 0) + '</li>'
+    + '<li>Chain API Available: ' + esc(diag.chainApiAvailable ? 'yes' : 'no') + '</li>'
     + '<li>Detected scanner fields: ' + esc((diag.fieldMappingDetected || []).join(', ') || 'none') + '</li>'
     + '<li>Last Radar Refresh: ' + esc(radar.updatedAt ? new Date(radar.updatedAt).toLocaleTimeString() : 'never') + '</li>'
     + '<li>Rejected: ' + esc(Object.entries(diag.rejectedByReason || diag.rejected || {}).slice(0, 4).map(([k, v]) => k + ':' + v).join(', ') || 'none') + '</li>'
@@ -6426,7 +6738,7 @@ function _fleetStaleLabel(s) {
 function _fleetManualCommandHint(sessionId) {
   const id = sessionId || '<SESSION_ID>';
   return 'Manual: powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\windows-launch-worker.ps1 "swingworker://start?session='
-    + id + '&control=https%3A%2F%2Fswing-terminal-v6.netlify.app"';
+    + id + '&control=https%3A%2F%2Fswing-terminal-x.netlify.app"';
 }
 
 // ── Cockpit cleanup helpers (spec B/C) ──────────────────────────────────────
@@ -7481,6 +7793,9 @@ function _applyTick(frame) {
     if (window._currentDetailCoinId && d.id === window._currentDetailCoinId) {
       _updateDetailPanel(d, newPrice, prevPrice, prevPanic);
     }
+    if (document.getElementById('v-cockpit')?.classList.contains('on')) {
+      try { renderCockpit(); } catch {}
+    }
 
     if (window.LOCAL_PAPERBOT_ENABLED === true && !window.__serverPaperBotSeen) {
       try { paperBotInstance.processMarkets([d]); }
@@ -7691,6 +8006,7 @@ async function initTerminalApp() {
   initColumnDnD();           // V7.3 — drag-to-reorder header
   initPanicManual();         // V7.3 — [?] info modal
   initHotnessTooltip();
+  initCockpit();
   if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
   fetchBinancePairs();
   await doRefresh();
@@ -7947,6 +8263,8 @@ const COLUMN_DEFS = {
   rank:   { label: '#',       width: 32,     tip: '',                                                                       align: 'left',  dragOK: true  },
   coin:   { label: 'COIN',    width: 160,    tip: '',                                                                       align: 'left',  dragOK: true  },
   signal: { label: 'SIGNAL',  width: 110,    tip: '',                                                                       align: 'left',  dragOK: true  },
+  safety: { label: 'SAFETY',  width: 82,     tip: 'Chain / holder / contract risk',                                         align: 'left',  dragOK: true,
+            tooltip: 'SAFE / CAUTION / DANGER / UNKNOWN. UNKNOWN means chain or contract data is missing, never assumed safe.' },
   score:  { label: 'SCORE',   width: 64,     tip: 'Signal Score 0-10',                                                      align: 'right', dragOK: true,
             tooltip: 'Primary algorithmic valuation engine. Scales 0 to 10/10 based on macro confluence indicators.' },
   panic:  { label: 'PANIC',   width: 70,     tip: 'Click for the PANIC manual',                                             align: 'right', dragOK: true,
@@ -7966,7 +8284,7 @@ const COLUMN_DEFS = {
 };
 // Default visual sequence. The mobile-only expand toggle is appended
 // AFTER this chain in DOM order and never participates in reorder.
-const DEFAULT_COLUMN_ORDER = ['rank','coin','signal','score','panic','price','c1','c4','c12','c24','c7d','qv','hot'];
+const DEFAULT_COLUMN_ORDER = ['rank','coin','signal','safety','score','panic','price','c1','c4','c12','c24','c7d','qv','hot'];
 const COLUMN_ORDER_STORAGE_KEY = 'swing_col_order_v73';
 const COLUMN_WIDTHS_STORAGE_KEY = 'swing_col_widths_v74';
 const MIN_COL_PX = 36;     // hard floor — narrower than this and the label gets ellipsised away.

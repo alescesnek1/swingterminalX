@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="Swing Terminal V6">
+  <meta name="description" content="Swing Terminal Version X">
   <!-- Force browsers to drop the previously cached HTML so the v3+ asset URLs are actually fetched. -->
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◈</text></svg>">
-  <title>Swing Terminal V6</title>
+  <title>Swing Terminal Version X</title>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/terminal.css?v=6h8">
   
@@ -22,7 +22,7 @@
   <div id="auth-gate" class="auth-gate">
     <div class="auth-card">
       <div class="auth-card__logo">◈</div>
-      <h1 class="auth-card__title">SWING TERMINAL V6</h1>
+      <h1 class="auth-card__title">SWING TERMINAL VERSION X</h1>
       <p class="auth-card__sub">Auth required</p>
 
       <div id="auth-error" class="auth-error"></div>
@@ -78,7 +78,7 @@
   <!-- TERMINAL APP -->
   <div id="terminal-app" style="display:none">
     <div id="topbar">
-      <div class="logo">◈ SWING<span>TERMINAL V6</span></div>
+      <div class="logo">◈ SWING<span>TERMINAL X</span></div>
       
       <div class="hotness-box" title="Logika: Hotness počítáme jako vážený průměr 24h Volume delty (váha 40 %), Open Interest delty (váha 40 %) a aktuální likvidity/spreadu (váha 20 %). Pokud je výsledek > 80, trh je 'EXTREME', pod 20 je 'DEAD'.">
         <span class="hotness-label">MKT HOTNESS:</span>
@@ -102,7 +102,7 @@
       </div>
 
       <div class="hdr-right">
-        <span class="v6-badge" title="Terminal V6" style="font-size:9px;font-weight:700;letter-spacing:.12em;color:var(--acc);padding:2px 6px;border:1px solid rgba(0,232,200,.35);border-radius:3px;background:rgba(0,232,200,.06);line-height:1">V6</span>
+        <span class="version-x-badge" title="Terminal Version X" style="font-size:9px;font-weight:700;letter-spacing:.12em;color:var(--acc);padding:2px 6px;border:1px solid rgba(0,232,200,.35);border-radius:3px;background:rgba(0,232,200,.06);line-height:1">X</span>
         <button class="hbtn hbtn--mkt-briefing" id="mkt-briefing-trigger" title="AI Market Briefing — Macro / Meta / Opportunities (cache 45 min)">🌍 MARKET BRIEFING</button>
         <button class="hbtn hbtn--briefing" id="briefing-trigger" title="AI syntéza trhu (top 3 setupy)">📋 SYNTÉZA TRHU</button>
         <button class="hbtn" onclick="document.dispatchEvent(new Event('refresh_now'))">REFRESH</button>
@@ -144,6 +144,7 @@
     <div id="tabs">
       <div class="tab on" onclick="sv('scanner',this)">SCANNER</div>
       <div class="tab" onclick="sv('radar',this)" data-target="view-radar">TRADING RADAR</div>
+      <div class="tab" onclick="sv('cockpit',this)" data-target="view-cockpit">COCKPIT</div>
       <div class="tab" onclick="sv('bot',this)" data-target="view-bot" title="Paper Trading Sandbox - read-only safety mode">BOT FEED <span class="cnt pb-tab-pip" id="pb-tab-pip"></span></div>
       <div class="tab" onclick="sv('alerts',this)">ALERTS <span class="cnt" id="abadge"></span></div>
       <div class="tab" onclick="sv('livefeed',this)">LIVE FEED <span class="lf-tab-badge" id="lf-unread"></span></div>
@@ -316,6 +317,55 @@
           </div>
           <div class="trading-radar__copy">Waiting for fleet public-market snapshot.</div>
         </div>
+      </div>
+    </div>
+
+    <!-- TRADE TRACKER COCKPIT - manual post-entry position management. Advisory only. -->
+    <div id="v-cockpit" class="view">
+      <div class="cockpit-shell">
+        <div class="cockpit-header">
+          <div>
+            <div class="cockpit-kicker">TRADE TRACKER COCKPIT</div>
+            <div class="cockpit-title">OPEN POSITIONS</div>
+          </div>
+          <div class="cockpit-summary" id="cockpit-summary"></div>
+        </div>
+        <form class="cockpit-form" id="cockpit-form">
+          <input type="hidden" id="cockpit-id">
+          <input id="cockpit-symbol" placeholder="SYMBOL" required>
+          <input id="cockpit-venue" placeholder="VENUE" value="Binance">
+          <select id="cockpit-entry-type">
+            <option value="manual">manual</option>
+            <option value="early">early reversal</option>
+            <option value="standard">standard</option>
+            <option value="aggressive">aggressive</option>
+            <option value="swing">swing</option>
+          </select>
+          <input id="cockpit-entry" type="number" step="any" placeholder="ENTRY" required>
+          <input id="cockpit-qty" type="number" step="any" placeholder="QTY" required>
+          <input id="cockpit-stop" type="number" step="any" placeholder="STOP">
+          <input id="cockpit-tp1" type="number" step="any" placeholder="TP1">
+          <input id="cockpit-tp2" type="number" step="any" placeholder="TP2">
+          <input id="cockpit-tp3" type="number" step="any" placeholder="TP3">
+          <input id="cockpit-notes" placeholder="THESIS / NOTES">
+          <button type="submit">SAVE</button>
+          <button type="button" id="cockpit-reset">CLEAR</button>
+        </form>
+        <div class="cockpit-toolbar">
+          <select id="cockpit-sort">
+            <option value="priority">priority</option>
+            <option value="pnlDesc">highest PnL</option>
+            <option value="pnlAsc">largest loss</option>
+            <option value="sizeDesc">largest position</option>
+            <option value="healthDesc">highest health</option>
+            <option value="healthAsc">lowest health</option>
+            <option value="stopNear">nearest stop</option>
+            <option value="tpNear">nearest TP</option>
+            <option value="ageDesc">longest time</option>
+          </select>
+          <button type="button" id="cockpit-compact-toggle">COMPACT</button>
+        </div>
+        <div id="cockpit-list" class="cockpit-list"></div>
       </div>
     </div>
 

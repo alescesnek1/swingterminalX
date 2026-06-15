@@ -2887,7 +2887,19 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
         price: finiteOrNull(c.price),
         volume: finiteOrNull(c.volume),
         hot: finiteOrNull(c.hot),
-        tags: Array.isArray(c.tags) ? c.tags.slice(0, 10).map(t => String(t).slice(0, 20)) : []
+        tags: Array.isArray(c.tags) ? c.tags.slice(0, 10).map(t => String(t).slice(0, 20)) : [],
+        chain: c.chain ? String(c.chain).toLowerCase().slice(0, 24) : null,
+        contractAddress: c.contractAddress ? String(c.contractAddress).slice(0, 80) : null,
+        topHolderPercent: finiteOrNull(c.topHolderPercent),
+        contractVerified: typeof c.contractVerified === 'boolean' ? c.contractVerified : null,
+        ownerPrivilegeRisk: c.ownerPrivilegeRisk === true,
+        liquidityRisk: c.liquidityRisk === true,
+        unlockRisk: c.unlockRisk === true,
+        hackRisk: c.hackRisk === true,
+        exploitRisk: c.exploitRisk === true,
+        delistingRisk: c.delistingRisk === true,
+        newsRisk: c.newsRisk ? String(c.newsRisk).slice(0, 20) : null,
+        safetySource: c.safetySource ? String(c.safetySource).slice(0, 40) : null
       };
     }).filter(Boolean);
 

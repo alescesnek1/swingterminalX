@@ -7,22 +7,42 @@
 // It consumes public market snapshots plus optional microstructure/position context
 // and returns advisory candidates and exit guidance only.
 
+import { buildSafetyDiagnostics, evaluateKnownSafety } from '../safety/chain-safety.mjs';
+
 const WEIRD_BASE_RE = /(UP|DOWN|BULL|BEAR)$|\d+(L|S)$/;
 const QUOTES = new Set(['USDC', 'USDT']);
 
 export const RADAR_STAGES = Object.freeze({
   NO_SETUP: 'NO_SETUP',
+  IGNORE: 'IGNORE',
   WATCH: 'WATCH',
+  DISLOCATION_CONFIRMED: 'DISLOCATION_CONFIRMED',
   LONG_FLUSH_CONFIRMED: 'LONG_FLUSH_CONFIRMED',
+  STABILIZATION: 'STABILIZATION',
   STABILIZING: 'STABILIZING',
+  RECLAIM_DETECTED: 'RECLAIM_DETECTED',
   SQUEEZE_CONFIRMED: 'SQUEEZE_CONFIRMED',
   ENTRY_READY: 'ENTRY_READY',
+  EARLY_ENTRY_READY: 'EARLY_ENTRY_READY',
+  STANDARD_ENTRY_READY: 'STANDARD_ENTRY_READY',
+  AGGRESSIVE_ENTRY_READY: 'AGGRESSIVE_ENTRY_READY',
+  WAIT_FOR_PULLBACK: 'WAIT_FOR_PULLBACK',
+  WAIT_FOR_RECLAIM: 'WAIT_FOR_RECLAIM',
+  EXTENDED_ENTRY: 'EXTENDED_ENTRY',
+  CHASE_RISK: 'CHASE_RISK',
+  RISK_OFF_BLOCKED: 'RISK_OFF_BLOCKED',
+  INVALIDATED: 'INVALIDATED',
 });
 
 export const RADAR_ENTRY_TYPES = Object.freeze({
   NONE: null,
   RECLAIM_RETEST: 'RECLAIM_RETEST',
   ABSORPTION: 'ABSORPTION',
+  EARLY_REVERSAL_ENTRY: 'EARLY_REVERSAL_ENTRY',
+  STANDARD_ENTRY: 'STANDARD_ENTRY',
+  AGGRESSIVE_ENTRY: 'AGGRESSIVE_ENTRY',
+  EXTENDED_ENTRY: 'EXTENDED_ENTRY',
+  CHASE_RISK: 'CHASE_RISK',
 });
 
 export const RADAR_EXIT_MODES = Object.freeze({
@@ -50,6 +70,13 @@ function round(v, digits = 2) {
   const x = Number(v);
   if (!Number.isFinite(x)) return null;
   return Number(x.toFixed(digits));
+}
+
+function pctDistance(from, to) {
+  const a = n(from);
+  const b = n(to);
+  if (!(a > 0) || !(b > 0)) return null;
+  return ((b - a) / a) * 100;
 }
 
 function quoteAssetOf(m) {
@@ -106,6 +133,13 @@ export function defaultTradingRadarState(nowIso = null) {
       rejectedByReason: {},
       topRejectedSamples: [],
       fieldMappingDetected: [],
+      safetyRowsChecked: 0,
+      safetyRowsUnknown: 0,
+      safetyRowsCaution: 0,
+      safetyRowsDanger: 0,
+      chainApiAvailable: false,
+      lastSafetyCheckAt: null,
+      topSafetyRisks: [],
     },
     marketRegime: {
       status: 'UNKNOWN',
@@ -551,21 +585,248 @@ export function buildPriceLevels(market, stageInfo = {}) {
   if (!(px > 0)) return { entryZone: null, invalidationLevel: null, suggestedStop: null };
   const atr = pctToRatio(market.atrPct ?? market.realizedVolatilityPct ?? Math.max(2, Math.abs(n(market.change24hPct ?? market.priceChangePercent, 0)) / 2));
   const low = n(market.flushLow ?? market.liquidationLow ?? market.localLow);
-  const reclaim = n(market.reclaimLevel ?? market.vwap ?? market.rangeHigh);
+  const reclaim = n(market.reclaimLevel ?? market.vwap ?? market.anchoredVwap ?? market.rangeHigh ?? market.breakdownLevel);
+  const higherLow = n(market.higherLow ?? market.higherLowLevel ?? market.retestLow);
+  const rangeLow = n(market.rangeLow);
   const support = low || reclaim || px * (1 - atr * 0.6);
   const entryType = stageInfo.entryType;
-  const center = entryType === RADAR_ENTRY_TYPES.ABSORPTION ? support : (reclaim || px);
+  const center = entryType === RADAR_ENTRY_TYPES.ABSORPTION ? support : (higherLow || reclaim || px);
   const halfBand = Math.max(atr * 0.18, 0.0025);
   const stopBuffer = Math.max(atr * 0.35, 0.006);
+  const structuralStopBase = higherLow || reclaim || rangeLow || support;
+  const stop = structuralStopBase * (1 - stopBuffer);
+  const supply1 = n(market.nearestSupply ?? market.localHigh ?? market.priorBounceHigh ?? market.rangeHigh);
+  const supply2 = n(market.nextSupply ?? market.breakdownLevel ?? market.maResistance);
+  const supply3 = n(market.meanReversionTarget ?? market.majorSupply ?? market.previousSupport);
   return {
     entryZone: { low: round(center * (1 - halfBand), 8), high: round(center * (1 + halfBand), 8) },
-    invalidationLevel: round(support * (1 - stopBuffer), 8),
-    suggestedStop: round(support * (1 - stopBuffer * 1.15), 8),
+    invalidationLevel: round((low || structuralStopBase) * (1 - stopBuffer * 1.45), 8),
+    suggestedStop: round(stop, 8),
+    stopReference: higherLow ? 'higher low + ATR buffer'
+      : reclaim ? 'reclaim/VWAP structure + ATR buffer'
+      : low ? 'panic/liquidation low + ATR buffer'
+      : 'range support + ATR buffer',
     takeProfitCheckpoints: [
-      { label: 'TP1', pct: 6, level: round(px * 1.06, 8) },
-      { label: 'TP2', pct: 11, level: round(px * 1.11, 8) },
-      { label: 'TP3', pct: 16, level: round(px * 1.16, 8) },
+      { label: 'TP1', pct: 6, level: round(Math.max(px * 1.055, supply1 || 0), 8), basis: supply1 ? 'nearest supply/local high' : '+5.5% default' },
+      { label: 'TP2', pct: 11, level: round(Math.max(px * 1.105, supply2 || 0), 8), basis: supply2 ? 'next supply/breakdown level' : '+10.5% default' },
+      { label: 'TP3', pct: 16, level: round(Math.max(px * 1.16, supply3 || 0), 8), basis: supply3 ? 'mean reversion target' : '+16% default' },
     ],
+  };
+}
+
+function radarScorePack(market, regime, stageInfo, levels, safety) {
+  const s = stageInfo._signals || signalBooleans(market, regime);
+  const missing = missingForMarket(market);
+  const missingPenalty = Math.min(22, missing.length * 3);
+  const px = market.mid || midPrice(market) || n(market.lastPrice ?? market.price);
+  const stopDistance = pctDistance(px, levels.suggestedStop);
+  const tp1Distance = levels.takeProfitCheckpoints && levels.takeProfitCheckpoints[0] ? pctDistance(px, levels.takeProfitCheckpoints[0].level) : null;
+  const riskPct = stopDistance == null ? null : Math.abs(stopDistance);
+  const rr = riskPct > 0 && tp1Distance != null ? tp1Distance / riskPct : null;
+
+  const dislocation = clamp(
+    Math.max(Math.abs(s.c24 || 0), Math.abs(s.c12 || 0) * 1.25, Math.abs(s.c4 || 0) * 2) * 4
+    + (s.volumeSpike >= 1.8 ? 18 : s.volumeSpike >= 1.2 ? 8 : 0)
+    + (s.btcRel <= -3 ? 12 : 0)
+    + (s.longLiq != null ? 8 : 0)
+  );
+  const flush = clamp(
+    (s.panicFlush ? 36 : 0)
+    + (s.oiFlush ? 18 : 0)
+    + (s.longLiq >= 1.5 ? 14 : 0)
+    + (s.fundingOk ? 10 : -15)
+    + (s.wickOk ? 12 : 0)
+    + (s.bidsOk ? 10 : 0)
+  );
+  const stabilization = clamp(
+    (s.noNewLows ? 22 : 0)
+    + (s.rangeFormed ? 18 : 0)
+    + (s.sellFade ? 14 : 0)
+    + (s.bidsOk ? 16 : 0)
+    + (s.c1 > 0 ? 10 : 0)
+    + (s.c4 > 0 ? 8 : 0)
+    + (s.tightSpread ? 8 : -12)
+  );
+  const reclaim = clamp(
+    (s.reclaim ? 32 : 0)
+    + (market.retestHeld === true ? 18 : 0)
+    + (s.higherLow ? 18 : 0)
+    + (market.vwapHeld === true || market.reclaimHeld === true ? 12 : 0)
+    + (s.isScannerReclaim ? 10 : 0)
+  );
+  const orderBook = clamp(
+    45
+    + (s.bidsOk ? 18 : 0)
+    + (s.tightSpread ? 12 : -18)
+    + (n(market.depthUsd, 0) >= 1_000_000 ? 12 : n(market.depthUsd, 0) >= 100_000 ? 5 : -14)
+    + (market.bidsVanished === true ? -35 : 0)
+    + (market.askWallsReloaded === true ? -18 : 0)
+    + (market.askWallsAbsorbed === true ? 10 : 0)
+  );
+  const flow = clamp(
+    42
+    + (s.buyDominance >= 0.58 ? 18 : s.buyDominance >= 0.54 ? 8 : 0)
+    + (s.deltaImproves ? 14 : 0)
+    + (market.sellVolumeFading === true ? 12 : 0)
+    + (market.aggressiveSellsFailed === true ? 10 : 0)
+    + (market.positiveDeltaNoAdvance === true ? -25 : 0)
+    + (market.perpsOnlyMove === true ? -18 : 0)
+  );
+  const deriv = clamp(
+    72
+    + (s.fundingOk ? 6 : -24)
+    + (s.shortLiq >= 1.2 ? 8 : 0)
+    + (s.oiChange != null && s.oiChange > 12 ? -26 : 0)
+    + (market.leveragedLongCrowding === true ? -28 : 0)
+    + (market.perpsOnlyMove === true ? -16 : 0)
+  );
+  const marketRegime = clamp(regime.score == null ? 50 : regime.score);
+  const riskReward = clamp(
+    48
+    + (rr != null ? Math.min(28, rr * 13) : -8)
+    + (riskPct != null && riskPct <= 5 ? 16 : riskPct != null && riskPct <= 9 ? 6 : -14)
+    + (tp1Distance != null && tp1Distance >= 5 ? 10 : -10)
+    + ((s.c1 > 4 || s.c4 > 8) ? -18 : 0)
+    + (market.nearestSupplyDistancePct != null && Number(market.nearestSupplyDistancePct) < 4 ? -16 : 0)
+  );
+  const setup = clamp(dislocation * 0.20 + flush * 0.20 + stabilization * 0.20 + reclaim * 0.15 + deriv * 0.10 + marketRegime * 0.15);
+  const execution = clamp(orderBook * 0.25 + flow * 0.25 + reclaim * 0.15 + riskReward * 0.25 + marketRegime * 0.10);
+  const safetyPenalty = safety.safetyStatus === 'DANGER' ? 45 : safety.safetyStatus === 'CAUTION' ? 14 : safety.safetyStatus === 'UNKNOWN' ? 8 : 0;
+  const confidence = clamp(setup * 0.40 + execution * 0.35 + marketRegime * 0.15 + (100 - missingPenalty) * 0.10 - safetyPenalty);
+
+  return {
+    DISLOCATION_SCORE: round(dislocation, 0),
+    FLUSH_SCORE: round(flush, 0),
+    STABILIZATION_SCORE: round(stabilization, 0),
+    RECLAIM_SCORE: round(reclaim, 0),
+    ORDER_BOOK_SUPPORT_SCORE: round(orderBook, 0),
+    FLOW_CONFIRMATION_SCORE: round(flow, 0),
+    DERIVATIVES_RISK_SCORE: round(deriv, 0),
+    MARKET_REGIME_SCORE: round(marketRegime, 0),
+    RISK_REWARD_SCORE: round(riskReward, 0),
+    SETUP_SCORE: round(setup, 0),
+    EXECUTION_SCORE: round(execution, 0),
+    FINAL_CONFIDENCE: round(confidence, 0),
+    dataMissingPenalty: missingPenalty,
+    rr,
+    riskPct,
+    tp1Distance,
+  };
+}
+
+function positionSizeGuidance(status, confidence) {
+  const base = {
+    EARLY_ENTRY_READY: [25, 40],
+    STANDARD_ENTRY_READY: [40, 60],
+    AGGRESSIVE_ENTRY_READY: [20, 40],
+    EXTENDED_ENTRY: [10, 25],
+    CHASE_RISK: [0, 15],
+    RISK_OFF_BLOCKED: [0, 0],
+    INVALIDATED: [0, 0],
+  }[status] || [0, 0];
+  if (base[1] === 0) return '0% planned position';
+  if (confidence < 55) return '0% planned position - confidence too low';
+  if (confidence < 65) return `${base[0]}% planned position`;
+  if (confidence < 75) return `${base[0]}-${Math.round((base[0] + base[1]) / 2)}% planned position`;
+  return `${base[0]}-${base[1]}% planned position`;
+}
+
+function buildRadarV1Output(market, regime, stageInfo, levels, safety) {
+  const scores = radarScorePack(market, regime, stageInfo, levels, safety);
+  const missing = missingForMarket(market);
+  const structuralStopExists = !!(levels && levels.suggestedStop && levels.stopReference);
+  const tpZonesExist = !!(levels && Array.isArray(levels.takeProfitCheckpoints) && levels.takeProfitCheckpoints.length >= 3);
+  const hasCriticalRisk = safety.safetyStatus === 'DANGER'
+    || market.exploitRisk === true
+    || market.hackRisk === true
+    || market.delistingRisk === true
+    || market.unlockRisk === true
+    || market.newsRisk === 'high';
+
+  let status = 'WATCH';
+  let entryType = 'NONE';
+  let action = 'Monitor only. Waiting for setup and execution alignment.';
+  const setupOk = scores.SETUP_SCORE >= 65;
+  const execOk = scores.EXECUTION_SCORE >= 65;
+  const rrOk = scores.RISK_REWARD_SCORE >= 55;
+  const regimeOk = scores.MARKET_REGIME_SCORE >= 50 && !regime.blocksMeanReversion;
+
+  if (regime.blocksMeanReversion || scores.MARKET_REGIME_SCORE < 40) {
+    status = 'RISK_OFF_BLOCKED';
+    action = 'No new long entry. Monitor only.';
+  } else if (hasCriticalRisk) {
+    status = safety.safetyStatus === 'DANGER' ? 'INVALIDATED' : 'RISK_OFF_BLOCKED';
+    action = 'No long entry while safety/fundamental risk is active.';
+  } else if (scores.SETUP_SCORE < 45) {
+    status = 'WATCH';
+  } else if (scores.DISLOCATION_SCORE >= 65 && scores.FLUSH_SCORE < 60) {
+    status = 'DISLOCATION_CONFIRMED';
+    action = 'Watch for long flush and stabilization. No entry yet.';
+  } else if (scores.FLUSH_SCORE >= 65 && scores.STABILIZATION_SCORE < 55) {
+    status = 'LONG_FLUSH_CONFIRMED';
+    action = 'Wait for no-new-low structure and fading sell pressure.';
+  } else if (scores.STABILIZATION_SCORE >= 55 && scores.RECLAIM_SCORE < 50) {
+    status = 'WAIT_FOR_RECLAIM';
+    action = 'Wait for VWAP/range/breakdown reclaim before entry.';
+  } else if (setupOk && !execOk) {
+    status = scores.RISK_REWARD_SCORE < 45 ? 'CHASE_RISK' : 'WAIT_FOR_PULLBACK';
+    action = status === 'CHASE_RISK'
+      ? 'Do not open standard position. Wait for new structure or ignore.'
+      : 'Setup valid, but do not chase current impulse. Wait for shallow pullback / higher low.';
+  } else if (!setupOk && execOk) {
+    status = 'WATCH';
+    action = 'Execution looks better than setup quality. Wait for full setup confirmation.';
+  } else if (setupOk && execOk && rrOk && regimeOk && structuralStopExists && tpZonesExist && scores.FINAL_CONFIDENCE >= 55) {
+    const extended = scores.RISK_REWARD_SCORE < 62 || (stageInfo._signals && (stageInfo._signals.c1 > 4 || stageInfo._signals.c4 > 8));
+    if (extended) {
+      status = scores.RISK_REWARD_SCORE < 45 ? 'CHASE_RISK' : 'EXTENDED_ENTRY';
+      entryType = 'EXTENDED';
+      action = status === 'CHASE_RISK'
+        ? 'Do not open standard position. Only tiny starter allowed if strategy explicitly permits.'
+        : 'No full entry. Only small starter allowed if live flow is strong.';
+    } else if (scores.RECLAIM_SCORE >= 70 && market.higherLowHeld === true) {
+      status = 'STANDARD_ENTRY_READY';
+      entryType = 'STANDARD_RETEST';
+      action = 'Enter standard position on first higher low / reclaim retest.';
+    } else if (scores.ORDER_BOOK_SUPPORT_SCORE >= 72 && scores.FLOW_CONFIRMATION_SCORE >= 68) {
+      status = 'AGGRESSIVE_ENTRY_READY';
+      entryType = 'AGGRESSIVE_RECLAIM';
+      action = 'Enter partial position now or on shallow intraday pullback. Do not wait for deep retest.';
+    } else {
+      status = 'EARLY_ENTRY_READY';
+      entryType = 'EARLY_REVERSAL';
+      action = 'Open first tranche. Use current price or shallow intraday pullback.';
+    }
+  } else if (scores.RECLAIM_SCORE >= 50) {
+    status = 'RECLAIM_DETECTED';
+    action = 'Reclaim detected. Wait for execution score and risk/reward to align.';
+  }
+
+  const reason = [
+    `setup ${scores.SETUP_SCORE}/100, execution ${scores.EXECUTION_SCORE}/100`,
+    safety.safetyStatus === 'SAFE' ? 'safety check clear' : `safety ${safety.safetyStatus}: ${(safety.reasons || [])[0] || 'missing chain data'}`,
+    missing.length ? `missing data: ${missing.slice(0, 3).join(', ')}` : 'critical market data present',
+    regime.blocksMeanReversion ? 'market regime blocks longs' : `market regime ${scores.MARKET_REGIME_SCORE}/100`,
+  ];
+
+  return {
+    STATUS: status,
+    ACTION: action,
+    ENTRY_TYPE: entryType,
+    POSITION_SIZE_GUIDANCE: positionSizeGuidance(status, scores.FINAL_CONFIDENCE),
+    ENTRY_ZONE: levels.entryZone,
+    STOP_LOSS_LEVEL: levels.suggestedStop,
+    STOP_REFERENCE: levels.stopReference,
+    HARD_INVALIDATION: levels.invalidationLevel,
+    TAKE_PROFIT_LEVELS: levels.takeProfitCheckpoints,
+    TIMEFRAME_CONTEXT: market.timeframeContext || '1D setup, 1H/15M execution',
+    TIME_VALIDITY: status.includes('ENTRY_READY') ? 'valid until next 15m/1H structure update or reclaim failure' : 'valid until next public snapshot',
+    REASON: compactReasons(reason, 4),
+    INVALIDATION: hasCriticalRisk ? 'safety/fundamental risk active' : 'loss of reclaim zone, new low below panic wick, bid depth disappearance, or BTC/ETH risk-off',
+    allRadarConditionsPassed: setupOk && execOk && rrOk && regimeOk && !hasCriticalRisk && structuralStopExists && tpZonesExist,
+    structuralStopExists,
+    tpZonesExist,
+    ...scores,
   };
 }
 
@@ -878,29 +1139,67 @@ export function evaluateTradingRadar({
     const { universe, diagnostics, missingSignals } = buildRadarUniverse(mergedMarkets, { filters });
     const regime = evaluateMarketRegime(mergedMarkets);
     const allMissing = new Set(missingSignals);
+    const safetyResults = [];
     const candidates = universe.map((m) => {
       for (const miss of missingForMarket(m)) allMissing.add(miss);
       const stageInfo = classifyRadarStage(m, regime);
       const levels = buildPriceLevels(m, stageInfo);
+      const safety = evaluateKnownSafety({
+        symbol: m.symbol,
+        chain: m.chain || m.network || m.contractChain,
+        contractAddress: m.contractAddress || m.contract || m.tokenAddress,
+        topHolderPercent: m.topHolderPercent ?? m.topHolderPct,
+        contractVerified: m.contractVerified,
+        ownerPrivilegeRisk: m.ownerPrivilegeRisk,
+        mintRisk: m.mintRisk,
+        pauseRisk: m.pauseRisk,
+        liquidityRisk: m.liquidityRisk,
+        exploitRisk: m.exploitRisk,
+        hackRisk: m.hackRisk,
+        delistingRisk: m.delistingRisk,
+        unlockRisk: m.unlockRisk,
+        newsRisk: m.newsRisk,
+        source: m.safetySource,
+      });
+      safety.symbol = m.symbol;
+      safetyResults.push(safety);
+      const v1 = buildRadarV1Output(m, regime, stageInfo, levels, safety);
+      const entryReadyV1 = ['EARLY_ENTRY_READY', 'STANDARD_ENTRY_READY', 'AGGRESSIVE_ENTRY_READY'].includes(v1.STATUS);
+      const adjustedConfidence = Math.min(stageInfo.confidence, v1.FINAL_CONFIDENCE);
+      const effectiveActionability = entryReadyV1 ? 'ENTRY_READY'
+        : v1.STATUS === 'WAIT_FOR_PULLBACK' || v1.STATUS === 'EXTENDED_ENTRY' || v1.STATUS === 'RECLAIM_DETECTED' ? 'NEAR_ENTRY'
+        : v1.STATUS === 'WAIT_FOR_RECLAIM' ? 'NEEDS_CONFIRMATION'
+        : v1.STATUS === 'LONG_FLUSH_CONFIRMED' ? 'NEEDS_STABILIZATION'
+        : v1.STATUS === 'RISK_OFF_BLOCKED' || v1.STATUS === 'INVALIDATED' || safety.safetyStatus === 'DANGER' ? 'INVALIDATED'
+        : stageInfo.actionability;
       return {
         symbol: m.symbol,
         stage: stageInfo.stage,
-        actionability: stageInfo.actionability,
+        actionability: effectiveActionability,
         distanceToEntryReadyScore: stageInfo.distanceToEntryReadyScore,
         setupQualityScore: stageInfo.setupQualityScore,
-        confidence: stageInfo.confidence,
+        confidence: adjustedConfidence,
         entryType: stageInfo.entryType,
         entryZone: levels.entryZone,
         invalidationLevel: levels.invalidationLevel,
         suggestedStop: levels.suggestedStop,
+        stopReference: levels.stopReference,
         takeProfitCheckpoints: levels.takeProfitCheckpoints,
+        safety,
+        safetyStatus: safety.safetyStatus,
+        safetyScore: safety.safetyScore,
+        safetyReasons: safety.reasons,
+        ...v1,
         reasons: stageInfo.reasons,
-        riskFlags: stageInfo.riskFlags,
+        riskFlags: compactReasons([
+          ...(stageInfo.riskFlags || []),
+          ...(safety.safetyStatus === 'SAFE' ? [] : [`safety ${safety.safetyStatus}`]),
+        ], 8),
         conditionChecklist: stageInfo.conditionChecklist,
         missingSignals: missingForMarket(m).slice(0, 8),
         nextRequiredConfirmation: stageInfo.nextRequiredConfirmation,
-        blockedBy: stageInfo.blockedBy,
-        telegramEligible: stageInfo.stage === RADAR_STAGES.ENTRY_READY && stageInfo.actionability === 'ENTRY_READY' && stageInfo.confidence >= 75 && levels.entryZone != null && (levels.invalidationLevel != null || levels.suggestedStop != null),
+        blockedBy: v1.STATUS === 'INVALIDATED' || v1.STATUS === 'RISK_OFF_BLOCKED' ? v1.INVALIDATION : stageInfo.blockedBy,
+        telegramEligible: entryReadyV1 && v1.allRadarConditionsPassed && adjustedConfidence >= 75 && levels.entryZone != null && (levels.invalidationLevel != null || levels.suggestedStop != null) && safety.safetyStatus !== 'DANGER',
         sourceSignals: Array.isArray(m.scannerTags) ? m.scannerTags : [],
         diagnostics: {
           change24hPct: round(n(m.change24hPct ?? m.priceChangePercent), 2),
@@ -911,8 +1210,8 @@ export function evaluateTradingRadar({
         },
       };
     }).sort((a, b) => {
-        const aAction = { ENTRY_READY: 7, NEAR_ENTRY: 6, NEEDS_ABSORPTION: 5, NEEDS_STABILIZATION: 4, NEEDS_CONFIRMATION: 4, NEEDS_FLUSH_CONFIRMATION: 3, WATCH_ONLY: 2, INVALIDATED: 1 }[a.actionability] || 0;
-        const bAction = { ENTRY_READY: 7, NEAR_ENTRY: 6, NEEDS_ABSORPTION: 5, NEEDS_STABILIZATION: 4, NEEDS_CONFIRMATION: 4, NEEDS_FLUSH_CONFIRMATION: 3, WATCH_ONLY: 2, INVALIDATED: 1 }[b.actionability] || 0;
+        const aAction = { EARLY_ENTRY_READY: 8, STANDARD_ENTRY_READY: 8, AGGRESSIVE_ENTRY_READY: 8, ENTRY_READY: 7, EXTENDED_ENTRY: 7, WAIT_FOR_PULLBACK: 6, NEAR_ENTRY: 6, WAIT_FOR_RECLAIM: 5, NEEDS_ABSORPTION: 5, NEEDS_STABILIZATION: 4, NEEDS_CONFIRMATION: 4, NEEDS_FLUSH_CONFIRMATION: 3, WATCH_ONLY: 2, RISK_OFF_BLOCKED: 1, INVALIDATED: 1 }[a.STATUS] || ({ ENTRY_READY: 7, NEAR_ENTRY: 6, NEEDS_ABSORPTION: 5, NEEDS_STABILIZATION: 4, NEEDS_CONFIRMATION: 4, NEEDS_FLUSH_CONFIRMATION: 3, WATCH_ONLY: 2, INVALIDATED: 1 }[a.actionability] || 0);
+        const bAction = { EARLY_ENTRY_READY: 8, STANDARD_ENTRY_READY: 8, AGGRESSIVE_ENTRY_READY: 8, ENTRY_READY: 7, EXTENDED_ENTRY: 7, WAIT_FOR_PULLBACK: 6, NEAR_ENTRY: 6, WAIT_FOR_RECLAIM: 5, NEEDS_ABSORPTION: 5, NEEDS_STABILIZATION: 4, NEEDS_CONFIRMATION: 4, NEEDS_FLUSH_CONFIRMATION: 3, WATCH_ONLY: 2, RISK_OFF_BLOCKED: 1, INVALIDATED: 1 }[b.STATUS] || ({ ENTRY_READY: 7, NEAR_ENTRY: 6, NEEDS_ABSORPTION: 5, NEEDS_STABILIZATION: 4, NEEDS_CONFIRMATION: 4, NEEDS_FLUSH_CONFIRMATION: 3, WATCH_ONLY: 2, INVALIDATED: 1 }[b.actionability] || 0);
         if (aAction !== bAction) return bAction - aAction;
         if (a.distanceToEntryReadyScore !== b.distanceToEntryReadyScore) return b.distanceToEntryReadyScore - a.distanceToEntryReadyScore;
         if (a.setupQualityScore !== b.setupQualityScore) return b.setupQualityScore - a.setupQualityScore;
@@ -946,7 +1245,8 @@ export function evaluateTradingRadar({
       topRejectedSamples: [
         ...((scannerContext.topRejectedSamples || scannerContext.rejectedSamples || []).slice(0, 10)),
         ...(diagnostics.rejectedSamples || []).slice(0, 20),
-      ].slice(0, 30)
+      ].slice(0, 30),
+      ...buildSafetyDiagnostics(safetyResults),
     };
 
     state.marketRegime = regime;
@@ -956,7 +1256,7 @@ export function evaluateTradingRadar({
     state.candidatesByStage = state.pipeline;
     state.candidates = candidates;
     state.watchlist = candidates.filter((c) => c.stage !== RADAR_STAGES.ENTRY_READY).slice(0, 20);
-    state.entryReady = candidates.filter((c) => c.stage === RADAR_STAGES.ENTRY_READY).slice(0, 10);
+    state.entryReady = candidates.filter((c) => ['EARLY_ENTRY_READY', 'STANDARD_ENTRY_READY', 'AGGRESSIVE_ENTRY_READY'].includes(c.STATUS) || c.stage === RADAR_STAGES.ENTRY_READY).slice(0, 10);
     state.selected = selected;
     state.exitGuidance = buildExitGuidance({ market: positionMarket, position, regime, now });
     state.pipeline = buildPipeline(candidates, universe.length);
