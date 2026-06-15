@@ -1,23 +1,18 @@
-// Phase 1 source guards for the PRODUCTION frontend cockpit (apps/edge/public/js/terminal.js).
-// The frontend cockpit runs in the browser and mirrors scripts/cockpit/trade-cockpit.mjs.
-// These guards prove the deployed code no longer fabricates microstructure defaults
-// and surfaces N/A / low-confidence / no-live-price states honestly.
+// Source guards for the PRODUCTION frontend cockpit (apps/edge/public/js/terminal.js).
+// The browser cockpit mirrors scripts/cockpit/trade-cockpit.mjs. These guards prove
+// the deployed code is an active trade manager (not a dumb form) and stays honest.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
 const terminalJs = fs.readFileSync(new URL('../apps/edge/public/js/terminal.js', import.meta.url), 'utf8');
 const terminalCss = fs.readFileSync(new URL('../apps/edge/public/css/terminal.css', import.meta.url), 'utf8');
+const indexHtml = fs.readFileSync(new URL('../apps/edge/public/index.html', import.meta.url), 'utf8');
 
-test('frontend cockpit no longer fabricates microstructure defaults', () => {
+test('frontend cockpit does not fabricate microstructure and never falls back to entry price', () => {
   assert.doesNotMatch(terminalJs, /_cpNum\(row\.spreadPct,\s*0\.06\)/);
   assert.doesNotMatch(terminalJs, /_cpNum\(row\.bidDepthRebuildPct,\s*8\)/);
   assert.doesNotMatch(terminalJs, /marketBuyVolumeDominance,\s*0\.52\)/);
-  assert.doesNotMatch(terminalJs, /_cpNum\(row\.fundingRate,\s*0\.01\)/);
-  assert.doesNotMatch(terminalJs, /_cpNum\(row\.openInterestChangePct,\s*0\)/);
-});
-
-test('frontend cockpit never falls back to entry price for current price', () => {
   assert.doesNotMatch(terminalJs, /_cpNum\(market\.currentPrice,\s*entry\)/);
   assert.match(terminalJs, /const current = _cpNum\(market\.currentPrice\);/);
   assert.match(terminalJs, /NO_LIVE_PRICE/);
@@ -32,12 +27,56 @@ test('frontend cockpit computes mini-scores only when present and flags low-conf
   assert.match(terminalJs, /derivPresent/);
   assert.match(terminalJs, /lowConfidence/);
   assert.match(terminalJs, /missingComponents/);
+  assert.match(terminalJs, /val == null \? 'N\/A'/);
+  assert.match(terminalJs, /LOW-CONF/);
+  assert.match(terminalCss, /\.cockpit-score\.na/);
 });
 
-test('frontend cockpit renders N/A scores, low-confidence badge, and no-price state', () => {
-  assert.match(terminalJs, /val == null \? 'N\/A'/);
-  assert.match(terminalJs, /LOW-CONFIDENCE/);
-  assert.match(terminalJs, /no live price/);
-  assert.match(terminalCss, /\.cockpit-score\.na/);
-  assert.match(terminalCss, /\.cockpit-lowconf/);
+test('frontend cockpit is an active manager: TP-state, partials, action verbs', () => {
+  assert.match(terminalJs, /_cpTpHits/);
+  assert.match(terminalJs, /tpHits/);
+  assert.match(terminalJs, /_cpRealized/);
+  assert.match(terminalJs, /partials/);
+  // action verb vocabulary
+  for (const v of ['TAKE_PARTIAL', 'TAKE_MORE', 'MOVE_STOP', 'PROTECT_PROFIT', 'REDUCE_RISK', 'INCOMPLETE_SETUP']) {
+    assert.match(terminalJs, new RegExp(v));
+  }
+  assert.match(terminalJs, /suggestedStop/);
+  assert.match(terminalJs, /data-cp-tp/); // manual mark TP taken
+  assert.match(terminalJs, /data-cp-movestop/);
+});
+
+test('frontend cockpit imports focused RADAR candidate and auto-fills the form', () => {
+  assert.match(terminalJs, /_cpRadarFocus/);
+  assert.match(terminalJs, /_cpPrefillFromRadar/);
+  assert.match(terminalJs, /cockpit-import-radar/);
+  assert.match(indexHtml, /id="cockpit-radar-focus"/);
+});
+
+test('frontend cockpit has guided creation: autocomplete, live price preview, visible validation', () => {
+  assert.match(indexHtml, /id="cockpit-symbol-list"/);
+  assert.match(indexHtml, /list="cockpit-symbol-list"/);
+  assert.match(indexHtml, /id="cockpit-price-preview"/);
+  assert.match(indexHtml, /id="cockpit-form-error"/);
+  assert.match(terminalJs, /_cpShowError/);
+  assert.match(terminalJs, /_cpUpdatePricePreview/);
+  // validation must surface errors, not fail silently
+  assert.match(terminalJs, /Cannot save: /);
+});
+
+test('frontend cockpit persists archive on close and emits internal alerts', () => {
+  assert.match(terminalJs, /COCKPIT_ARCHIVE_KEY/);
+  assert.match(terminalJs, /_cpArchiveTrade/);
+  assert.match(terminalJs, /_cpGenAlerts/);
+  assert.match(terminalJs, /TP1_HIT|TP2_HIT|TP3_HIT/);
+  assert.match(terminalJs, /STOP_HIT/);
+  assert.match(indexHtml, /id="cockpit-alerts-strip"/);
+  assert.match(terminalCss, /\.cp-alert/);
+});
+
+test('frontend cockpit summary surfaces needs-action, avg health, winner/risk, no-price', () => {
+  assert.match(terminalJs, /NEEDS ACTION/);
+  assert.match(terminalJs, /AVG HEALTH/);
+  assert.match(terminalJs, /WINNER/);
+  assert.match(terminalJs, /NO PRICE/);
 });

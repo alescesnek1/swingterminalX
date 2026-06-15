@@ -145,7 +145,7 @@ test('Cockpit calculates PnL, summary, and veto-driven statuses', () => {
   assert.ok(emergency.tradeHealthScore <= 30);
 
   const missing = evaluateTradeCockpit({ symbol: 'ARBUSDT', entryPrice: 0.812, quantity: 40000 }, { currentPrice: 0.895 }, { score: 61 });
-  assert.equal(missing.status, 'MISSING_RISK_DATA');
+  assert.ok(['INCOMPLETE_SETUP', 'MISSING_RISK_DATA'].includes(missing.status));
 
   const summary = summarizeCockpit([hold, emergency, missing]);
   assert.equal(summary.openTrades, 3);

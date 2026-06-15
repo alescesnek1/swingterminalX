@@ -330,9 +330,16 @@
           </div>
           <div class="cockpit-summary" id="cockpit-summary"></div>
         </div>
-        <form class="cockpit-form" id="cockpit-form">
+        <div class="cockpit-radar-focus" id="cockpit-radar-focus">RADAR focus: none</div>
+        <form class="cockpit-form" id="cockpit-form" autocomplete="off">
           <input type="hidden" id="cockpit-id">
-          <input id="cockpit-symbol" placeholder="SYMBOL" required>
+          <input type="hidden" id="cockpit-from-radar">
+          <input type="hidden" id="cockpit-hardinval">
+          <div class="cockpit-field">
+            <input id="cockpit-symbol" placeholder="SYMBOL (e.g. INJUSDT)" list="cockpit-symbol-list" required>
+            <datalist id="cockpit-symbol-list"></datalist>
+            <span class="cockpit-price-preview" id="cockpit-price-preview"></span>
+          </div>
           <input id="cockpit-venue" placeholder="VENUE" value="Binance">
           <select id="cockpit-entry-type">
             <option value="manual">manual</option>
@@ -341,8 +348,8 @@
             <option value="aggressive">aggressive</option>
             <option value="swing">swing</option>
           </select>
-          <input id="cockpit-entry" type="number" step="any" placeholder="ENTRY" required>
-          <input id="cockpit-qty" type="number" step="any" placeholder="QTY" required>
+          <input id="cockpit-entry" type="number" step="any" placeholder="ENTRY *" required>
+          <input id="cockpit-qty" type="number" step="any" placeholder="QTY *" required>
           <input id="cockpit-stop" type="number" step="any" placeholder="STOP">
           <input id="cockpit-tp1" type="number" step="any" placeholder="TP1">
           <input id="cockpit-tp2" type="number" step="any" placeholder="TP2">
@@ -351,6 +358,7 @@
           <button type="submit">SAVE</button>
           <button type="button" id="cockpit-reset">CLEAR</button>
         </form>
+        <div class="cockpit-form-error" id="cockpit-form-error" style="display:none"></div>
         <div class="cockpit-toolbar">
           <select id="cockpit-sort">
             <option value="priority">priority</option>
@@ -365,6 +373,7 @@
           </select>
           <button type="button" id="cockpit-compact-toggle">COMPACT</button>
         </div>
+        <div id="cockpit-alerts-strip"></div>
         <div id="cockpit-list" class="cockpit-list"></div>
       </div>
     </div>

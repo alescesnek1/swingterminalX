@@ -3485,7 +3485,17 @@ function pushScannerContextToRadar() {
 // ─────────────────────────────────────────────────────────────
 // Trade Tracker Cockpit - local, advisory-only, no execution intents.
 const COCKPIT_STORAGE_KEY = 'terminal_x_trade_cockpit_v1';
-let Cockpit = { trades: [], sort: 'priority', compact: false };
+const COCKPIT_ARCHIVE_KEY = 'terminal_x_trade_cockpit_archive_v1';
+let Cockpit = { trades: [], sort: 'priority', compact: false, alerts: [], prev: {} };
+
+function _cpArchiveTrade(trade) {
+  try {
+    const arr = JSON.parse(localStorage.getItem(COCKPIT_ARCHIVE_KEY) || '[]');
+    const list = Array.isArray(arr) ? arr : [];
+    list.unshift(trade);
+    localStorage.setItem(COCKPIT_ARCHIVE_KEY, JSON.stringify(list.slice(0, 200)));
+  } catch {}
+}
 
 function _cpNum(v, fallback = null) {
   const x = Number(v);
@@ -3538,7 +3548,27 @@ function _cpMarketFor(symbol) {
   };
 }
 function _cpPresent(...vals) { return vals.some(v => v !== null && v !== undefined); }
-// Mirrors scripts/cockpit/trade-cockpit.mjs evaluateTradeCockpit (kept in sync).
+// Action verbs — mirror of COCKPIT_ACTIONS in scripts/cockpit/trade-cockpit.mjs.
+const CP_ACT = { HOLD:'HOLD', WATCH:'WATCH', TAKE_PARTIAL:'TAKE_PARTIAL', TAKE_MORE:'TAKE_MORE', MOVE_STOP:'MOVE_STOP', PROTECT_PROFIT:'PROTECT_PROFIT', REDUCE_RISK:'REDUCE_RISK', EXIT:'EXIT', INCOMPLETE_SETUP:'INCOMPLETE_SETUP', NO_LIVE_PRICE:'NO_LIVE_PRICE' };
+const CP_NEAR_STOP_PCT = 1.5;
+function _cpRealized(trade, entry, qty) {
+  const partials = Array.isArray(trade.partials) ? trade.partials : [];
+  let taken = 0, realized = 0;
+  for (const p of partials) {
+    const f = _cpClamp(_cpNum(p && p.fraction, 0), 0, 1);
+    const px = _cpNum(p && p.price);
+    if (f <= 0 || px == null || entry == null || qty == null) continue;
+    taken = _cpClamp(taken + f, 0, 1); realized += f * qty * (px - entry);
+  }
+  return { taken, realized };
+}
+function _cpTpHits(trade, current) {
+  const ph = (trade && trade.tpHits) || {};
+  const tp = [_cpNum(trade.tp1), _cpNum(trade.tp2), _cpNum(trade.tp3)];
+  const live = (lvl) => lvl != null && current != null && current >= lvl;
+  return { tp1: !!(ph.tp1 || live(tp[0])), tp2: !!(ph.tp2 || live(tp[1])), tp3: !!(ph.tp3 || live(tp[2])) };
+}
+// Active trade-manager evaluation. Mirrors scripts/cockpit/trade-cockpit.mjs.
 function evaluateCockpitTrade(trade) {
   const market = _cpMarketFor(trade.symbol);
   const entry = _cpNum(trade.entryPrice);
@@ -3546,78 +3576,97 @@ function evaluateCockpitTrade(trade) {
   const current = _cpNum(market.currentPrice); // NO entry fallback — never fake a 0% PnL
   const hasPrice = current != null && current > 0;
   const stop = _cpNum(trade.stopLoss);
+  const hardInval = _cpNum(trade.hardInvalidation);
   const tps = [_cpNum(trade.tp1), _cpNum(trade.tp2), _cpNum(trade.tp3)];
+  const hasAnyTp = tps.some(t => t != null && t > 0);
+  const safetyStatus = String(trade.safetyStatus || market.safetyStatus || 'UNKNOWN').toUpperCase();
+  const stale = !(DATA && DATA.length);
+  const tpHits = _cpTpHits(trade, hasPrice ? current : null);
 
-  // Live price missing → mark explicitly, do not invent PnL or scores.
   if (!hasPrice) {
     return {
-      trade, market, status: 'NO_LIVE_PRICE',
-      action: market.found ? 'Live price unavailable for this symbol.' : 'Not in scanner universe — live price unavailable.',
-      mode: 'manual', priceUnavailable: true, lowConfidence: true,
-      health: null, pnlUsd: null, pnlPct: null, value: null, distStop: null,
-      tpDistances: [null, null, null],
+      trade, market, status: 'NO_LIVE_PRICE', action: CP_ACT.NO_LIVE_PRICE, mode: 'manual',
+      priceUnavailable: true, lowConfidence: true, stopHit: false, safetyStatus, stale, tpHits,
+      health: null, pnlUsd: null, pnlPct: null, realizedPnl: _cpRealized(trade, entry, qty).realized || null, totalPnl: null, value: null,
+      distStop: null, tpDistances: [null, null, null], nextTp: null, suggestedStop: null,
       scores: { momentum: null, orderBook: null, flow: null, derivatives: null, market: (market.marketRegimeScore ?? null), progress: null },
       reason: [market.found ? 'live price unavailable' : 'not in scanner universe'],
-      current: null, nextDecisionLevel: 'await live price', missingComponents: ['price', 'orderBook', 'flow', 'derivatives'],
+      missingComponents: ['price', 'orderBook', 'flow', 'derivatives'],
+      current: null, nextDecisionLevel: 'await live price',
     };
   }
 
-  const pnlUsd = entry > 0 && qty > 0 ? (current - entry) * qty : null;
+  const { taken, realized } = _cpRealized(trade, entry, qty);
+  const remaining = _cpClamp(1 - taken, 0, 1);
   const pnlPct = entry > 0 ? ((current - entry) / entry) * 100 : null;
-  const value = qty > 0 ? current * qty : null;
+  const unrealizedPnlUsd = (entry != null && qty != null) ? remaining * qty * (current - entry) : null;
+  const totalPnl = unrealizedPnlUsd == null ? realized : realized + unrealizedPnlUsd;
+  const value = qty != null ? remaining * qty * current : null;
   const scoreBlock = (pos, neg, base = 55) => _cpClamp(base + pos.filter(Boolean).length * 10 - neg.filter(Boolean).length * 14);
 
-  // Component presence — only score microstructure we actually have.
   const momentumPresent = _cpPresent(market.change1hPct, market.change4hPct);
   const bookPresent = _cpPresent(market.spreadPct, market.bidDepthRebuildPct);
   const flowPresent = _cpPresent(market.buyVolumeDominance);
   const derivPresent = _cpPresent(market.fundingRate, market.openInterestChangePct);
-  const marketPresent = market.marketRegimeScore != null;
-
   const momentum = momentumPresent ? scoreBlock([market.change1hPct > 0, market.change4hPct > 0, market.higherLowHeld === true, market.vwapHeld === true], [market.vwapLost === true, market.reclaimLost === true]) : null;
   const book = bookPresent ? scoreBlock([market.bidDepthRebuildPct > 8, market.spreadPct != null && market.spreadPct <= 0.08, market.askWallsAbsorbed === true], [market.bidsVanished === true, market.askWallsReloaded === true, market.spreadPct != null && market.spreadPct > 0.18]) : null;
   const flow = flowPresent ? scoreBlock([market.buyVolumeDominance >= 0.55, market.sellVolumeFading === true, market.deltaImproves === true], [market.positiveDeltaNoAdvance === true, market.perpsOnlyMove === true, market.sellVolumeSpike === true]) : null;
   const derivatives = derivPresent ? scoreBlock([market.fundingRate != null && market.fundingRate <= 0.05, market.openInterestChangePct != null && market.openInterestChangePct < 10, market.spotLed === true], [market.fundingRate != null && market.fundingRate > 0.08, market.openInterestChangePct != null && market.openInterestChangePct > 18, market.leveragedLongCrowding === true]) : null;
-  const marketScore = marketPresent ? _cpClamp(market.marketRegimeScore) : null;
-  const progress = _cpClamp(55 + Math.min(25, Math.max(-20, (pnlPct || 0) * 2)) + (tps[0] && current >= tps[0] ? 10 : 0) + (tps[1] && current >= tps[1] ? 10 : 0));
+  const marketScore = market.marketRegimeScore != null ? _cpClamp(market.marketRegimeScore) : null;
+  const progress = _cpClamp(55 + Math.min(25, Math.max(-20, (pnlPct || 0) * 2)) + (tpHits.tp1 ? 8 : 0) + (tpHits.tp2 ? 8 : 0) + (tpHits.tp3 ? 9 : 0));
 
-  // Re-normalise health over present components only (no fabricated fill).
   const W = { momentum: .2, orderBook: .2, flow: .2, derivatives: .15, market: .15, progress: .1 };
   const comps = { momentum, orderBook: book, flow, derivatives, market: marketScore, progress };
   let wSum = 0, acc = 0;
   for (const k in comps) { if (comps[k] != null) { acc += comps[k] * W[k]; wSum += W[k]; } }
-  let health = wSum > 0 ? _cpClamp(acc / wSum) : null;
+  let health = wSum > 0 ? _cpClamp(acc / wSum) : 50;
   const missingComponents = ['orderBook', 'flow', 'derivatives'].filter(k => comps[k] == null);
   const lowConfidence = missingComponents.length > 0;
 
-  let status = 'HOLD_BUT_WATCH', action = 'Hold, no add, prepare stop update.', mode = 'caution';
-  const reasons = [];
-  if (!stop) { status = 'MISSING_RISK_DATA'; action = 'Define stop loss / invalidation before tracking decision quality.'; health = Math.min(health, 55); reasons.push('missing stop loss'); }
-  if (stop > 0 && current <= stop) { status = 'EXIT_ALL'; action = 'Exit all immediately. Stop loss level is breached.'; health = Math.min(health, 20); mode = 'exit'; reasons.push('price below stop'); }
-  if (trade.hardInvalidationActive === true) { status = 'EMERGENCY_EXIT'; action = 'Exit all immediately. Hard invalidation is active.'; health = Math.min(health, 15); mode = 'emergency'; reasons.push('hard invalidation active'); }
-  if (marketScore != null && marketScore < 25) { status = health <= 20 ? 'EMERGENCY_EXIT' : 'RISK_OFF_EXIT'; action = 'Close or heavily reduce. Market regime disaster.'; health = Math.min(health, 30); mode = 'exit'; reasons.push('market regime disaster'); }
-  if ((book != null && book < 20 && market.spreadPct != null && market.spreadPct > 0.18) || market.orderBookCollapse) { status = health <= 20 ? 'EMERGENCY_EXIT' : 'EXIT_ALL'; action = 'Exit all or heavily reduce. Order book support collapsed.'; health = Math.min(health, 25); mode = 'exit'; reasons.push('order book support collapsed'); }
-  if (market.newsRisk === 'high' || market.exploitRisk || market.hackRisk || market.delistingRisk) { status = 'MANUAL_REVIEW'; action = 'Manual review now. Fundamental/news risk is active.'; health = Math.min(health, 40); mode = 'manual'; reasons.push('fundamental/news risk active'); }
-  const tpReached = (tps[2] && current >= tps[2]) ? 3 : (tps[1] && current >= tps[1]) ? 2 : (tps[0] && current >= tps[0]) ? 1 : 0;
-  if (!['EMERGENCY_EXIT','EXIT_ALL','RISK_OFF_EXIT','MANUAL_REVIEW','MISSING_RISK_DATA'].includes(status)) {
-    if (tpReached && ((flow != null && flow < 50) || (book != null && book < 50))) { status = tpReached >= 2 ? 'TAKE_PROFIT_AGGRESSIVE' : 'TAKE_PROFIT'; action = tpReached >= 2 ? 'Take profit 50-70% and trail rest tightly.' : 'Take profit 25-40% and trail rest structurally.'; health = Math.min(health, tpReached >= 2 ? 50 : 58); mode = 'profit'; reasons.push(`TP${tpReached} reached with weakening support`); }
-    else if (health >= 91 && trade.addRulesValid === true) { status = 'ADD_ALLOWED'; action = 'Add partial only on valid pullback / higher low.'; mode = 'add'; }
-    else if (health >= 81) { status = 'HOLD_STRONG'; action = 'Hold, do not take early profit unless at supply.'; mode = 'strong'; }
-    else if (health >= 66) { status = 'HOLD'; action = 'Hold and trail structurally.'; mode = 'hold'; }
-    else if (health < 36) { status = 'EXIT_ALL'; action = 'Close or reduce 80-100%.'; mode = 'exit'; }
-    else if (health < 51) { status = 'TAKE_PROFIT_AGGRESSIVE'; action = pnlPct > 0 ? 'Take profit 50-70% and trail rest tightly.' : 'Tighten stop or exit if next candle fails.'; mode = 'profit'; }
-  }
-  const naFmt = (v) => (v == null ? 'N/A' : Math.round(v));
-  if (!reasons.length) reasons.push(`momentum ${naFmt(momentum)}, book ${naFmt(book)}, flow ${naFmt(flow)}, market ${naFmt(marketScore)}`);
-  if (lowConfidence) reasons.push(`low-confidence: missing ${missingComponents.join('/')} data`);
   const distStop = stop > 0 ? ((stop - current) / current) * 100 : null;
-  const tpDistances = tps.map(tp => tp > 0 ? ((tp - current) / current) * 100 : null);
-  const nextTp = tps.find(tp => tp > current);
-  const nextDecisionLevel = status === 'EXIT_ALL' || status === 'EMERGENCY_EXIT' ? 'immediate close' : (stop && distStop != null && Math.abs(distStop) < Math.abs(tpDistances.find(x => x != null) ?? 999) ? `stop ${stop}` : (nextTp ? `TP ${nextTp}` : 'trail structure / next candle'));
-  return { trade, market, status, action, mode, priceUnavailable: false, lowConfidence, missingComponents, health: health == null ? null : Math.round(health), pnlUsd, pnlPct, value, distStop, tpDistances, scores: { momentum, orderBook: book, flow, derivatives, market: marketScore, progress }, reason: reasons, current, nextDecisionLevel };
+  const tpDistances = tps.map(tp => (tp != null && tp > 0) ? ((tp - current) / current) * 100 : null);
+  const nearStop = stop > 0 && current > stop && distStop != null && Math.abs(distStop) <= CP_NEAR_STOP_PCT;
+  const nextTpIdx = tps.findIndex((tp, i) => tp != null && tp > current && !tpHits['tp' + (i + 1)]);
+  const nextTp = nextTpIdx >= 0 ? { idx: nextTpIdx + 1, price: tps[nextTpIdx], distancePct: tpDistances[nextTpIdx] } : null;
+  let suggestedStop = stop || null;
+  if ((pnlPct != null && pnlPct >= 6) || tpHits.tp1) suggestedStop = (stop && stop >= entry) ? stop : entry;
+
+  let status = 'HOLD_BUT_WATCH', action = CP_ACT.WATCH, mode = 'caution', stopHit = false;
+  const reasons = [];
+  const incomplete = !(stop > 0) || !hasAnyTp;
+  const fading = (flow != null && flow < 50) || (book != null && book < 50) || (momentum != null && momentum < 45);
+
+  if (stop > 0 && current <= stop) { status = 'EXIT_ALL'; action = CP_ACT.EXIT; mode = 'exit'; stopHit = true; health = Math.min(health, 15); reasons.push('price at/below stop — stop hit'); }
+  else if (trade.hardInvalidationActive === true || (hardInval != null && current <= hardInval)) { status = 'EMERGENCY_EXIT'; action = CP_ACT.EXIT; mode = 'emergency'; health = Math.min(health, 15); reasons.push('hard invalidation active'); }
+  else if (safetyStatus === 'DANGER' || market.exploitRisk || market.hackRisk || market.delistingRisk || market.newsRisk === 'high') { status = 'MANUAL_REVIEW'; action = CP_ACT.EXIT; mode = 'emergency'; health = Math.min(health, 25); reasons.push(safetyStatus === 'DANGER' ? 'safety DANGER' : 'fundamental/news risk active'); }
+  else if (marketScore != null && marketScore < 25) { status = 'RISK_OFF_EXIT'; action = CP_ACT.EXIT; mode = 'exit'; health = Math.min(health, 30); reasons.push('market regime disaster'); }
+  else if (book != null && book < 20 && market.spreadPct != null && market.spreadPct > 0.18) { status = 'EXIT_ALL'; action = CP_ACT.REDUCE_RISK; mode = 'exit'; health = Math.min(health, 25); reasons.push('order book support collapsed'); }
+  else if (incomplete) { status = 'INCOMPLETE_SETUP'; action = CP_ACT.INCOMPLETE_SETUP; mode = 'manual'; health = Math.min(health, 50); if (!(stop > 0)) reasons.push('no stop / invalidation defined'); if (!hasAnyTp) reasons.push('no take-profit zones defined'); }
+  else if (tpHits.tp3) { status = 'TAKE_PROFIT'; action = CP_ACT.EXIT; mode = 'profit'; reasons.push('TP3 reached — take 60-80%, trail any runner'); }
+  else if (tpHits.tp2) { status = 'TAKE_PROFIT'; action = CP_ACT.TAKE_MORE; mode = 'profit'; reasons.push('TP2 reached — take 30-40% and move stop up'); }
+  else if (tpHits.tp1) { status = 'TAKE_PROFIT'; action = CP_ACT.TAKE_PARTIAL; mode = 'profit'; reasons.push('TP1 reached — take 25-35%, trail remainder'); }
+  else if (nearStop) { status = 'HOLD_BUT_WATCH'; action = CP_ACT.REDUCE_RISK; mode = 'caution'; reasons.push('price near stop — reduce risk / prepare exit'); }
+  else if (pnlPct != null && pnlPct >= 3 && fading) { status = 'TAKE_PROFIT_AGGRESSIVE'; action = CP_ACT.PROTECT_PROFIT; mode = 'profit'; reasons.push('in profit but momentum/flow/book fading — protect profit'); }
+  else if (health >= 81) { status = 'HOLD_STRONG'; action = CP_ACT.HOLD; mode = 'strong'; reasons.push('structure strong — hold'); }
+  else if (health >= 66) { status = 'HOLD'; action = (pnlPct != null && pnlPct >= 6) ? CP_ACT.MOVE_STOP : CP_ACT.HOLD; mode = 'hold'; reasons.push((pnlPct != null && pnlPct >= 6) ? 'healthy + in profit — trail/move stop up' : 'healthy — hold and trail'); }
+  else if (health >= 51) { status = 'HOLD_BUT_WATCH'; action = CP_ACT.WATCH; mode = 'caution'; reasons.push('mixed health — watch, no add'); }
+  else if (health >= 36) { status = 'TAKE_PROFIT_AGGRESSIVE'; action = (pnlPct != null && pnlPct > 0) ? CP_ACT.PROTECT_PROFIT : CP_ACT.REDUCE_RISK; mode = 'profit'; reasons.push('weak health — reduce / protect'); }
+  else { status = 'EXIT_ALL'; action = CP_ACT.EXIT; mode = 'exit'; reasons.push('health critical — exit'); }
+
+  if (safetyStatus !== 'SAFE') reasons.push(`safety ${safetyStatus}`);
+  if (lowConfidence) reasons.push(`low-confidence: missing ${missingComponents.join('/')} data`);
+
+  const nextDecisionLevel = (status === 'EXIT_ALL' || status === 'EMERGENCY_EXIT' || status === 'RISK_OFF_EXIT') ? 'immediate close'
+    : (stop > 0 && distStop != null && nextTp && Math.abs(distStop) < Math.abs(nextTp.distancePct ?? 999)) ? `stop ${stop}`
+    : nextTp ? `TP${nextTp.idx} ${nextTp.price}` : (stop > 0 ? `stop ${stop}` : 'trail structure / next candle');
+
+  return { trade, market, status, action, mode, priceUnavailable: false, lowConfidence, missingComponents, stopHit, safetyStatus, stale, tpHits,
+    health: health == null ? null : Math.round(health), pnlPct, unrealizedPnlUsd, realizedPnl: realized, totalPnl, value,
+    distStop, tpDistances, nextTp, suggestedStop, scores: { momentum, orderBook: book, flow, derivatives, market: marketScore, progress },
+    reason: reasons.slice(0, 5), current, nextDecisionLevel, remaining };
 }
 function _cpPriority(status) {
-  return { EMERGENCY_EXIT:1, EXIT_ALL:2, RISK_OFF_EXIT:2, TAKE_PROFIT_AGGRESSIVE:3, TAKE_PROFIT:4, MANUAL_REVIEW:4, MISSING_RISK_DATA:5, HOLD_BUT_WATCH:5, ADD_ALLOWED:6, HOLD:7, HOLD_STRONG:8 }[status] || 9;
+  return { EMERGENCY_EXIT:1, EXIT_ALL:2, RISK_OFF_EXIT:2, TAKE_PROFIT_AGGRESSIVE:3, TAKE_PROFIT:4, MANUAL_REVIEW:4, INCOMPLETE_SETUP:5, MISSING_RISK_DATA:5, HOLD_BUT_WATCH:5, NO_LIVE_PRICE:6, ADD_ALLOWED:6, HOLD:7, HOLD_STRONG:8 }[status] || 9;
 }
 function _cpAge(ts) {
   const t = ts ? new Date(ts).getTime() : 0;
@@ -3628,50 +3677,152 @@ function _cpAge(ts) {
   if (h < 48) return h + 'h ' + m + 'm';
   return Math.floor(h / 24) + 'd ' + (h % 24) + 'h';
 }
+// ── Internal alerts (UI/log only — never Telegram) ──
+function _cpGenAlerts(r, prev) {
+  const out = [];
+  const add = (type, urgency, reason) => out.push({ symbol: r.trade.symbol, type, urgency, status: r.status, action: r.action, price: r.current, reason, time: Date.now() });
+  const ph = (prev && prev.tpHits) || {}, th = r.tpHits || {};
+  if (th.tp1 && !ph.tp1) add('TP1_HIT', 'P3', 'TP1 zone reached');
+  if (th.tp2 && !ph.tp2) add('TP2_HIT', 'P2', 'TP2 zone reached');
+  if (th.tp3 && !ph.tp3) add('TP3_HIT', 'P2', 'TP3 zone reached');
+  if (r.stopHit && !(prev && prev.stopHit)) add('STOP_HIT', 'P1', 'stop loss breached');
+  else if (r.action === 'REDUCE_RISK' && r.distStop != null && Math.abs(r.distStop) <= 1.5 && (!prev || prev.status !== r.status)) add('STOP_NEAR', 'P1', 'price near stop');
+  if (r.status === 'NO_LIVE_PRICE' && (!prev || prev.status !== 'NO_LIVE_PRICE')) add('NO_LIVE_PRICE', 'P3', 'live price unavailable');
+  if (r.status === 'INCOMPLETE_SETUP' && (!prev || prev.status !== 'INCOMPLETE_SETUP')) add('INCOMPLETE_SETUP', 'P3', 'stop/TP not defined');
+  if (r.safetyStatus === 'DANGER' && (!prev || prev.safetyStatus !== 'DANGER')) add('SAFETY_DANGER', 'P1', 'safety DANGER');
+  return out;
+}
+function _cpPushAlerts(alerts) {
+  if (!alerts.length) return;
+  Cockpit.alerts = [...alerts, ...(Cockpit.alerts || [])].slice(0, 40);
+  for (const a of alerts) {
+    if (a.urgency === 'P1') window.Toast?.warn(`Cockpit: ${a.symbol} ${a.type}`, `${a.action} — ${a.reason}`, { endpoint: 'cockpit' });
+  }
+}
+function _cpAlertsStripHtml() {
+  const recent = (Cockpit.alerts || []).slice(0, 6);
+  if (!recent.length) return '';
+  const cls = (u) => u === 'P1' ? 'cp-alert--p1' : u === 'P2' ? 'cp-alert--p2' : 'cp-alert--p3';
+  return `<div class="cockpit-alerts">${recent.map(a => `<div class="cp-alert ${cls(a.urgency)}"><b>${_esc(a.symbol)}</b> ${_esc(a.type.replace(/_/g,' '))} — ${_esc(a.action)} <span>${_esc(a.reason)}</span></div>`).join('')}</div>`;
+}
+// Focused RADAR candidate (selected on the RADAR tab, else first entry-ready).
+function _cpRadarFocus() {
+  const radar = window.Fleet && window.Fleet.data ? window.Fleet.data.tradingRadar : null;
+  if (!radar) return null;
+  return radar.selected || (Array.isArray(radar.entryReady) && radar.entryReady[0]) || (Array.isArray(radar.candidates) && radar.candidates[0]) || null;
+}
+function _cpPrefillFromRadar(c) {
+  if (!c) return null;
+  const z = c.entryZone || null;
+  const mid = z && z.low != null && z.high != null ? (Number(z.low) + Number(z.high)) / 2 : null;
+  const tps = (c.TAKE_PROFIT_LEVELS || c.takeProfitCheckpoints || []);
+  const lvl = (i) => (tps[i] && tps[i].level != null ? Number(tps[i].level) : null);
+  return {
+    symbol: String(c.symbol || '').toUpperCase(),
+    entryType: c.ENTRY_TYPE || c.entryType || 'RADAR',
+    entryPrice: mid, stopLoss: _cpNum(c.STOP_LOSS_LEVEL ?? c.suggestedStop),
+    hardInvalidation: _cpNum(c.HARD_INVALIDATION ?? c.invalidationLevel),
+    tp1: lvl(0), tp2: lvl(1), tp3: lvl(2),
+    safetyStatus: c.safetyStatus || 'UNKNOWN', fromRadar: true,
+    notes: Array.isArray(c.REASON) ? c.REASON.join('; ') : (c.reasons || []).join('; '),
+  };
+}
+function _cpTpBadge(r, i) {
+  const t = r.trade, lvl = _cpNum(t['tp' + i]);
+  if (lvl == null) return `<button type="button" class="cp-tp cp-tp--empty" disabled>TP${i} —</button>`;
+  const hit = r.tpHits['tp' + i];
+  const dist = r.tpDistances[i - 1];
+  const taken = (t.partials || []).some(p => p.tpIndex === i);
+  return `<button type="button" class="cp-tp ${hit ? 'cp-tp--hit' : ''} ${taken ? 'cp-tp--taken' : ''}" data-cp-tp="${i}" data-cp-id="${_esc(t.id)}" title="Mark TP${i} taken">TP${i} ${_esc(_cpFmt(lvl))}${hit ? ' ✓' : (dist != null ? ' ' + _cpPct(dist) : '')}${taken ? ' • taken' : ''}</button>`;
+}
 function renderCockpit() {
   const list = document.getElementById('cockpit-list');
   const summary = document.getElementById('cockpit-summary');
   if (!list || !summary) return;
+  _cpRefreshSymbolList();
+  // Live RADAR focus banner in the form area.
+  const focusEl = document.getElementById('cockpit-radar-focus');
+  if (focusEl) {
+    const f = _cpRadarFocus();
+    focusEl.innerHTML = f
+      ? `RADAR focus: <b>${_esc(f.symbol)}</b> <span class="${_fleetRadarBadgeClass ? _fleetRadarBadgeClass(f.STATUS || f.actionability) : ''}">${_esc(f.STATUS || f.actionability || '--')}</span> · <button type="button" id="cockpit-import-radar">Import to form</button>`
+      : 'RADAR focus: none (open the Trading RADAR tab and click a candidate)';
+  }
   if (!Cockpit.trades.length) {
     summary.innerHTML = '';
-    list.innerHTML = '<div class="cockpit-empty">No open trades yet. Add a manual position above to start tracking.</div>';
+    list.innerHTML = '<div class="cockpit-empty">No open trades yet. Import a RADAR candidate above, or add a position. The cockpit will then auto-track live price, PnL, TP/stop hits and recommend an action.</div>';
     return;
   }
-  let rows = Cockpit.trades.map(evaluateCockpitTrade);
+  // Evaluate, generate alerts (diff vs persisted prev), and persist auto-detected TP hits.
+  Cockpit.prev = Cockpit.prev || {};
+  let mutated = false;
+  let rows = Cockpit.trades.map(t => {
+    const r = evaluateCockpitTrade(t);
+    _cpPushAlerts(_cpGenAlerts(r, Cockpit.prev[t.id]));
+    Cockpit.prev[t.id] = { tpHits: { ...r.tpHits }, status: r.status, stopHit: r.stopHit, safetyStatus: r.safetyStatus };
+    // Persist newly auto-detected TP hits onto the trade so they survive reload.
+    const th = t.tpHits || {};
+    if ((r.tpHits.tp1 && !th.tp1) || (r.tpHits.tp2 && !th.tp2) || (r.tpHits.tp3 && !th.tp3)) {
+      t.tpHits = { ...th, ...r.tpHits }; mutated = true;
+    }
+    return r;
+  });
+  if (mutated) saveCockpitTrades();
   const sort = Cockpit.sort || 'priority';
+  const num = (v) => (v == null ? -Infinity : v);
   rows.sort((a,b) => {
-    if (sort === 'pnlDesc') return b.pnlUsd - a.pnlUsd;
-    if (sort === 'pnlAsc') return a.pnlUsd - b.pnlUsd;
-    if (sort === 'sizeDesc') return b.value - a.value;
-    if (sort === 'healthDesc') return b.health - a.health;
-    if (sort === 'healthAsc') return a.health - b.health;
+    if (sort === 'pnlDesc') return num(b.totalPnl) - num(a.totalPnl);
+    if (sort === 'pnlAsc') return num(a.totalPnl) - num(b.totalPnl);
+    if (sort === 'sizeDesc') return num(b.value) - num(a.value);
+    if (sort === 'healthDesc') return num(b.health) - num(a.health);
+    if (sort === 'healthAsc') return num(a.health) - num(b.health);
     if (sort === 'stopNear') return Math.abs(a.distStop ?? 999) - Math.abs(b.distStop ?? 999);
     if (sort === 'tpNear') return Math.abs(a.tpDistances.find(x => x != null) ?? 999) - Math.abs(b.tpDistances.find(x => x != null) ?? 999);
     if (sort === 'ageDesc') return new Date(a.trade.entryTime || 0) - new Date(b.trade.entryTime || 0);
     return _cpPriority(a.status) - _cpPriority(b.status);
   });
-  const totalValue = rows.reduce((s,r)=>s+(r.value||0),0), totalPnl = rows.reduce((s,r)=>s+(r.pnlUsd||0),0);
-  const count = names => rows.filter(r => names.includes(r.status)).length;
+  // ── Portfolio summary ──
+  const totalValue = rows.reduce((s,r)=>s+(r.value||0),0);
+  const totalPnl = rows.reduce((s,r)=>s+(r.totalPnl||0),0);
+  const unreal = rows.reduce((s,r)=>s+(r.unrealizedPnlUsd||0),0);
+  const healthRows = rows.filter(r => r.health != null);
+  const avgHealth = healthRows.length ? Math.round(healthRows.reduce((s,r)=>s+r.health,0)/healthRows.length) : null;
+  const needsAction = rows.filter(r => ['EXIT','TAKE_PARTIAL','TAKE_MORE','PROTECT_PROFIT','REDUCE_RISK','INCOMPLETE_SETUP','MOVE_STOP'].includes(r.action)).length;
+  const winner = rows.filter(r=>r.totalPnl!=null).sort((a,b)=>b.totalPnl-a.totalPnl)[0]?.trade.symbol || '--';
+  const risk = healthRows.slice().sort((a,b)=>a.health-b.health)[0]?.trade.symbol || '--';
+  const noPrice = rows.filter(r=>r.status==='NO_LIVE_PRICE').length;
   summary.innerHTML = [
     ['OPEN', rows.length],
     ['VALUE', _cpFmt(totalValue)],
-    ['P&L', `${_cpFmt(totalPnl)} / ${_cpPct(totalValue ? totalPnl / totalValue * 100 : 0)}`],
-    ['HOLD', count(['HOLD','HOLD_STRONG','ADD_ALLOWED'])],
-    ['CAUTION', count(['HOLD_BUT_WATCH','MISSING_RISK_DATA','MANUAL_REVIEW'])],
-    ['EXIT/TP', count(['EXIT_ALL','EMERGENCY_EXIT','RISK_OFF_EXIT','TAKE_PROFIT','TAKE_PROFIT_AGGRESSIVE'])],
+    ['TOTAL P&L', `${_cpFmt(totalPnl)} / ${_cpPct(totalValue ? totalPnl/totalValue*100 : 0)}`],
+    ['UNREAL', _cpFmt(unreal)],
+    ['NEEDS ACTION', needsAction],
+    ['AVG HEALTH', avgHealth == null ? 'N/A' : avgHealth],
+    ['WINNER', winner],
+    ['RISK', risk],
+    ['NO PRICE', noPrice],
   ].map(([k,v]) => `<div class="cockpit-summary__item"><span>${_esc(k)}</span><b>${_esc(v)}</b></div>`).join('');
+
+  const stripWrap = document.getElementById('cockpit-alerts-strip');
+  if (stripWrap) stripWrap.innerHTML = _cpAlertsStripHtml();
+
   list.innerHTML = rows.slice(0, 25).map(r => {
     const t = r.trade;
-    const pnlCls = r.priceUnavailable ? '' : (r.pnlUsd >= 0 ? 'pos' : 'neg');
+    const pnlCls = r.priceUnavailable ? '' : ((r.totalPnl ?? 0) >= 0 ? 'pos' : 'neg');
     const gaugeColor = r.priceUnavailable ? 'var(--txt3)' : r.mode === 'emergency' || r.mode === 'exit' ? 'var(--red)' : r.mode === 'profit' ? 'var(--amb)' : r.mode === 'caution' ? '#e5d65c' : r.mode === 'strong' || r.mode === 'add' ? 'var(--grn)' : 'var(--blu)';
     const scoreChip = (label, val) => `<div class="cockpit-score ${_cpScoreClass(val)}"><span>${label}</span><b>${val == null ? 'N/A' : Math.round(val)}</b></div>`;
-    const pnlText = r.priceUnavailable ? 'no live price' : `${_esc(_cpPct(r.pnlPct))} / ${_esc(_cpFmt(r.pnlUsd))}`;
+    const pnlMain = r.priceUnavailable ? 'no live price' : `${_esc(_cpPct(r.pnlPct))} / ${_esc(_cpFmt(r.totalPnl))}`;
+    const realLine = (r.realizedPnl) ? `<div class="cockpit-realized">realized ${_esc(_cpFmt(r.realizedPnl))} · unreal ${_esc(_cpFmt(r.unrealizedPnlUsd))}</div>` : '';
     const healthText = r.health == null ? 'N/A' : r.health;
-    const lowConfBadge = r.lowConfidence ? '<span class="cockpit-lowconf" title="Health is low-confidence: live order book / flow / derivatives data unavailable">LOW-CONFIDENCE</span>' : '';
+    const lowConfBadge = r.lowConfidence ? '<span class="cockpit-lowconf" title="low-confidence: live order book / flow / derivatives unavailable">LOW-CONF</span>' : '';
+    const safeCls = 'safety-' + String(r.safetyStatus || 'UNKNOWN').toLowerCase();
+    const miss = (r.missingComponents || []).length ? `<span class="cockpit-missing" title="missing data">missing: ${_esc(r.missingComponents.join(', '))}</span>` : '';
+    const suggest = (r.suggestedStop != null && t.stopLoss != null && Number(r.suggestedStop) !== Number(t.stopLoss)) ? `<button type="button" class="cp-movestop" data-cp-movestop="${_esc(t.id)}" data-cp-newstop="${_esc(r.suggestedStop)}">move stop → ${_esc(_cpFmt(r.suggestedStop))}</button>` : '';
     return `<div class="cockpit-card" data-id="${_esc(t.id)}" data-mode="${_esc(r.mode)}">
       <div class="cockpit-main">
-        <div><div class="cockpit-symbol">${_esc(t.symbol)}</div><div class="cockpit-meta">${_esc(t.venue || 'Binance')} - ${_esc(t.entryType || 'manual')} - ${_esc(_cpAge(t.entryTime))}</div></div>
-        <div class="cockpit-pnl ${pnlCls}">${pnlText}</div>
+        <div><div class="cockpit-symbol">${_esc(t.symbol)} <span class="safety-pill ${safeCls}" title="safety">${_esc(r.safetyStatus)}</span>${t.fromRadar ? '<span class="cockpit-fromradar" title="imported from RADAR">RADAR</span>' : ''}</div>
+          <div class="cockpit-meta">${_esc(t.venue || 'Binance')} · ${_esc(t.entryType || 'manual')} · ${_esc(_cpAge(t.entryTime))}${r.stale ? ' · <span class="cockpit-stale">stale</span>' : ''}</div></div>
+        <div class="cockpit-pnl ${pnlCls}">${pnlMain}${realLine}</div>
         <div class="cockpit-grid">
           <div class="cockpit-kv"><span>Entry</span>${_esc(_cpFmt(t.entryPrice))}</div><div class="cockpit-kv"><span>Current</span>${r.priceUnavailable ? 'unavailable' : _esc(_cpFmt(r.current))}</div>
           <div class="cockpit-kv"><span>Qty</span>${_esc(t.quantity)}</div><div class="cockpit-kv"><span>Value</span>${r.priceUnavailable ? '--' : _esc(_cpFmt(r.value))}</div>
@@ -3680,91 +3831,166 @@ function renderCockpit() {
       <div class="cockpit-gauge">
         <div class="cockpit-gauge__dial" style="--score:${r.health == null ? 0 : r.health};--gauge-color:${gaugeColor}"><b>${healthText}</b></div>
         <div class="cockpit-status">${_esc(r.status)} ${lowConfBadge}</div>
-        <div class="cockpit-action">${_esc(r.action)}</div>
+        <div class="cockpit-action cockpit-action--${_esc(r.mode)}">${_esc(r.action.replace(/_/g,' '))}</div>
       </div>
       <div class="cockpit-right">
+        <div class="cockpit-tps">${_cpTpBadge(r,1)}${_cpTpBadge(r,2)}${_cpTpBadge(r,3)}</div>
         <div class="cockpit-levels">
           <div class="cockpit-level"><span>STOP</span><b>${_esc(_cpFmt(t.stopLoss))}</b></div>
-          <div class="cockpit-level"><span>TP1</span><b>${_esc(_cpFmt(t.tp1))}</b></div>
-          <div class="cockpit-level"><span>TP2</span><b>${_esc(_cpFmt(t.tp2))}</b></div>
-          <div class="cockpit-level"><span>TP3</span><b>${_esc(_cpFmt(t.tp3))}</b></div>
           <div class="cockpit-level"><span>DIST STOP</span><b>${_esc(_cpPct(r.distStop))}</b></div>
           <div class="cockpit-level"><span>NEXT</span><b>${_esc(r.nextDecisionLevel)}</b></div>
         </div>
         <div class="cockpit-scores">${scoreChip('MOM',r.scores.momentum)}${scoreChip('BOOK',r.scores.orderBook)}${scoreChip('FLOW',r.scores.flow)}${scoreChip('DERIV',r.scores.derivatives)}${scoreChip('MKT',r.scores.market)}${scoreChip('PROG',r.scores.progress)}</div>
-        <div class="cockpit-next"><b>Reason:</b> ${_esc(r.reason.join(' | '))}</div>
+        <div class="cockpit-next"><b>Why:</b> ${_esc(r.reason.join(' | '))} ${miss}</div>
+        ${suggest}
       </div>
       <div class="cockpit-actions">
         <button type="button" data-cp-edit="${_esc(t.id)}">EDIT</button>
         <button type="button" data-cp-close="${_esc(t.id)}">CLOSE</button>
         <button type="button" data-cp-delete="${_esc(t.id)}">DELETE</button>
       </div>
-      <div class="cockpit-card__detail"><div><b>Thesis:</b><br>${_esc(t.notes || '--')}</div><div><b>Invalidation:</b><br>${_esc(t.stopLoss ? `Loss of ${t.stopLoss} or market regime below 40` : 'missing stop loss')}</div></div>
     </div>`;
   }).join('');
+}
+function _cpShowError(msg) {
+  const el = document.getElementById('cockpit-form-error');
+  if (el) { el.textContent = msg || ''; el.style.display = msg ? 'block' : 'none'; }
 }
 function resetCockpitForm() {
   const form = document.getElementById('cockpit-form');
   if (form) form.reset();
-  const id = document.getElementById('cockpit-id');
-  if (id) id.value = '';
-  const venue = document.getElementById('cockpit-venue');
-  if (venue) venue.value = 'Binance';
+  const id = document.getElementById('cockpit-id'); if (id) id.value = '';
+  const venue = document.getElementById('cockpit-venue'); if (venue) venue.value = 'Binance';
+  const fr = document.getElementById('cockpit-from-radar'); if (fr) fr.value = '';
+  _cpShowError('');
+  _cpUpdatePricePreview();
+}
+function _cpUpdatePricePreview() {
+  const el = document.getElementById('cockpit-price-preview');
+  if (!el) return;
+  const sym = String(document.getElementById('cockpit-symbol')?.value || '');
+  if (!sym) { el.textContent = ''; return; }
+  const m = _cpMarketFor(sym);
+  el.textContent = (m.found && m.currentPrice != null) ? `live ${_cpFmt(m.currentPrice)}` : 'not in scanner universe — no live price';
+  el.className = 'cockpit-price-preview ' + ((m.found && m.currentPrice != null) ? 'ok' : 'warn');
 }
 function saveCockpitFromForm(e) {
   if (e) e.preventDefault();
+  const symbol = String(document.getElementById('cockpit-symbol').value || '').toUpperCase().trim();
+  const entryPrice = _cpNum(document.getElementById('cockpit-entry').value);
+  const quantity = _cpNum(document.getElementById('cockpit-qty').value);
+  const errs = [];
+  if (!symbol) errs.push('symbol is required');
+  if (!(entryPrice > 0)) errs.push('entry price must be > 0');
+  if (!(quantity > 0)) errs.push('quantity must be > 0');
+  if (errs.length) { _cpShowError('Cannot save: ' + errs.join(', ') + '.'); return; }
   const id = document.getElementById('cockpit-id').value || ('cp_' + Date.now());
+  const existing = Cockpit.trades.find(t => t.id === id) || {};
+  const fromRadar = document.getElementById('cockpit-from-radar')?.value === '1';
   const trade = {
-    id,
-    symbol: String(document.getElementById('cockpit-symbol').value || '').toUpperCase(),
+    ...existing, id, symbol,
     venue: document.getElementById('cockpit-venue').value || 'Binance',
     entryType: document.getElementById('cockpit-entry-type').value || 'manual',
-    entryPrice: _cpNum(document.getElementById('cockpit-entry').value),
-    quantity: _cpNum(document.getElementById('cockpit-qty').value),
+    entryPrice, quantity,
     stopLoss: _cpNum(document.getElementById('cockpit-stop').value),
     tp1: _cpNum(document.getElementById('cockpit-tp1').value),
     tp2: _cpNum(document.getElementById('cockpit-tp2').value),
     tp3: _cpNum(document.getElementById('cockpit-tp3').value),
+    hardInvalidation: _cpNum(document.getElementById('cockpit-hardinval')?.value) ?? existing.hardInvalidation ?? null,
     notes: document.getElementById('cockpit-notes').value || '',
-    entryTime: (Cockpit.trades.find(t => t.id === id) || {}).entryTime || new Date().toISOString(),
+    safetyStatus: existing.safetyStatus || (fromRadar ? 'UNKNOWN' : undefined),
+    fromRadar: fromRadar || existing.fromRadar || false,
+    tpHits: existing.tpHits || {},
+    partials: existing.partials || [],
+    entryTime: existing.entryTime || new Date().toISOString(),
   };
-  if (!trade.symbol || !(trade.entryPrice > 0) || !(trade.quantity > 0)) return;
   Cockpit.trades = Cockpit.trades.filter(t => t.id !== id).concat(trade);
   saveCockpitTrades();
   resetCockpitForm();
   renderCockpit();
 }
+function _cpFillForm(t) {
+  document.getElementById('cockpit-id').value = t.id || '';
+  document.getElementById('cockpit-symbol').value = t.symbol || '';
+  document.getElementById('cockpit-venue').value = t.venue || 'Binance';
+  document.getElementById('cockpit-entry-type').value = t.entryType || 'manual';
+  document.getElementById('cockpit-entry').value = t.entryPrice ?? '';
+  document.getElementById('cockpit-qty').value = t.quantity ?? '';
+  document.getElementById('cockpit-stop').value = t.stopLoss ?? '';
+  document.getElementById('cockpit-tp1').value = t.tp1 ?? '';
+  document.getElementById('cockpit-tp2').value = t.tp2 ?? '';
+  document.getElementById('cockpit-tp3').value = t.tp3 ?? '';
+  const hi = document.getElementById('cockpit-hardinval'); if (hi) hi.value = t.hardInvalidation ?? '';
+  document.getElementById('cockpit-notes').value = t.notes || '';
+  const fr = document.getElementById('cockpit-from-radar'); if (fr) fr.value = t.fromRadar ? '1' : '';
+  _cpUpdatePricePreview();
+}
+function _cpRefreshSymbolList() {
+  const dl = document.getElementById('cockpit-symbol-list');
+  if (!dl || !Array.isArray(DATA)) return;
+  dl.innerHTML = DATA.slice(0, 500).map(d => `<option value="${_esc(String(d.symbol||'').toUpperCase())}USDT"></option>`).join('');
+}
 function initCockpit() {
   loadCockpitTrades();
+  Cockpit.alerts = Cockpit.alerts || [];
+  Cockpit.prev = Cockpit.prev || {};
   document.getElementById('cockpit-form')?.addEventListener('submit', saveCockpitFromForm);
   document.getElementById('cockpit-reset')?.addEventListener('click', resetCockpitForm);
+  document.getElementById('cockpit-symbol')?.addEventListener('input', () => { _cpShowError(''); _cpUpdatePricePreview(); });
   document.getElementById('cockpit-sort')?.addEventListener('change', (e) => { Cockpit.sort = e.target.value; renderCockpit(); });
   document.getElementById('cockpit-compact-toggle')?.addEventListener('click', () => { Cockpit.compact = !Cockpit.compact; document.getElementById('v-cockpit')?.classList.toggle('cockpit-compact', Cockpit.compact); });
+  // Import the focused RADAR candidate into the form (prefill, marked as fallback-free RADAR data).
+  document.getElementById('cockpit-radar-focus')?.addEventListener('click', (e) => {
+    if (!e.target.closest('#cockpit-import-radar')) return;
+    const pre = _cpPrefillFromRadar(_cpRadarFocus());
+    if (!pre) { _cpShowError('No RADAR focus candidate. Open the Trading RADAR tab and click a candidate first.'); return; }
+    _cpFillForm({ id: '', ...pre });
+    _cpShowError('');
+    if (pre.safetyStatus && pre.safetyStatus !== 'SAFE') _cpShowError(`Imported ${pre.symbol} from RADAR. Safety is ${pre.safetyStatus} — verify before sizing.`);
+  });
   document.getElementById('cockpit-list')?.addEventListener('click', (e) => {
     const edit = e.target.closest('[data-cp-edit]');
     const del = e.target.closest('[data-cp-delete]');
     const close = e.target.closest('[data-cp-close]');
+    const tp = e.target.closest('[data-cp-tp]');
+    const ms = e.target.closest('[data-cp-movestop]');
+    if (tp) {
+      e.stopPropagation();
+      const t = Cockpit.trades.find(x => x.id === tp.dataset.cpId);
+      if (!t) return;
+      const i = Number(tp.dataset.cpTp);
+      t.tpHits = t.tpHits || {}; t.tpHits['tp' + i] = true;
+      // Record a partial exit at the TP level (manual "taken" marker) for realized PnL.
+      t.partials = Array.isArray(t.partials) ? t.partials : [];
+      if (!t.partials.some(p => p.tpIndex === i)) {
+        const frac = i === 1 ? 0.3 : i === 2 ? 0.35 : 0.35;
+        t.partials.push({ tpIndex: i, fraction: frac, price: _cpNum(t['tp' + i]) });
+      }
+      saveCockpitTrades(); renderCockpit();
+      return;
+    }
+    if (ms) {
+      e.stopPropagation();
+      const t = Cockpit.trades.find(x => x.id === ms.dataset.cpMovestop);
+      if (!t) return;
+      t.stopLoss = _cpNum(ms.dataset.cpNewstop);
+      saveCockpitTrades(); renderCockpit();
+      return;
+    }
     if (edit) {
       e.stopPropagation();
       const t = Cockpit.trades.find(x => x.id === edit.dataset.cpEdit);
-      if (!t) return;
-      document.getElementById('cockpit-id').value = t.id;
-      document.getElementById('cockpit-symbol').value = t.symbol || '';
-      document.getElementById('cockpit-venue').value = t.venue || 'Binance';
-      document.getElementById('cockpit-entry-type').value = t.entryType || 'manual';
-      document.getElementById('cockpit-entry').value = t.entryPrice || '';
-      document.getElementById('cockpit-qty').value = t.quantity || '';
-      document.getElementById('cockpit-stop').value = t.stopLoss || '';
-      document.getElementById('cockpit-tp1').value = t.tp1 || '';
-      document.getElementById('cockpit-tp2').value = t.tp2 || '';
-      document.getElementById('cockpit-tp3').value = t.tp3 || '';
-      document.getElementById('cockpit-notes').value = t.notes || '';
+      if (t) _cpFillForm(t);
       return;
     }
     if (del || close) {
       e.stopPropagation();
       const id = del ? del.dataset.cpDelete : close.dataset.cpClose;
-      Cockpit.trades = Cockpit.trades.filter(t => t.id !== id);
+      const t = Cockpit.trades.find(x => x.id === id);
+      // CLOSE archives (persists realized history); DELETE discards entirely.
+      if (close && t) _cpArchiveTrade({ ...t, status: 'closed', closedAt: new Date().toISOString() });
+      Cockpit.trades = Cockpit.trades.filter(x => x.id !== id);
+      delete Cockpit.prev[id];
       saveCockpitTrades();
       renderCockpit();
       return;
@@ -3772,6 +3998,7 @@ function initCockpit() {
     const card = e.target.closest('.cockpit-card');
     if (card) card.classList.toggle('expanded');
   });
+  _cpRefreshSymbolList();
   renderCockpit();
 }
 

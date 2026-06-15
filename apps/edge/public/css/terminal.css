@@ -286,6 +286,38 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .cockpit-right{display:grid;grid-template-columns:1fr 210px;gap:8px;min-width:0}.cockpit-levels{display:grid;grid-template-columns:repeat(3,1fr);gap:5px}.cockpit-level{background:var(--s1);border:1px solid var(--b1);border-radius:var(--rad);padding:5px}.cockpit-level span{display:block;font-size:8px;color:var(--txt3);letter-spacing:.07em}.cockpit-level b{font-size:10px;color:var(--txt)}
 .cockpit-scores{display:grid;grid-template-columns:repeat(2,1fr);gap:4px}.cockpit-score{display:flex;justify-content:space-between;gap:6px;background:var(--s1);border:1px solid var(--b1);border-radius:var(--rad);padding:4px 5px;font-size:9px}.cockpit-score.good b{color:var(--grn)}.cockpit-score.neutral b{color:var(--blu)}.cockpit-score.warning b{color:var(--amb)}.cockpit-score.bad b{color:var(--red)}.cockpit-score.na{opacity:.55}.cockpit-score.na b{color:var(--txt3)}
 .cockpit-lowconf{display:inline-block;margin-left:6px;font-size:8px;font-weight:700;letter-spacing:.06em;color:var(--amb);border:1px solid rgba(255,176,32,.35);background:rgba(255,176,32,.08);border-radius:3px;padding:1px 4px;vertical-align:middle}
+/* ── Cockpit v2: guided workflow, TP state, alerts ── */
+.cockpit-radar-focus{font-size:10px;color:var(--txt2);background:var(--s1);border:1px solid var(--b1);border-radius:var(--rad);padding:5px 9px;margin-bottom:6px}
+.cockpit-radar-focus button{margin-left:6px;font-family:var(--mono);font-size:9px;background:rgba(0,232,200,.1);border:1px solid rgba(0,232,200,.3);color:var(--acc);border-radius:3px;padding:2px 7px;cursor:pointer}
+.cockpit-field{position:relative;display:flex;flex-direction:column;gap:2px}
+.cockpit-price-preview{font-size:8px;letter-spacing:.04em}
+.cockpit-price-preview.ok{color:var(--grn)} .cockpit-price-preview.warn{color:var(--amb)}
+.cockpit-form-error{font-size:10px;color:var(--red);background:rgba(255,51,86,.08);border:1px solid rgba(255,51,86,.3);border-radius:var(--rad);padding:5px 9px;margin-bottom:6px}
+.cockpit-alerts{display:flex;flex-direction:column;gap:3px;margin-bottom:6px}
+.cp-alert{font-size:9px;padding:3px 8px;border-radius:var(--rad);border-left:2px solid var(--txt3);background:var(--s1)}
+.cp-alert span{color:var(--txt3)}
+.cp-alert--p1{border-left-color:var(--red);background:rgba(255,51,86,.07)}
+.cp-alert--p2{border-left-color:var(--amb);background:rgba(255,176,32,.06)}
+.cp-alert--p3{border-left-color:var(--blu)}
+.cockpit-tps{display:flex;gap:4px;margin-bottom:5px;flex-wrap:wrap}
+.cp-tp{font-family:var(--mono);font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer;border:1px solid var(--b2);background:var(--s1);color:var(--txt2)}
+.cp-tp--hit{border-color:rgba(0,212,132,.4);color:var(--grn);background:rgba(0,212,132,.08)}
+.cp-tp--taken{text-decoration:line-through;opacity:.8}
+.cp-tp--empty{opacity:.4;cursor:default}
+.cp-movestop{font-family:var(--mono);font-size:9px;margin-top:4px;background:rgba(61,158,255,.1);border:1px solid rgba(61,158,255,.3);color:var(--blu);border-radius:3px;padding:2px 7px;cursor:pointer}
+.cockpit-realized{font-size:8px;color:var(--txt3);font-weight:400;margin-top:1px}
+.cockpit-missing{font-size:8px;color:var(--amb);margin-left:4px}
+.cockpit-stale{color:var(--amb)}
+.cockpit-fromradar{display:inline-block;margin-left:4px;font-size:7px;font-weight:700;color:var(--acc);border:1px solid rgba(0,232,200,.35);border-radius:2px;padding:0 3px;vertical-align:middle}
+.cockpit-action--exit,.cockpit-action--emergency{color:var(--red);font-weight:700}
+.cockpit-action--profit{color:var(--amb);font-weight:700}
+.cockpit-action--strong{color:var(--grn);font-weight:700}
+.cockpit-action--manual{color:var(--pur);font-weight:700}
+.safety-pill{display:inline-block;font-size:7px;font-weight:700;letter-spacing:.04em;border-radius:2px;padding:0 4px;vertical-align:middle;border:1px solid var(--b2)}
+.safety-pill.safety-safe{color:var(--grn);border-color:rgba(0,212,132,.35);background:rgba(0,212,132,.08)}
+.safety-pill.safety-caution{color:var(--amb);border-color:rgba(255,176,32,.35);background:rgba(255,176,32,.08)}
+.safety-pill.safety-danger{color:var(--red);border-color:rgba(255,51,86,.4);background:rgba(255,51,86,.1)}
+.safety-pill.safety-unknown{color:var(--txt3)}
 .cockpit-next{grid-column:1/-1;background:rgba(0,232,200,.05);border:1px solid rgba(0,232,200,.16);border-radius:var(--rad);padding:5px 7px;font-size:9px;color:var(--txt2)}.cockpit-next b{color:var(--acc)}
 .cockpit-actions{display:flex;flex-direction:column;gap:5px}.cockpit-actions button{background:var(--s1);border:1px solid var(--b2);border-radius:var(--rad);color:var(--txt2);font-family:var(--mono);font-size:9px;padding:5px;cursor:pointer}.cockpit-actions button:hover{color:var(--acc);border-color:rgba(0,232,200,.35)}
 .cockpit-card__detail{grid-column:1/-1;display:none;border-top:1px solid var(--b1);padding-top:8px;color:var(--txt2);font-size:10px;line-height:1.5}.cockpit-card.expanded .cockpit-card__detail{display:grid;grid-template-columns:1fr 1fr;gap:8px}
