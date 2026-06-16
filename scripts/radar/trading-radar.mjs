@@ -1131,6 +1131,12 @@ export function evaluateTradingRadar({
         scannerSignal: sc.signal,
         scannerHot: sc.hot,
         scannerTags: Array.from(new Set([...(sc.tags || []), sc.signal].filter(Boolean).map((x) => String(x).toUpperCase()))),
+        source: sc.source || sc.exchange || m.source,
+        exchange: sc.exchange || sc.source || m.exchange,
+        listingSource: sc.listingSource || sc.source || m.listingSource,
+        listingType: sc.listingType || m.listingType,
+        alphaTokenId: sc.alphaTokenId || sc.tokenId || m.alphaTokenId,
+        binanceAlphaListed: sc.binanceAlphaListed === true || m.binanceAlphaListed === true || /binance[-_\s]?alpha|BINANCE_ALPHA/i.test(String(sc.source || sc.exchange || sc.listingType || '')),
         isScannerContext: true,
         change1hPct: m.change1hPct ?? sc.c1,
         change4hPct: m.change4hPct ?? sc.c4,
@@ -1154,6 +1160,12 @@ export function evaluateTradingRadar({
                scannerSignal: sc.signal,
                scannerHot: sc.hot,
                scannerTags: Array.from(new Set([...(sc.tags || []), sc.signal].filter(Boolean).map((x) => String(x).toUpperCase()))),
+               source: sc.source || sc.exchange || null,
+               exchange: sc.exchange || sc.source || null,
+               listingSource: sc.listingSource || sc.source || null,
+               listingType: sc.listingType || null,
+               alphaTokenId: sc.alphaTokenId || sc.tokenId || null,
+               binanceAlphaListed: sc.binanceAlphaListed === true || /binance[-_\s]?alpha|BINANCE_ALPHA/i.test(String(sc.source || sc.exchange || sc.listingType || '')),
                isScannerContext: true,
                change1hPct: sc.c1,
                change4hPct: sc.c4,
@@ -1177,7 +1189,7 @@ export function evaluateTradingRadar({
       // Resolve token metadata (curated allowlist / row context / optional
       // provider) then classify honestly. Missing/ambiguous metadata stays
       // UNKNOWN with a specific safetyReason - never faked SAFE.
-      const safety = classifyMarketSafety(m);
+      const safety = classifyMarketSafety(m, { binanceAlphaListings: scannerContext.binanceAlphaListings });
       safety.symbol = m.symbol;
       safetyResults.push(safety);
       const v1 = buildRadarV1Output(m, regime, stageInfo, levels, safety);
@@ -1216,6 +1228,7 @@ export function evaluateTradingRadar({
         takeProfitCheckpoints: levels.takeProfitCheckpoints,
         safety,
         safetyStatus: safety.safetyStatus,
+        finalSafetyStatus: safety.finalSafetyStatus,
         safetyScore: safety.safetyScore,
         safetyReason: safety.safetyReason,
         safetyReasons: safety.reasons,
@@ -1224,6 +1237,9 @@ export function evaluateTradingRadar({
         chainSafetyReason: safety.chainSafetyReason,
         listingSafetyStatus: safety.listingSafetyStatus,
         listingSafetyReason: safety.listingSafetyReason,
+        listingSource: safety.listingSource,
+        listingType: safety.listingType,
+        alphaTokenId: safety.alphaTokenId,
         safetyConfidence: safety.confidence,
         chain: safety.chain,
         contractAddress: safety.contractAddress,

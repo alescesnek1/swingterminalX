@@ -2,16 +2,18 @@ console.log('TERMINAL_X_LOADED');
 // Shared safety display model. Always returns a visible, explainable label so
 // no row ever renders a plain reasonless UNKNOWN.
 function formatSafetyLabel(status, reason, source, chain, contract, basis) {
-  var SHORT = { ALLOWLISTED:'curated asset', RESOLVED:'verified contract', CEX_ONLY_NO_CONTRACT_CONTEXT:'CEX-only', AMBIGUOUS_CONTRACT_MAPPING:'ambiguous', MISSING_CONTRACT_METADATA:'missing metadata', METADATA_FETCH_FAILED:'provider failed', PROVIDER_RATE_LIMITED:'provider rate-limited', VERIFICATION_UNAVAILABLE:'unverified contract', UNVERIFIED_CONTRACT:'unverified contract', HOLDER_CONCENTRATION:'risky contract', OWNER_PRIVILEGE_RISK:'risky contract', LIQUIDITY_RISK:'liquidity risk', CRITICAL_EVENT_RISK:'risky contract', BINANCE_LISTED_ACTIVE:'Binance listed', LOW_LIQUIDITY_LISTING:'low liquidity' };
+  var SHORT = { ALLOWLISTED:'curated asset', RESOLVED:'verified contract', CEX_ONLY_NO_CONTRACT_CONTEXT:'no listing context', AMBIGUOUS_CONTRACT_MAPPING:'ambiguous', MISSING_CONTRACT_METADATA:'missing metadata', METADATA_FETCH_FAILED:'provider failed', PROVIDER_RATE_LIMITED:'provider rate-limited', VERIFICATION_UNAVAILABLE:'unverified contract', UNVERIFIED_CONTRACT:'unverified contract', HOLDER_CONCENTRATION:'risky contract', OWNER_PRIVILEGE_RISK:'risky contract', LIQUIDITY_RISK:'liquidity risk', CRITICAL_EVENT_RISK:'risky contract', BINANCE_LISTED_ACTIVE:'Binance listed', BINANCE_ALPHA_LISTED_ACTIVE:'Binance Alpha listed', BINANCE_ALPHA_NOT_CONFIRMED:'Alpha not confirmed', LOW_LIQUIDITY_LISTING:'low liquidity' };
   var st = String(status || '').toUpperCase();
   if (['SAFE','CAUTION','DANGER','UNKNOWN'].indexOf(st) < 0) st = 'UNKNOWN';
   var src = String(source || '').toLowerCase();
   var bs = String(basis || '').toUpperCase();
   var code = String(reason || '').toUpperCase();
-  var isCex = /cex|scanner|futures|spot|binance/.test(src) || bs === 'CEX_LISTING';
+  var isAlpha = /binance[-_\s]?alpha|alpha[-_\s]?(spot|trade|listing)/.test(src) || bs === 'ALPHA_LISTING' || code === 'BINANCE_ALPHA_LISTED_ACTIVE' || code === 'BINANCE_ALPHA_NOT_CONFIRMED';
+  var isCex = /cex|scanner|futures|spot|binance/.test(src) || bs === 'CEX_LISTING' || isAlpha;
   if (!code || !SHORT[code]) {
-    if (st === 'SAFE') code = bs === 'CEX_LISTING' ? 'BINANCE_LISTED_ACTIVE' : (bs === 'CURATED_ASSET' || /curated|allowlist/.test(src)) ? 'ALLOWLISTED' : 'RESOLVED';
+    if (st === 'SAFE') code = bs === 'ALPHA_LISTING' || isAlpha ? 'BINANCE_ALPHA_LISTED_ACTIVE' : bs === 'CEX_LISTING' ? 'BINANCE_LISTED_ACTIVE' : (bs === 'CURATED_ASSET' || /curated|allowlist/.test(src)) ? 'ALLOWLISTED' : 'RESOLVED';
     else if (st === 'CAUTION' && bs === 'LISTING_CAUTION') code = 'LOW_LIQUIDITY_LISTING';
+    else if (st === 'UNKNOWN' && isAlpha) code = 'BINANCE_ALPHA_NOT_CONFIRMED';
     else if (st === 'UNKNOWN' && isCex) code = 'CEX_ONLY_NO_CONTRACT_CONTEXT';
     else if (st === 'UNKNOWN' && (!chain || !contract)) code = 'MISSING_CONTRACT_METADATA';
     else code = st === 'SAFE' ? 'RESOLVED' : 'VERIFICATION_UNAVAILABLE';
@@ -19,7 +21,8 @@ function formatSafetyLabel(status, reason, source, chain, contract, basis) {
   if (st === 'UNKNOWN' && !SHORT[code]) code = isCex ? 'CEX_ONLY_NO_CONTRACT_CONTEXT' : 'MISSING_CONTRACT_METADATA';
   // SAFE label is driven by basis so we never call a CEX listing a verified contract.
   var shortTxt;
-  if (st === 'SAFE' && bs === 'CEX_LISTING') shortTxt = 'Binance listed';
+  if (st === 'SAFE' && (bs === 'ALPHA_LISTING' || code === 'BINANCE_ALPHA_LISTED_ACTIVE')) shortTxt = 'Binance Alpha listed';
+  else if (st === 'SAFE' && bs === 'CEX_LISTING') shortTxt = 'Binance listed';
   else if (st === 'SAFE' && bs === 'CURATED_ASSET') shortTxt = 'curated asset';
   else if (st === 'SAFE' && bs === 'CHAIN_VERIFIED') shortTxt = 'verified contract';
   else shortTxt = SHORT[code] || (st === 'SAFE' ? 'verified contract' : 'missing metadata');
@@ -31,7 +34,7 @@ function formatSafetyLabel(status, reason, source, chain, contract, basis) {
   if (source) parts.push('Source: ' + source);
   if (chain) parts.push('Chain: ' + chain);
   if (contract) parts.push('Contract: ' + contract);
-  if (bs === 'CEX_LISTING') parts.push('Chain safety: UNKNOWN - no contract context');
+  if (bs === 'CEX_LISTING' || bs === 'ALPHA_LISTING') parts.push('Chain safety: UNKNOWN - no contract context');
   if (blocksTelegram) parts.push('Telegram blocked: safety is not SAFE');
   else parts.push('Telegram: safety SAFE (basis ' + (bs || 'n/a') + '); other gates still apply');
   return { labelShort: labelShort, labelFull: labelFull, tooltip: parts.join(' | '), cssClass: 'safety-' + st.toLowerCase(), blocksTelegram: blocksTelegram, basis: bs };
@@ -6995,6 +6998,7 @@ function _renderTradingRadar(radar, esc) {
         <div><span>Execution</span><b>${esc(_fleetFmtRadarValue(selected.EXECUTION_SCORE, 0))}</b></div>
         <div><span>Risk/Reward</span><b>${esc(_fleetFmtRadarValue(selected.RISK_REWARD_SCORE, 0))}</b></div>
         <div><span>Regime</span><b>${esc(_fleetFmtRadarValue(selected.MARKET_REGIME_SCORE, 0))}</b></div>
+        <div><span>Final safety</span><b>${esc(selected.finalSafetyStatus || selected.safetyStatus || 'UNKNOWN')}</b></div>
         <div><span>Safety</span><b>${esc(selected.safetyStatus || 'UNKNOWN')} ${esc(selected.safetyScore != null ? selected.safetyScore : '')}</b></div>
         <div><span>Safety reason</span><b>${esc(selected.safetyReason || (selected.safetyReasons||[])[0] || '--')}</b></div>
         <div><span>Chain</span><b>${esc(selected.chain || '--')}</b></div>
@@ -7003,9 +7007,12 @@ function _renderTradingRadar(radar, esc) {
         <div><span>Safety basis</span><b>${esc(selected.safetyBasis || '--')}</b></div>
         <div><span>Chain safety</span><b>${esc(selected.chainSafetyStatus || '--')} ${esc(selected.chainSafetyReason || '')}</b></div>
         <div><span>Listing safety</span><b>${esc(selected.listingSafetyStatus || '--')} ${esc(selected.listingSafetyReason || '')}</b></div>
+        <div><span>Listing source</span><b>${esc(selected.listingSource || (selected.listingType === 'BINANCE_ALPHA' ? 'Binance Alpha' : selected.exchange === 'binance' ? 'Binance' : '--'))}</b></div>
+        <div><span>Listing type</span><b>${esc(selected.listingType || '--')}</b></div>
+        <div><span>Alpha token id</span><b>${esc(selected.alphaTokenId || '--')}</b></div>
         <div><span>Size</span><b>${esc(selected.POSITION_SIZE_GUIDANCE || '--')}</b></div>
       </div>
-      <div class="radar-focus-blocked"><span>Telegram</span><b>${String(selected.safetyStatus||'UNKNOWN')==='SAFE' ? 'safety OK (other gates still apply)' : 'blocked: safety is not SAFE'}</b></div>
+      <div class="radar-focus-blocked"><span>Telegram</span><b>${String(selected.safetyStatus||'UNKNOWN')==='SAFE' ? 'allowed by safety only; ENTRY_READY microstructure gates still apply' : 'blocked: safety is not SAFE'}</b></div>
       <div class="radar-focus-grid">
         <div><span>Passed</span><div class="radar-chip-row">${chipList(groups.passed, 'radar-status-chip radar-status-chip--pass')}</div></div>
         <div><span>Waiting</span><div class="radar-chip-row">${chipList(groups.waiting, 'radar-status-chip radar-status-chip--wait')}</div></div>
@@ -7060,6 +7067,9 @@ function _renderTradingRadar(radar, esc) {
     + '<li>Radar Rows Evaluated: ' + esc(diag.radarRowsEvaluated || 0) + '</li>'
     + '<li>Radar Rows Displayed: ' + esc(rowsToRender.length || 0) + '</li>'
     + '<li>Safety: checked ' + esc(diag.safetyRowsChecked || 0) + ', unknown ' + esc(diag.safetyRowsUnknown || 0) + ', caution ' + esc(diag.safetyRowsCaution || 0) + ', danger ' + esc(diag.safetyRowsDanger || 0) + '</li>'
+    + '<li>Binance Alpha: calls ' + esc(diag.binanceAlphaProviderCalls || 0) + ', failures ' + esc(diag.binanceAlphaProviderFailures || 0) + ', resolved ' + esc(diag.binanceAlphaResolvedCount || 0) + ', safe ' + esc(diag.binanceAlphaListingSafeCount || 0) + ', unknown ' + esc(diag.alphaListingUnknownCount || 0) + '</li>'
+    + '<li>Alpha symbols sample: ' + esc((diag.alphaSymbolsSample || []).join(', ') || 'none') + '</li>'
+    + '<li>Final safety basis: ' + esc(Object.entries(diag.finalSafetyBasisBreakdown || {}).map(([k, v]) => k + ':' + v).join(', ') || 'none') + '</li>'
     + '<li>Chain API Available: ' + esc(diag.chainApiAvailable ? 'yes' : 'no') + '</li>'
     + '<li>Detected scanner fields: ' + esc((diag.fieldMappingDetected || []).join(', ') || 'none') + '</li>'
     + '<li>Last Radar Refresh: ' + esc(radar.updatedAt ? new Date(radar.updatedAt).toLocaleTimeString() : 'never') + '</li>'

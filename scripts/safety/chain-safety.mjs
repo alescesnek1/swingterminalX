@@ -30,6 +30,8 @@ export const SAFETY_REASONS = Object.freeze({
   LIQUIDITY_RISK: 'LIQUIDITY_RISK',
   CRITICAL_EVENT_RISK: 'CRITICAL_EVENT_RISK',
   BINANCE_LISTED_ACTIVE: 'BINANCE_LISTED_ACTIVE',
+  BINANCE_ALPHA_LISTED_ACTIVE: 'BINANCE_ALPHA_LISTED_ACTIVE',
+  BINANCE_ALPHA_NOT_CONFIRMED: 'BINANCE_ALPHA_NOT_CONFIRMED',
   LOW_LIQUIDITY_LISTING: 'LOW_LIQUIDITY_LISTING',
 });
 
@@ -37,6 +39,7 @@ export const SAFETY_BASIS = Object.freeze({
   CHAIN_VERIFIED: 'CHAIN_VERIFIED',
   CURATED_ASSET: 'CURATED_ASSET',
   CEX_LISTING: 'CEX_LISTING',
+  ALPHA_LISTING: 'ALPHA_LISTING',
   CHAIN_RISK: 'CHAIN_RISK',
   CHAIN_CAUTION: 'CHAIN_CAUTION',
   LISTING_CAUTION: 'LISTING_CAUTION',
@@ -155,8 +158,18 @@ export function classifyMarketSafety(market = {}, opts = {}) {
   else if (chainSafetyStatus === 'CAUTION') { finalSafetyStatus = 'CAUTION'; safetyBasis = SAFETY_BASIS.CHAIN_CAUTION; safetyReason = chainSafetyReason; }
   else if (listingSafetyStatus === LISTING_STATUS.LISTING_CAUTION) { finalSafetyStatus = 'CAUTION'; safetyBasis = SAFETY_BASIS.LISTING_CAUTION; safetyReason = SAFETY_REASONS.LOW_LIQUIDITY_LISTING; }
   else if (chainSafetyStatus === 'SAFE') { finalSafetyStatus = 'SAFE'; safetyBasis = meta.allowlisted ? SAFETY_BASIS.CURATED_ASSET : SAFETY_BASIS.CHAIN_VERIFIED; safetyReason = meta.allowlisted ? SAFETY_REASONS.ALLOWLISTED : SAFETY_REASONS.RESOLVED; }
-  else if (listingSafetyStatus === LISTING_STATUS.LISTING_SAFE) { finalSafetyStatus = 'SAFE'; safetyBasis = SAFETY_BASIS.CEX_LISTING; safetyReason = SAFETY_REASONS.BINANCE_LISTED_ACTIVE; }
-  else { finalSafetyStatus = 'UNKNOWN'; safetyBasis = SAFETY_BASIS.NONE; safetyReason = chainSafetyReason; }
+  else if (listingSafetyStatus === LISTING_STATUS.LISTING_SAFE) {
+    finalSafetyStatus = 'SAFE';
+    safetyBasis = meta.listingType === 'BINANCE_ALPHA' || meta.exchange === 'binance-alpha' ? SAFETY_BASIS.ALPHA_LISTING : SAFETY_BASIS.CEX_LISTING;
+    safetyReason = safetyBasis === SAFETY_BASIS.ALPHA_LISTING ? SAFETY_REASONS.BINANCE_ALPHA_LISTED_ACTIVE : SAFETY_REASONS.BINANCE_LISTED_ACTIVE;
+  }
+  else {
+    finalSafetyStatus = 'UNKNOWN';
+    safetyBasis = SAFETY_BASIS.NONE;
+    safetyReason = meta.listingType === 'BINANCE_ALPHA' && listingSafetyReason === SAFETY_REASONS.BINANCE_ALPHA_NOT_CONFIRMED
+      ? SAFETY_REASONS.BINANCE_ALPHA_NOT_CONFIRMED
+      : chainSafetyReason;
+  }
 
   return {
     // legacy/compat (RADAR + Telegram gate read safetyStatus)
@@ -174,6 +187,9 @@ export function classifyMarketSafety(market = {}, opts = {}) {
     chainSafetyStatus, chainSafetyReason,
     listingSafetyStatus, listingSafetyReason,
     exchange: meta.exchange, listed: meta.listed, baseAsset: meta.baseAsset, quoteAsset: meta.quoteAsset,
+    listingType: meta.listingType || null,
+    alphaTokenId: meta.alphaTokenId || null,
+    listingSource: meta.exchange === 'binance-alpha' ? 'Binance Alpha' : (meta.exchange === 'binance' ? 'Binance' : null),
     chain: meta.chain || chainEval.chain || null,
     contractAddress: meta.contractAddress || chainEval.contractAddress || null,
     chainCandidates: meta.chainCandidates || [],
@@ -243,7 +259,8 @@ export function buildSafetyDiagnostics(results = []) {
   const topUnknownReasons = Object.entries(reasonCounts).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([reason, count]) => ({ reason, count }));
 
   const chainUnknownButListingSafeCount = rows.filter((r) => r.chainSafetyStatus === 'UNKNOWN' && r.listingSafetyStatus === LISTING_STATUS.LISTING_SAFE && (r.finalSafetyStatus || r.safetyStatus) === 'SAFE').length;
-  const cexListingSafe = rows.filter((r) => r.safetyBasis === SAFETY_BASIS.CEX_LISTING).map((r) => r.symbol || r.baseAsset).filter(Boolean).slice(0, 12);
+  const cexListingSafe = rows.filter((r) => r.safetyBasis === SAFETY_BASIS.CEX_LISTING || r.safetyBasis === SAFETY_BASIS.ALPHA_LISTING).map((r) => r.symbol || r.baseAsset).filter(Boolean).slice(0, 12);
+  const alphaRows = rows.filter((r) => r.listingType === 'BINANCE_ALPHA' || r.exchange === 'binance-alpha' || r.safetyBasis === SAFETY_BASIS.ALPHA_LISTING);
   const stillUnknown = unknownRows.map((r) => ({ symbol: r.symbol || r.baseAsset || null, reason: r.safetyReason || 'EMPTY' })).slice(0, 12);
   const ambiguousSamples = rows.filter((r) => r.ambiguous).map((r) => ({ symbol: r.symbol || r.baseAsset || null, candidates: (r.chainCandidates || []).slice(0, 4) })).slice(0, 12);
 
@@ -257,6 +274,12 @@ export function buildSafetyDiagnostics(results = []) {
     finalSafetyBasisBreakdown: basisBreakdown,
     chainUnknownButListingSafeCount,
     binanceListingResolvedCount: rows.filter((r) => r.listingSafetyStatus === LISTING_STATUS.LISTING_SAFE).length,
+    binanceAlphaProviderCalls: prov.binanceAlphaProviderCalls,
+    binanceAlphaProviderFailures: prov.binanceAlphaProviderFailures,
+    binanceAlphaResolvedCount: Math.max(prov.binanceAlphaResolvedCount, alphaRows.length),
+    binanceAlphaListingSafeCount: alphaRows.filter((r) => r.listingSafetyStatus === LISTING_STATUS.LISTING_SAFE).length,
+    alphaListingUnknownCount: alphaRows.filter((r) => r.listingSafetyStatus !== LISTING_STATUS.LISTING_SAFE).length,
+    alphaSymbolsSample: (prov.alphaSymbolsSample && prov.alphaSymbolsSample.length ? prov.alphaSymbolsSample : alphaRows.map((r) => r.symbol || r.baseAsset).filter(Boolean)).slice(0, 12),
     coingeckoResolvedCount: prov.coingeckoResolvedCount,
     geckoTerminalResolvedCount: prov.geckoTerminalResolvedCount,
     ambiguousMetadataCount: prov.ambiguousMetadataCount,

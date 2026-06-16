@@ -10,6 +10,8 @@
 //     (PROVIDER_RATE_LIMITED / METADATA_FETCH_FAILED). Scanner/RADAR must keep
 //     working when providers are unavailable.
 
+import { fetchBinanceAlphaExchangeInfo, normalizeAlphaPairSymbol } from './binance-alpha-provider.mjs';
+
 export const METADATA_REASONS = Object.freeze({
   ALLOWLISTED: 'ALLOWLISTED',
   RESOLVED: 'RESOLVED',
@@ -99,6 +101,7 @@ const AMBIGUOUS = new Set(['BTCB', 'WETH', 'WBTC', 'MULTI', 'BRIDGE', 'O3', 'BIT
 // ---- module cache + provider counters (fail-soft, observable) ----
 const cache = new Map();           // base -> { at, value }  (provider chain meta)
 const listCache = new Map();       // 'coingecko-list' -> { at, value }
+const alphaCache = new Map();      // 'binance-alpha-list' -> { at, value }
 let counters = freshCounters();
 function freshCounters() {
   return {
@@ -110,10 +113,16 @@ function freshCounters() {
     geckoTerminalResolvedCount: 0,
     ambiguousMetadataCount: 0,
     providerRateLimitedCount: 0,
+    binanceAlphaProviderCalls: 0,
+    binanceAlphaProviderFailures: 0,
+    binanceAlphaResolvedCount: 0,
+    binanceAlphaListingSafeCount: 0,
+    alphaListingUnknownCount: 0,
+    alphaSymbolsSample: [],
   };
 }
 export function getMetadataDiagnostics() { return { ...counters }; }
-export function __clearTokenMetadataCache() { cache.clear(); listCache.clear(); counters = freshCounters(); }
+export function __clearTokenMetadataCache() { cache.clear(); listCache.clear(); alphaCache.clear(); counters = freshCounters(); }
 
 function num(v) { const x = Number(v); return Number.isFinite(x) ? x : null; }
 function isAddress(v) { return typeof v === 'string' && v.trim().length > 0; }
@@ -131,6 +140,9 @@ function baseInfo(input) {
 
 // ---- Binance listing axis (offline; derived from the Binance-sourced row) ----
 export function resolveBinanceListing(market = {}, opts = {}) {
+  if (alphaContext(market)) {
+    return { listed: false, active: false, exchange: null, listingStatus: 'UNKNOWN', listingSafetyStatus: LISTING_STATUS.LISTING_UNKNOWN, listingSafetyReason: 'NO_LISTING_CONTEXT' };
+  }
   const sym = String(market.symbol || '').toUpperCase();
   const activeSet = opts.binanceActiveSymbols instanceof Set ? opts.binanceActiveSymbols : null;
   const statusTrading = String(market.status || '').toUpperCase() === 'TRADING';
@@ -153,6 +165,70 @@ export function resolveBinanceListing(market = {}, opts = {}) {
   return { listed: true, active: false, exchange: 'binance', listingStatus: 'LISTED', listingSafetyStatus: LISTING_STATUS.LISTING_UNKNOWN, listingSafetyReason: 'LISTING_NOT_ACTIVE' };
 }
 
+function alphaContext(market = {}) {
+  const haystack = [
+    market.source, market.safetySource, market.exchange, market.venue, market.listingSource,
+    market.listingType, market.marketType, market.label, market.category,
+    ...(Array.isArray(market.labels) ? market.labels : []),
+    ...(Array.isArray(market.tags) ? market.tags : []),
+    ...(Array.isArray(market.scannerTags) ? market.scannerTags : []),
+  ].filter(Boolean).join(' ');
+  return market.binanceAlphaListed === true || market.alphaTokenId != null || /binance[-_\s]?alpha|alpha[-_\s]?(spot|trade|listing)|BINANCE_ALPHA/i.test(haystack);
+}
+
+function asAlphaMap(input) {
+  if (input instanceof Map) return input;
+  const map = new Map();
+  if (input instanceof Set) {
+    for (const item of input) map.set(String(item).toUpperCase().replace(/[^A-Z0-9]/g, ''), { symbol: String(item).toUpperCase(), active: true, status: 'TRADING' });
+    return map;
+  }
+  if (Array.isArray(input)) {
+    for (const item of input) {
+      if (!item) continue;
+      const symbol = String(item.symbol || normalizeAlphaPairSymbol(item).replace('/', '')).toUpperCase();
+      if (symbol) map.set(symbol, item);
+      const pair = normalizeAlphaPairSymbol(item);
+      if (pair) map.set(pair.replace('/', '').toUpperCase(), item);
+    }
+  }
+  return map;
+}
+
+export function resolveBinanceAlphaListing(market = {}, opts = {}) {
+  const pair = normalizeAlphaPairSymbol(market);
+  const symbol = pair.replace('/', '').toUpperCase();
+  const activeMap = asAlphaMap(opts.binanceAlphaListings);
+  const found = activeMap.get(symbol) || null;
+  const row = found || market;
+  const hasAlphaContext = Boolean(found) || alphaContext(market);
+  if (!hasAlphaContext) return { listed: false, active: false, exchange: null, listingStatus: 'UNKNOWN', listingSafetyStatus: LISTING_STATUS.LISTING_UNKNOWN, listingSafetyReason: 'NO_LISTING_CONTEXT' };
+
+  const rawStatus = String(row.status || row.tradingStatus || row.listingStatus || '').toUpperCase();
+  const active = row.active === true || rawStatus === 'TRADING' || rawStatus === 'ACTIVE' || rawStatus === 'ENABLED' || market.binanceAlphaListed === true;
+  const base = String(row.baseAsset || market.baseAsset || '').toUpperCase();
+  const quote = String(row.quoteAsset || market.quoteAsset || '').toUpperCase();
+  const common = {
+    listed: true,
+    active,
+    exchange: 'binance-alpha',
+    listingStatus: active ? 'TRADING' : (rawStatus || 'UNKNOWN'),
+    source: 'binance-alpha',
+    sourceName: 'Binance Alpha listing',
+    listingType: 'BINANCE_ALPHA',
+    symbol: symbol || String(row.symbol || market.symbol || '').toUpperCase(),
+    pair: pair || row.pair || null,
+    baseAsset: base || row.baseAsset || null,
+    quoteAsset: quote || row.quoteAsset || null,
+    alphaTokenId: row.alphaTokenId || market.alphaTokenId || row.tokenId || row.tokenID || row.baseAssetId || null,
+    raw: row.raw || null,
+  };
+  if (!active) {
+    return { ...common, listingSafetyStatus: LISTING_STATUS.LISTING_UNKNOWN, listingSafetyReason: 'BINANCE_ALPHA_NOT_CONFIRMED' };
+  }
+  return { ...common, listingSafetyStatus: LISTING_STATUS.LISTING_SAFE, listingSafetyReason: 'BINANCE_ALPHA_LISTED_ACTIVE' };
+}
+
 function result(base, fields) {
   return {
     baseAsset: base,
@@ -162,6 +238,8 @@ function result(base, fields) {
     listingStatus: fields.listingStatus || 'UNKNOWN',
     listingSafetyStatus: fields.listingSafetyStatus || LISTING_STATUS.LISTING_UNKNOWN,
     listingSafetyReason: fields.listingSafetyReason || 'NO_LISTING_CONTEXT',
+    listingType: fields.listingType || null,
+    alphaTokenId: fields.alphaTokenId || null,
     chain: fields.chain || null,
     contractAddress: fields.contractAddress || null,
     chainCandidates: Array.isArray(fields.chainCandidates) ? fields.chainCandidates : [],
@@ -181,7 +259,9 @@ function result(base, fields) {
 // ---- main sync resolver (chain axis + listing axis + confidence) ----
 export function resolveTokenMetadata(input = {}, opts = {}) {
   const { base, quote, hadQuote } = baseInfo(input);
-  const listing = resolveBinanceListing(input, opts);
+  const binanceListing = resolveBinanceListing(input, opts);
+  const alphaListing = resolveBinanceAlphaListing(input, opts);
+  const listing = binanceListing.listed ? binanceListing : (alphaListing.listed ? alphaListing : binanceListing);
   const cexContext = hadQuote || input.cexOnly === true || input.isScannerContext === true || listing.listed
     || /binance|bybit|okx|futures|spot/i.test(String(input.venue || input.exchange || ''));
   const cr = []; // confidenceReasons
@@ -189,8 +269,9 @@ export function resolveTokenMetadata(input = {}, opts = {}) {
   const base_fields = {
     quoteAsset: quote, exchange: listing.exchange, listed: listing.listed,
     listingStatus: listing.listingStatus, listingSafetyStatus: listing.listingSafetyStatus, listingSafetyReason: listing.listingSafetyReason,
+    listingType: listing.listingType, alphaTokenId: listing.alphaTokenId,
   };
-  if (listing.listingSafetyStatus === LISTING_STATUS.LISTING_SAFE) cr.push('binance_active_listing');
+  if (listing.listingSafetyStatus === LISTING_STATUS.LISTING_SAFE) cr.push(listing.exchange === 'binance-alpha' ? 'binance_alpha_active_listing' : 'binance_active_listing');
 
   if (!base) return result('', { ...base_fields, reason: METADATA_REASONS.MISSING_CONTRACT_METADATA, source: 'none', confidence: 0, confidenceReasons: cr });
 
@@ -241,12 +322,36 @@ export function resolveTokenMetadata(input = {}, opts = {}) {
   // 5) no chain context. If Binance-listed, that is still a real CEX listing.
   if (listing.listed) {
     cr.push('binance_listed_no_contract');
-    return result(base, { ...base_fields, cexOnly: true, source: 'binance', sourceName: 'Binance listing', reason: METADATA_REASONS.CEX_ONLY_NO_CONTRACT_CONTEXT, confidence: listing.listingSafetyStatus === LISTING_STATUS.LISTING_SAFE ? 75 : 50, confidenceReasons: cr });
+    return result(base, { ...base_fields, cexOnly: true, source: listing.source || 'binance', sourceName: listing.sourceName || 'Binance listing', reason: METADATA_REASONS.CEX_ONLY_NO_CONTRACT_CONTEXT, confidence: listing.listingSafetyStatus === LISTING_STATUS.LISTING_SAFE ? 75 : 50, confidenceReasons: cr });
   }
   if (cexContext) {
     return result(base, { ...base_fields, cexOnly: true, source: 'cex-only', sourceName: 'CEX context', reason: METADATA_REASONS.CEX_ONLY_NO_CONTRACT_CONTEXT, confidence: 40, confidenceReasons: cr });
   }
   return result(base, { ...base_fields, source: 'none', sourceName: 'none', reason: METADATA_REASONS.MISSING_CONTRACT_METADATA, confidence: 0, confidenceReasons: cr });
+}
+
+export async function warmBinanceAlphaListings(opts = {}) {
+  const now = opts.now || Date.now();
+  const cached = alphaCache.get('binance-alpha-list');
+  if (cached && now - cached.at < META_TTL_MS) { counters.metadataCacheHits += 1; return cached.value; }
+  counters.metadataCacheMisses += 1;
+  counters.binanceAlphaProviderCalls += 1;
+  const res = await fetchBinanceAlphaExchangeInfo(opts);
+  if (!res.ok) {
+    counters.binanceAlphaProviderFailures += 1;
+    const value = { ok: false, listings: [], error: res.error || 'Binance Alpha provider failed' };
+    alphaCache.set('binance-alpha-list', { at: now, value });
+    return value;
+  }
+  const listings = Array.isArray(res.listings) ? res.listings : [];
+  const safeCount = listings.filter((x) => x.active === true).length;
+  counters.binanceAlphaResolvedCount += listings.length;
+  counters.binanceAlphaListingSafeCount += safeCount;
+  counters.alphaListingUnknownCount += Math.max(0, listings.length - safeCount);
+  counters.alphaSymbolsSample = listings.slice(0, 12).map((x) => x.pair || x.symbol).filter(Boolean);
+  const value = { ok: true, listings, error: null };
+  alphaCache.set('binance-alpha-list', { at: now, value });
+  return value;
 }
 
 // ---- optional async CoinGecko provider (only with injected fetchImpl) ----
