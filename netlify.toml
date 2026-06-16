@@ -1,0 +1,84 @@
+# ─────────────────────────────────────────────────────────────
+# Swing Terminal V4 — Root Netlify Configuration
+#
+# Netlify CLI is run from the repo root, so this file is the
+# only one that matters in production. It must wire:
+#   • the V4 static site from apps/edge/public
+#   • the V4 Deno edge functions from apps/edge/netlify/edge-functions
+#   • the existing Node functions from netlify/functions
+#     (cron-alerts.mjs, telegram.mjs)
+# ─────────────────────────────────────────────────────────────
+
+[build]
+  publish = "apps/edge/public"
+  functions = "netlify/functions"
+  edge_functions = "apps/edge/netlify/edge-functions"
+
+# ── Deno Edge Functions (V4 backend) ──
+[[edge_functions]]
+  path = "/api/markets"
+  function = "markets"
+
+[[edge_functions]]
+  path = "/api/analyze"
+  function = "analyze"
+
+[[edge_functions]]
+  path = "/api/briefing"
+  function = "briefing"
+
+[[edge_functions]]
+  path = "/api/market-briefing"
+  function = "market-briefing"
+
+[[edge_functions]]
+  path = "/api/regime"
+  function = "regime"
+
+[[edge_functions]]
+  path = "/api/news"
+  function = "news"
+
+# ── V5 additions ──
+[[edge_functions]]
+  path = "/api/config"
+  function = "config"
+
+[[edge_functions]]
+  path = "/api/funding-divergence"
+  function = "funding-divergence"
+
+[[edge_functions]]
+  path = "/api/sniper-detect"
+  function = "sniper-detect"
+
+# ── Headers ──
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=()"
+
+[[headers]]
+  for = "/*.js"
+  [headers.values]
+    Cache-Control = "public, max-age=3600"
+
+[[headers]]
+  for = "/*.css"
+  [headers.values]
+    Cache-Control = "public, max-age=3600"
+
+# Never cache the entry HTML — it carries the cache-busting
+# query strings for our JS/CSS, so a stale HTML pins users to old code.
+[[headers]]
+  for = "/"
+  [headers.values]
+    Cache-Control = "no-cache, no-store, must-revalidate"
+
+[[headers]]
+  for = "/index.html"
+  [headers.values]
+    Cache-Control = "no-cache, no-store, must-revalidate"

@@ -3,7 +3,11 @@
 .env.*
 # Keep the worker env template tracked (it holds only placeholders, no secrets).
 !.env.worker.example
+# Ignore nested + generated/resolved Netlify configs (e.g. apps/edge/netlify.toml,
+# .netlify/netlify.toml, apps/edge/.netlify/...), but keep the ROOT netlify.toml
+# tracked so Git-based Netlify deploys get the repo-relative paths.
 netlify.toml
+!/netlify.toml
 .netlify/
 
 # Node a závislosti
