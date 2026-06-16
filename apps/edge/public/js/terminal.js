@@ -1,4 +1,4 @@
-console.log('TERMINAL_V7_LOADED');
+console.log('TERMINAL_X_LOADED');
 
 // ─────────────────────────────────────────────────────────────
 // V6.8 Sprint 1 (FIX-3): GLOBAL XSS CLOSURE
@@ -3735,22 +3735,108 @@ function _cpTpBadge(r, i) {
   const taken = (t.partials || []).some(p => p.tpIndex === i);
   return `<button type="button" class="cp-tp ${hit ? 'cp-tp--hit' : ''} ${taken ? 'cp-tp--taken' : ''}" data-cp-tp="${i}" data-cp-id="${_esc(t.id)}" title="Mark TP${i} taken">TP${i} ${_esc(_cpFmt(lvl))}${hit ? ' ✓' : (dist != null ? ' ' + _cpPct(dist) : '')}${taken ? ' • taken' : ''}</button>`;
 }
+// Import-from-RADAR panel HTML. Shows the focused candidate's full setup
+// (entry zone, stop, invalidation, TP1/2/3, safety, blocked reason / next
+// trigger) with a primary "Import this RADAR setup" button — or, when nothing
+// is focused, a clear instruction + "Open Trading RADAR" button.
+function _cpRadarFocusHtml() {
+  const f = _cpRadarFocus();
+  if (!f) {
+    return `<div class="cockpit-radar-focus__empty">
+      <div class="cockpit-radar-focus__title">Import from Trading RADAR</div>
+      <div class="cockpit-radar-focus__msg">No RADAR candidate selected. Go to Trading RADAR and click a candidate first.</div>
+      <button type="button" id="cockpit-open-radar" class="cockpit-primary-btn">Open Trading RADAR</button>
+    </div>`;
+  }
+  const tps = (f.TAKE_PROFIT_LEVELS || f.takeProfitCheckpoints || []);
+  const tpText = tps.map(tp => `${tp.label || 'TP'} ${_cpFmt(tp.level)}`).join(' / ') || '--';
+  const zone = (f.entryZone && f.entryZone.low != null && f.entryZone.high != null)
+    ? `${_cpFmt(f.entryZone.low)} – ${_cpFmt(f.entryZone.high)}` : '--';
+  const status = f.STATUS || f.actionability || '--';
+  const safe = String(f.safetyStatus || 'UNKNOWN').toUpperCase();
+  const badgeCls = (typeof _fleetRadarBadgeClass === 'function') ? _fleetRadarBadgeClass(status) : '';
+  return `<div class="cockpit-radar-focus__card">
+    <div class="cockpit-radar-focus__title">Import from Trading RADAR</div>
+    <div class="cockpit-radar-focus__head"><b>${_esc(f.symbol)}</b>
+      <span class="${badgeCls}">${_esc(status)}</span>
+      <span class="safety-pill safety-${_esc(safe.toLowerCase())}" title="safety">${_esc(safe)}</span></div>
+    <div class="cockpit-radar-focus__grid">
+      <div><span>Entry zone</span><b>${_esc(zone)}</b></div>
+      <div><span>Suggested stop</span><b>${_esc(_cpFmt(f.STOP_LOSS_LEVEL ?? f.suggestedStop))}</b></div>
+      <div><span>Invalidation</span><b>${_esc(_cpFmt(f.HARD_INVALIDATION ?? f.invalidationLevel))}</b></div>
+      <div><span>TP1 / TP2 / TP3</span><b>${_esc(tpText)}</b></div>
+      <div><span>Blocked / reason</span><b>${_esc(f.blockedBy || f.ACTION || 'none')}</b></div>
+      <div><span>Next trigger</span><b>${_esc(f.nextRequiredConfirmation || 'none')}</b></div>
+    </div>
+    <button type="button" id="cockpit-import-radar" class="cockpit-primary-btn">Import this RADAR setup</button>
+  </div>`;
+}
+// Live scanner price for the "Track scanner coin" search box.
+function _cpUpdateScannerPrice() {
+  const el = document.getElementById('cockpit-scanner-price');
+  if (!el) return;
+  const sym = String(document.getElementById('cockpit-scanner-symbol')?.value || '').trim();
+  if (!sym) { el.textContent = ''; el.className = 'cockpit-scanner__price'; return; }
+  const m = _cpMarketFor(sym);
+  if (m.found && m.currentPrice != null) {
+    el.textContent = `${sym.toUpperCase()} live ${_cpFmt(m.currentPrice)}`;
+    el.className = 'cockpit-scanner__price ok';
+  } else {
+    el.textContent = `${sym.toUpperCase()} not found in scanner universe — no live price`;
+    el.className = 'cockpit-scanner__price warn';
+  }
+}
+// Track button: prefill the manual form with the symbol + live price as entry,
+// reveal the form, and surface a visible error when the symbol is unknown.
+function _cpTrackScannerSymbol() {
+  const input = document.getElementById('cockpit-scanner-symbol');
+  const sym = String(input?.value || '').toUpperCase().trim();
+  if (!sym) { _cpShowError('Enter a symbol to track.'); return; }
+  const m = _cpMarketFor(sym);
+  if (!(m.found && m.currentPrice != null)) {
+    _cpShowError(`${sym} is not in the scanner universe — no live price to track.`);
+    _cpUpdateScannerPrice();
+    return;
+  }
+  _cpShowError('');
+  _cpOpenManual();
+  _cpFillForm({ id: '', symbol: sym, entryPrice: m.currentPrice, entryType: 'manual', venue: 'Binance' });
+  document.getElementById('cockpit-qty')?.focus();
+}
+// Reveal the collapsible add/tools panel and scroll the manual form into view.
+function _cpOpenManual() {
+  const add = document.getElementById('cockpit-add');
+  if (add) add.open = true;
+  document.getElementById('cockpit-manual')?.scrollIntoView({ block: 'nearest' });
+}
+// Switch the active tab to Trading RADAR (mirrors the nav tab click).
+function _cpOpenTradingRadar() {
+  const tab = document.querySelector('.tab[data-target="view-radar"]');
+  try { sv('radar', tab); } catch (e) { console.warn('[Cockpit] open radar failed:', e && e.message); }
+}
 function renderCockpit() {
   const list = document.getElementById('cockpit-list');
   const summary = document.getElementById('cockpit-summary');
   if (!list || !summary) return;
   _cpRefreshSymbolList();
-  // Live RADAR focus banner in the form area.
+  // Import-from-RADAR panel: full candidate preview when one is focused,
+  // otherwise a clear "go pick one" message + Open Trading RADAR button.
   const focusEl = document.getElementById('cockpit-radar-focus');
-  if (focusEl) {
-    const f = _cpRadarFocus();
-    focusEl.innerHTML = f
-      ? `RADAR focus: <b>${_esc(f.symbol)}</b> <span class="${_fleetRadarBadgeClass ? _fleetRadarBadgeClass(f.STATUS || f.actionability) : ''}">${_esc(f.STATUS || f.actionability || '--')}</span> · <button type="button" id="cockpit-import-radar">Import to form</button>`
-      : 'RADAR focus: none (open the Trading RADAR tab and click a candidate)';
+  if (focusEl) focusEl.innerHTML = _cpRadarFocusHtml();
+
+  // Onboarding hero is the empty-state surface. Once a position exists the
+  // cards must dominate, so hide the hero and collapse the add/tools panel.
+  const hasTrades = Cockpit.trades.length > 0;
+  document.getElementById('cockpit-onboarding')?.classList.toggle('cockpit-hidden', hasTrades);
+  if (Cockpit._lastHadTrades !== hasTrades) {
+    const addEl = document.getElementById('cockpit-add');
+    if (addEl) addEl.open = !hasTrades; // open while empty, collapse when tracking
+    Cockpit._lastHadTrades = hasTrades;
   }
-  if (!Cockpit.trades.length) {
+
+  if (!hasTrades) {
     summary.innerHTML = '';
-    list.innerHTML = '<div class="cockpit-empty">No open trades yet. Import a RADAR candidate above, or add a position. The cockpit will then auto-track live price, PnL, TP/stop hits and recommend an action.</div>';
+    list.innerHTML = '<div class="cockpit-empty">No open positions yet. Use a card above to import a RADAR setup, track a scanner coin, or add a manual position — the cockpit then manages it live.</div>';
     return;
   }
   // Evaluate, generate alerts (diff vs persisted prev), and persist auto-detected TP hits.
@@ -3939,15 +4025,42 @@ function initCockpit() {
   document.getElementById('cockpit-symbol')?.addEventListener('input', () => { _cpShowError(''); _cpUpdatePricePreview(); });
   document.getElementById('cockpit-sort')?.addEventListener('change', (e) => { Cockpit.sort = e.target.value; renderCockpit(); });
   document.getElementById('cockpit-compact-toggle')?.addEventListener('click', () => { Cockpit.compact = !Cockpit.compact; document.getElementById('v-cockpit')?.classList.toggle('cockpit-compact', Cockpit.compact); });
-  // Import the focused RADAR candidate into the form (prefill, marked as fallback-free RADAR data).
+  // Import-from-RADAR panel: "Open Trading RADAR" switches tabs; "Import this
+  // RADAR setup" prefills the manual form (marked as fallback-free RADAR data)
+  // and reveals it so the user can review and save.
   document.getElementById('cockpit-radar-focus')?.addEventListener('click', (e) => {
+    if (e.target.closest('#cockpit-open-radar')) {
+      _cpOpenTradingRadar();
+      return;
+    }
     if (!e.target.closest('#cockpit-import-radar')) return;
     const pre = _cpPrefillFromRadar(_cpRadarFocus());
-    if (!pre) { _cpShowError('No RADAR focus candidate. Open the Trading RADAR tab and click a candidate first.'); return; }
+    if (!pre) { _cpShowError('No RADAR candidate selected. Go to Trading RADAR and click a candidate first.'); return; }
+    _cpOpenManual();
     _cpFillForm({ id: '', ...pre });
     _cpShowError('');
     if (pre.safetyStatus && pre.safetyStatus !== 'SAFE') _cpShowError(`Imported ${pre.symbol} from RADAR. Safety is ${pre.safetyStatus} — verify before sizing.`);
   });
+  // Onboarding cards route to the matching tool.
+  document.getElementById('cockpit-onboarding')?.addEventListener('click', (e) => {
+    const card = e.target.closest('[data-cp-onboard]');
+    if (!card) return;
+    const kind = card.dataset.cpOnboard;
+    if (kind === 'radar') {
+      const f = _cpRadarFocus();
+      if (f) { _cpOpenManual(); document.getElementById('cockpit-radar-focus')?.scrollIntoView({ block: 'nearest' }); }
+      else _cpOpenTradingRadar();
+    } else if (kind === 'scanner') {
+      _cpOpenManual();
+      document.getElementById('cockpit-scanner-symbol')?.focus();
+    } else {
+      _cpOpenManual();
+      document.getElementById('cockpit-symbol')?.focus();
+    }
+  });
+  // Track scanner coin: live price preview + one-click track.
+  document.getElementById('cockpit-scanner-symbol')?.addEventListener('input', _cpUpdateScannerPrice);
+  document.getElementById('cockpit-scanner-track')?.addEventListener('click', _cpTrackScannerSymbol);
   document.getElementById('cockpit-list')?.addEventListener('click', (e) => {
     const edit = e.target.closest('[data-cp-edit]');
     const del = e.target.closest('[data-cp-delete]');

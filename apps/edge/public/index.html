@@ -330,35 +330,98 @@
           </div>
           <div class="cockpit-summary" id="cockpit-summary"></div>
         </div>
-        <div class="cockpit-radar-focus" id="cockpit-radar-focus">RADAR focus: none</div>
-        <form class="cockpit-form" id="cockpit-form" autocomplete="off">
-          <input type="hidden" id="cockpit-id">
-          <input type="hidden" id="cockpit-from-radar">
-          <input type="hidden" id="cockpit-hardinval">
-          <div class="cockpit-field">
-            <input id="cockpit-symbol" placeholder="SYMBOL (e.g. INJUSDT)" list="cockpit-symbol-list" required>
-            <datalist id="cockpit-symbol-list"></datalist>
-            <span class="cockpit-price-preview" id="cockpit-price-preview"></span>
+        <datalist id="cockpit-symbol-list"></datalist>
+
+        <!-- ONBOARDING CONTROL CENTER — the empty-state hero. Hidden once a
+             position is being tracked so the position cards dominate. -->
+        <div id="cockpit-onboarding" class="cockpit-onboarding">
+          <div class="cockpit-onboarding__head">
+            <div class="cockpit-onboarding__title">START TRACKING A TRADE</div>
+            <div class="cockpit-onboarding__sub">Choose how to put a position under active management. The cockpit then auto-tracks live price, PnL, TP/stop hits and tells you the next action — it is a control center, not a form.</div>
           </div>
-          <input id="cockpit-venue" placeholder="VENUE" value="Binance">
-          <select id="cockpit-entry-type">
-            <option value="manual">manual</option>
-            <option value="early">early reversal</option>
-            <option value="standard">standard</option>
-            <option value="aggressive">aggressive</option>
-            <option value="swing">swing</option>
-          </select>
-          <input id="cockpit-entry" type="number" step="any" placeholder="ENTRY *" required>
-          <input id="cockpit-qty" type="number" step="any" placeholder="QTY *" required>
-          <input id="cockpit-stop" type="number" step="any" placeholder="STOP">
-          <input id="cockpit-tp1" type="number" step="any" placeholder="TP1">
-          <input id="cockpit-tp2" type="number" step="any" placeholder="TP2">
-          <input id="cockpit-tp3" type="number" step="any" placeholder="TP3">
-          <input id="cockpit-notes" placeholder="THESIS / NOTES">
-          <button type="submit">SAVE</button>
-          <button type="button" id="cockpit-reset">CLEAR</button>
-        </form>
+          <div class="cockpit-cards">
+            <button type="button" class="cockpit-card-action" data-cp-onboard="radar">
+              <div class="cockpit-card-action__icon">◈</div>
+              <div class="cockpit-card-action__title">Import from Trading RADAR</div>
+              <div class="cockpit-card-action__desc">Pull a scanned candidate — entry zone, stop, invalidation and TP1/TP2/TP3 — straight from the Trading RADAR into a managed position.</div>
+            </button>
+            <button type="button" class="cockpit-card-action" data-cp-onboard="scanner">
+              <div class="cockpit-card-action__icon">⊹</div>
+              <div class="cockpit-card-action__title">Track scanner coin</div>
+              <div class="cockpit-card-action__desc">Search any live scanner symbol, see its current price instantly, and set your entry to the live price with one click.</div>
+            </button>
+            <button type="button" class="cockpit-card-action" data-cp-onboard="manual">
+              <div class="cockpit-card-action__icon">✎</div>
+              <div class="cockpit-card-action__title">Manual position</div>
+              <div class="cockpit-card-action__desc">Enter a position you already hold by hand — symbol, entry, size, stop and targets. Full control when you are not coming from the scanner.</div>
+            </button>
+          </div>
+        </div>
+
+        <!-- TOOLS: radar import, scanner search, manual form. Collapsed once
+             positions exist so the cards stay the primary surface. -->
+        <details id="cockpit-add" class="cockpit-add" open>
+          <summary class="cockpit-add__summary">Track / add a position</summary>
+
+          <!-- IMPORT FROM TRADING RADAR (rendered by renderCockpit) -->
+          <div class="cockpit-radar-focus" id="cockpit-radar-focus">RADAR focus: none</div>
+
+          <!-- TRACK SCANNER COIN -->
+          <div class="cockpit-scanner" id="cockpit-scanner">
+            <label class="cockpit-label" for="cockpit-scanner-symbol">Track scanner coin</label>
+            <div class="cockpit-scanner__row">
+              <input id="cockpit-scanner-symbol" placeholder="Search symbol (e.g. INJUSDT)" list="cockpit-symbol-list" autocomplete="off">
+              <button type="button" id="cockpit-scanner-track">Track + use live price</button>
+            </div>
+            <div class="cockpit-scanner__price" id="cockpit-scanner-price"></div>
+          </div>
+
+          <!-- MANUAL POSITION (secondary, labelled) -->
+          <div class="cockpit-manual" id="cockpit-manual">
+            <div class="cockpit-manual__title">Manual position</div>
+            <form class="cockpit-form" id="cockpit-form" autocomplete="off">
+              <input type="hidden" id="cockpit-id">
+              <input type="hidden" id="cockpit-from-radar">
+              <label class="cockpit-field cockpit-field--sym">
+                <span class="cockpit-label">Symbol *</span>
+                <input id="cockpit-symbol" placeholder="e.g. INJUSDT" list="cockpit-symbol-list" required>
+                <span class="cockpit-price-preview" id="cockpit-price-preview"></span>
+              </label>
+              <label class="cockpit-field"><span class="cockpit-label">Venue</span>
+                <input id="cockpit-venue" placeholder="VENUE" value="Binance"></label>
+              <label class="cockpit-field"><span class="cockpit-label">Entry type</span>
+                <select id="cockpit-entry-type">
+                  <option value="manual">manual</option>
+                  <option value="early">early reversal</option>
+                  <option value="standard">standard</option>
+                  <option value="aggressive">aggressive</option>
+                  <option value="swing">swing</option>
+                </select></label>
+              <label class="cockpit-field"><span class="cockpit-label">Entry *</span>
+                <input id="cockpit-entry" type="number" step="any" placeholder="0.00" required></label>
+              <label class="cockpit-field"><span class="cockpit-label">Quantity *</span>
+                <input id="cockpit-qty" type="number" step="any" placeholder="0" required></label>
+              <label class="cockpit-field"><span class="cockpit-label">Stop</span>
+                <input id="cockpit-stop" type="number" step="any" placeholder="0.00"></label>
+              <label class="cockpit-field"><span class="cockpit-label">Invalidation</span>
+                <input id="cockpit-hardinval" type="number" step="any" placeholder="0.00"></label>
+              <label class="cockpit-field"><span class="cockpit-label">TP1</span>
+                <input id="cockpit-tp1" type="number" step="any" placeholder="0.00"></label>
+              <label class="cockpit-field"><span class="cockpit-label">TP2</span>
+                <input id="cockpit-tp2" type="number" step="any" placeholder="0.00"></label>
+              <label class="cockpit-field"><span class="cockpit-label">TP3</span>
+                <input id="cockpit-tp3" type="number" step="any" placeholder="0.00"></label>
+              <label class="cockpit-field cockpit-field--notes"><span class="cockpit-label">Thesis / notes</span>
+                <input id="cockpit-notes" placeholder="why this trade"></label>
+              <div class="cockpit-field cockpit-field--actions">
+                <button type="submit">SAVE POSITION</button>
+                <button type="button" id="cockpit-reset">CLEAR</button>
+              </div>
+            </form>
+          </div>
+        </details>
         <div class="cockpit-form-error" id="cockpit-form-error" style="display:none"></div>
+
         <div class="cockpit-toolbar">
           <select id="cockpit-sort">
             <option value="priority">priority</option>
