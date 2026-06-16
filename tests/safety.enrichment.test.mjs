@@ -1,133 +1,179 @@
-// Safety enrichment + explainability: every state carries a reason; the shipped
-// UI label helper renders a visible compact reason for every row.
+// Dual safety model (chain vs Binance listing) + optional public providers +
+// cache/rate-limit + explainable UI labels. No fake chain safety; Telegram
+// still requires final SAFE + all other gates; providers fail soft.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
-import { resolveTokenMetadata, METADATA_REASONS, __clearTokenMetadataCache } from '../scripts/safety/token-metadata.mjs';
-import { classifyMarketSafety, evaluateKnownSafety, buildSafetyDiagnostics, SAFETY_REASONS } from '../scripts/safety/chain-safety.mjs';
+import {
+  resolveTokenMetadata, resolveBinanceListing, resolveCoinGeckoMetadata, resolveGeckoTerminalMetadata,
+  warmChainMetadata, getMetadataDiagnostics, __clearTokenMetadataCache, METADATA_REASONS, LISTING_STATUS,
+} from '../scripts/safety/token-metadata.mjs';
+import { classifyMarketSafety, evaluateKnownSafety, buildSafetyDiagnostics, SAFETY_BASIS, SAFETY_REASONS } from '../scripts/safety/chain-safety.mjs';
 import { evaluateTradingRadar } from '../scripts/radar/trading-radar.mjs';
-import { evaluateConfirmedRadarEntryReady, TELEGRAM_CODES } from '../netlify/functions/cron-alerts.mjs';
+import { evaluateConfirmedRadarEntryReady, TELEGRAM_CODES, isTelegramHardDisabled } from '../netlify/functions/cron-alerts.mjs';
 
 const MID = '·';
-
-// Extract the shipped UI helper and run it in-process to test rendered labels.
 const TERMINAL_JS = fs.readFileSync(new URL('../apps/edge/public/js/terminal.js', import.meta.url), 'utf8');
 function loadFormatSafetyLabel() {
-  const m = TERMINAL_JS.match(/function formatSafetyLabel\(status, reason, source, chain, contract\) \{[\s\S]*?\n\}/);
-  assert.ok(m, 'formatSafetyLabel must exist in shipped JS');
+  const m = TERMINAL_JS.match(/function formatSafetyLabel\(status, reason, source, chain, contract, basis\) \{[\s\S]*?\n\}/);
+  assert.ok(m, 'formatSafetyLabel(...basis) must exist');
   // eslint-disable-next-line no-new-func
   return new Function(m[0] + '\nreturn formatSafetyLabel;')();
 }
 const fmt = loadFormatSafetyLabel();
 
-test('backend safety result always includes status/reason/source/chain/contract/blocksTelegram', () => {
-  for (const m of [{ symbol: 'BTCUSDT' }, { symbol: 'BSBUSDT' }, { symbol: 'WETHUSDT' }, { symbol: 'FOOBAR' }, { symbol: 'XYZUSDT', chain: 'bsc', contractAddress: '0xdef', contractVerified: false }]) {
-    const s = classifyMarketSafety(m);
-    for (const k of ['safetyStatus', 'safetyReason', 'safetySource', 'blocksTelegram']) {
-      assert.ok(s[k] !== undefined && s[k] !== '', `${m.symbol} missing ${k}`);
-    }
-    assert.ok('chain' in s && 'contractAddress' in s);
-    assert.equal(s.blocksTelegram, s.safetyStatus !== 'SAFE');
+const cgResponse = (list) => ({ ok: true, status: 200, json: async () => list });
+
+test('Binance active listing -> listing SAFE, final SAFE, basis CEX_LISTING (chain UNKNOWN)', () => {
+  const s = classifyMarketSafety({ symbol: 'HYPEUSDT', status: 'TRADING', quoteVolume24h: 5_000_000 });
+  assert.equal(s.listingSafetyStatus, LISTING_STATUS.LISTING_SAFE);
+  assert.equal(s.listingSafetyReason, 'BINANCE_LISTED_ACTIVE');
+  assert.equal(s.finalSafetyStatus, 'SAFE');
+  assert.equal(s.safetyBasis, SAFETY_BASIS.CEX_LISTING);
+  assert.equal(s.chainSafetyStatus, 'UNKNOWN');
+});
+
+test('Binance inactive/missing -> UNKNOWN, no listing context', () => {
+  const s = classifyMarketSafety({ symbol: 'BSBUSDT' }); // no status / volume / activeSet
+  assert.equal(s.listingSafetyStatus, LISTING_STATUS.LISTING_UNKNOWN);
+  assert.equal(s.finalSafetyStatus, 'UNKNOWN');
+  assert.equal(s.chainSafetyStatus, 'UNKNOWN');
+});
+
+test('curated asset -> SAFE basis CURATED_ASSET; direct verified contract -> SAFE basis CHAIN_VERIFIED', () => {
+  const cur = classifyMarketSafety({ symbol: 'XLMUSDT', baseAsset: 'XLM', status: 'TRADING', quoteVolume24h: 5e7 });
+  assert.equal(cur.finalSafetyStatus, 'SAFE');
+  assert.equal(cur.safetyBasis, SAFETY_BASIS.CURATED_ASSET);
+  const ver = classifyMarketSafety({ symbol: 'XYZUSDT', chain: 'ethereum', contractAddress: '0xabc', contractVerified: true, topHolderPercent: 3, status: 'TRADING', quoteVolume24h: 5e7 });
+  assert.equal(ver.finalSafetyStatus, 'SAFE');
+  assert.equal(ver.safetyBasis, SAFETY_BASIS.CHAIN_VERIFIED);
+});
+
+test('low liquidity Binance listing -> LISTING_CAUTION / final CAUTION', () => {
+  const s = classifyMarketSafety({ symbol: 'BEATUSDT', status: 'TRADING', quoteVolume24h: 500_000 });
+  assert.equal(s.listingSafetyStatus, LISTING_STATUS.LISTING_CAUTION);
+  assert.equal(s.finalSafetyStatus, 'CAUTION');
+});
+
+test('dangerous contract overrides Binance listing SAFE -> final DANGER', () => {
+  const s = classifyMarketSafety({ symbol: 'SIRENUSDT', status: 'TRADING', quoteVolume24h: 5e7, chain: 'bsc', contractAddress: '0xabc', contractVerified: true, topHolderPercent: 38 });
+  assert.equal(s.listingSafetyStatus, LISTING_STATUS.LISTING_SAFE);
+  assert.equal(s.chainSafetyStatus, 'DANGER');
+  assert.equal(s.finalSafetyStatus, 'DANGER');
+  assert.equal(s.safetyBasis, SAFETY_BASIS.CHAIN_RISK);
+});
+
+test('no chain SAFE from ticker-only guessing', () => {
+  // active listing makes FINAL safe, but the CHAIN axis must never be SAFE
+  // without a real verified contract.
+  for (const sym of ['HYPEUSDT', 'BSBUSDT', 'BEATUSDT']) {
+    assert.notEqual(classifyMarketSafety({ symbol: sym, status: 'TRADING', quoteVolume24h: 5e6 }).chainSafetyStatus, 'SAFE');
   }
 });
 
-test('CEX-only symbol -> UNKNOWN + CEX_ONLY_NO_CONTRACT_CONTEXT + source cex-only', () => {
-  const s = classifyMarketSafety({ symbol: 'BSBUSDT' });
-  assert.equal(s.safetyStatus, 'UNKNOWN');
-  assert.equal(s.safetyReason, SAFETY_REASONS.CEX_ONLY_NO_CONTRACT_CONTEXT);
-  assert.equal(s.safetySource, 'cex-only');
-});
-
-test('allowlisted majors SAFE; non-mapped/ambiguous/provider-fail honest', () => {
-  assert.equal(classifyMarketSafety({ symbol: 'XLMUSDT', baseAsset: 'XLM' }).safetyStatus, 'SAFE');
-  assert.equal(classifyMarketSafety({ symbol: 'FOOBAR' }).safetyReason, SAFETY_REASONS.MISSING_CONTRACT_METADATA);
-  assert.equal(classifyMarketSafety({ symbol: 'WETHUSDT' }).safetyReason, SAFETY_REASONS.AMBIGUOUS_CONTRACT_MAPPING);
+test('CoinGecko unique mapping attaches chain candidate; ambiguous symbol -> ambiguous + chain UNKNOWN', async () => {
   __clearTokenMetadataCache();
-  assert.equal(classifyMarketSafety({ symbol: 'NEWTOKEN', baseAsset: 'NEWTOKEN' }, { fetchImpl: () => { throw new Error('429'); } }).safetyReason, SAFETY_REASONS.METADATA_FETCH_FAILED);
-  assert.equal(classifyMarketSafety({ symbol: 'XYZUSDT', chain: 'bsc', contractAddress: '0xdef', contractVerified: false }).safetyStatus, 'CAUTION');
-  assert.equal(classifyMarketSafety({ symbol: 'SIRENUSDT', chain: 'bsc', contractAddress: '0xabc', contractVerified: true, topHolderPercent: 38 }).safetyStatus, 'DANGER');
+  const uniqueList = [{ id: 'xyz-token', symbol: 'xyz', platforms: { ethereum: '0xcontractxyz' } }];
+  await warmChainMetadata(['XYZ'], { fetchImpl: async () => cgResponse(uniqueList), now: Date.now() });
+  const m = resolveTokenMetadata({ symbol: 'XYZUSDT', baseAsset: 'XYZ' });
+  assert.equal(m.chain, 'ethereum');
+  assert.equal(m.contractAddress, '0xcontractxyz');
+  assert.equal(m.source, 'coingecko');
+
+  __clearTokenMetadataCache();
+  const ambigList = [
+    { id: 'foo-eth', symbol: 'foo', platforms: { ethereum: '0xaaa' } },
+    { id: 'foo-bsc', symbol: 'foo', platforms: { 'binance-smart-chain': '0xbbb' } },
+  ];
+  const meta = await resolveCoinGeckoMetadata('FOO', { fetchImpl: async () => cgResponse(ambigList), now: Date.now() });
+  assert.equal(meta.reason, METADATA_REASONS.AMBIGUOUS_CONTRACT_MAPPING);
+  assert.ok(Array.isArray(meta.candidates) && meta.candidates.length >= 2);
 });
 
-test('no token is marked SAFE by symbol-only guessing', () => {
-  for (const sym of ['BSBUSDT', 'HYPEUSDT', 'WILDUSDT', 'JTOUSDT', 'RANDOMUSDT']) {
-    assert.notEqual(classifyMarketSafety({ symbol: sym }).safetyStatus, 'SAFE');
-  }
+test('provider rate limit -> PROVIDER_RATE_LIMITED, fails soft', async () => {
+  __clearTokenMetadataCache();
+  const meta = await resolveCoinGeckoMetadata('RLX', { fetchImpl: async () => ({ ok: false, status: 429, json: async () => ({}) }), now: Date.now() });
+  assert.equal(meta.reason, METADATA_REASONS.PROVIDER_RATE_LIMITED);
+  assert.ok(getMetadataDiagnostics().providerRateLimitedCount >= 1);
+  // classification still works (no throw)
+  assert.equal(classifyMarketSafety({ symbol: 'RLXUSDT' }).finalSafetyStatus, 'UNKNOWN');
 });
 
-test('Telegram gate: UNKNOWN/CAUTION/DANGER block; SAFE passes', () => {
+test('GeckoTerminal provider failure fails soft', async () => {
+  __clearTokenMetadataCache();
+  const meta = await resolveGeckoTerminalMetadata('GTX', { geckoTerminalFetch: async () => { throw new Error('network'); }, now: Date.now() });
+  assert.equal(meta.reason, METADATA_REASONS.METADATA_FETCH_FAILED);
+});
+
+test('cache prevents repeated provider calls', async () => {
+  __clearTokenMetadataCache();
+  let calls = 0;
+  const fetchImpl = async () => { calls += 1; return cgResponse([{ id: 'cac', symbol: 'cac', platforms: { ethereum: '0xcac' } }]); };
+  await resolveCoinGeckoMetadata('CAC', { fetchImpl, now: 1000 });
+  await resolveCoinGeckoMetadata('CAC', { fetchImpl, now: 2000 });
+  assert.equal(calls, 1, 'second lookup must hit cache');
+});
+
+test('provider failure does not break scanner/RADAR', () => {
+  const mk = (s, b, v) => ({ symbol: s, baseAsset: b, quoteAsset: 'USDT', status: 'TRADING', quoteVolume24h: v, bidPrice: 1, askPrice: 1.001, spreadPct: 0.02, change24hPct: -5 });
+  const r = evaluateTradingRadar({ markets: [mk('BTCUSDT', 'BTC', 9e8), mk('HYPEUSDT', 'HYPE', 5e6)], now: Date.now() });
+  assert.ok(r.candidates.length >= 1);
+  for (const c of r.candidates) { assert.ok(c.safetyStatus && c.safetyReason && c.safetyBasis); }
+  assert.equal(r.universeDiagnostics.plainUnknownCount, 0);
+  assert.ok('finalSafetyBasisBreakdown' in r.universeDiagnostics);
+  assert.ok('chainUnknownButListingSafeCount' in r.universeDiagnostics);
+});
+
+test('Telegram: scanner/forbidden stages blocked; final SAFE passes safety gate; microstructure still required', () => {
   const base = {
-    symbol: 'SOLUSDT', STATUS: 'STANDARD_ENTRY_READY', actionability: 'ENTRY_READY', telegramEligible: true,
-    allRadarConditionsPassed: true, entryZone: { low: 1, high: 1.1 }, invalidationLevel: 0.9, suggestedStop: 0.9,
-    TAKE_PROFIT_LEVELS: [{ level: 1.2 }, { level: 1.3 }, { level: 1.4 }], tpZonesExist: true, executionDataMissing: [],
+    symbol: 'SOLUSDT', actionability: 'ENTRY_READY', telegramEligible: true, allRadarConditionsPassed: true,
+    entryZone: { low: 1, high: 1.1 }, invalidationLevel: 0.9, suggestedStop: 0.9,
+    TAKE_PROFIT_LEVELS: [{ level: 1.2 }, { level: 1.3 }, { level: 1.4 }], tpZonesExist: true,
     EXECUTION_SCORE: 70, SETUP_SCORE: 74, RISK_REWARD_SCORE: 64, MARKET_REGIME_SCORE: 61, confidence: 82, stale: false,
+    safetyStatus: 'SAFE', safetyBasis: 'CEX_LISTING',
   };
-  for (const st of ['UNKNOWN', 'CAUTION', 'DANGER']) {
-    assert.equal(evaluateConfirmedRadarEntryReady({ ...base, safetyStatus: st }).code, TELEGRAM_CODES.SKIPPED_SAFETY_NOT_SAFE);
+  for (const st of ['BUY', 'FLUSH+BUY', 'WATCH']) {
+    assert.equal(evaluateConfirmedRadarEntryReady({ ...base, STATUS: st }).code, TELEGRAM_CODES.LEGACY_BLOCKED);
   }
-  assert.equal(evaluateConfirmedRadarEntryReady({ ...base, safetyStatus: 'SAFE' }).ok, true);
+  // missing microstructure still blocks even when final SAFE
+  assert.equal(evaluateConfirmedRadarEntryReady({ ...base, STATUS: 'STANDARD_ENTRY_READY', executionDataMissing: ['orderBook'] }).code, TELEGRAM_CODES.SKIPPED_MISSING_MICROSTRUCTURE);
+  // UNKNOWN safety blocked
+  assert.equal(evaluateConfirmedRadarEntryReady({ ...base, STATUS: 'STANDARD_ENTRY_READY', executionDataMissing: [], safetyStatus: 'UNKNOWN' }).code, TELEGRAM_CODES.SKIPPED_SAFETY_NOT_SAFE);
+  // final SAFE (CEX_LISTING) + all gates -> passes safety gate
+  assert.equal(evaluateConfirmedRadarEntryReady({ ...base, STATUS: 'STANDARD_ENTRY_READY', executionDataMissing: [] }).ok, true);
 });
 
-test('RADAR engine: candidates carry safetyReason/safetySource; diagnostics plainUnknownCount === 0', () => {
-  const mk = (sym, base, v) => ({ symbol: sym, baseAsset: base, quoteAsset: 'USDT', status: 'TRADING', quoteVolume24h: v, bidPrice: 1, askPrice: 1.001, spreadPct: 0.02, change24hPct: -5 });
-  const radar = evaluateTradingRadar({ markets: [mk('BTCUSDT', 'BTC', 900e6), mk('BSBUSDT', 'BSB', 50e6), mk('WETHUSDT', 'WETH', 60e6)], now: Date.now() });
-  for (const c of radar.candidates) {
-    assert.ok(c.safetyReason, `${c.symbol} missing safetyReason`);
-    assert.ok(c.safetySource, `${c.symbol} missing safetySource`);
-  }
-  const d = radar.universeDiagnostics;
-  assert.equal(d.plainUnknownCount, 0);
-  assert.ok(d.unknownWithReasonCount >= 1);
-  assert.ok(Array.isArray(d.topUnknownReasons) && d.topUnknownReasons.length >= 1);
-  assert.ok(Array.isArray(d.topUnknownSymbols));
+test('Telegram disabled by default (fail-closed)', () => {
+  assert.equal(isTelegramHardDisabled({}), true);
 });
 
-test('diagnostics: plainUnknownCount counts reasonless UNKNOWN (and is 0 for honest rows)', () => {
-  const honest = buildSafetyDiagnostics([
-    classifyMarketSafety({ symbol: 'BTCUSDT', baseAsset: 'BTC' }),
-    classifyMarketSafety({ symbol: 'BSBUSDT', baseAsset: 'BSB' }),
-  ]);
-  assert.equal(honest.plainUnknownCount, 0);
-  const broken = buildSafetyDiagnostics([{ symbol: 'X', safetyStatus: 'UNKNOWN', safetyReason: '' }]);
-  assert.equal(broken.plainUnknownCount, 1);
+// ---- UI label helper ----
+test('formatSafetyLabel: basis-aware SAFE labels + chain note for CEX listing', () => {
+  assert.equal(fmt('SAFE', 'BINANCE_LISTED_ACTIVE', 'binance', null, null, 'CEX_LISTING').labelShort, `SAFE ${MID} Binance listed`);
+  assert.equal(fmt('SAFE', 'ALLOWLISTED', 'curated-allowlist', 'near', 'native:near', 'CURATED_ASSET').labelShort, `SAFE ${MID} curated asset`);
+  assert.equal(fmt('SAFE', 'RESOLVED', 'market-row', 'ethereum', '0xabc', 'CHAIN_VERIFIED').labelShort, `SAFE ${MID} verified contract`);
+  assert.equal(fmt('CAUTION', 'LOW_LIQUIDITY_LISTING', 'binance', null, null, 'LISTING_CAUTION').labelShort, `CAUTION ${MID} low liquidity`);
+  assert.equal(fmt('UNKNOWN', '', 'none', null, null, '').labelShort, `UNKNOWN ${MID} missing metadata`);
+  const cex = fmt('SAFE', 'BINANCE_LISTED_ACTIVE', 'binance', null, null, 'CEX_LISTING');
+  assert.match(cex.tooltip, /Chain safety: UNKNOWN - no contract context/);
+  assert.match(cex.tooltip, /Basis: CEX_LISTING/);
+  assert.equal(cex.blocksTelegram, false);
+  // never a plain reasonless UNKNOWN
+  assert.notEqual(fmt(null, null, null, null, null, null).labelShort, 'UNKNOWN');
 });
 
-// ---- UI label helper: every state renders a visible compact reason ----
-test('formatSafetyLabel renders required compact labels', () => {
-  assert.equal(fmt('SAFE', 'ALLOWLISTED', 'curated-allowlist').labelShort, `SAFE ${MID} curated asset`);
-  assert.equal(fmt('SAFE', 'RESOLVED', 'market-row').labelShort, `SAFE ${MID} verified contract`);
-  assert.equal(fmt('UNKNOWN', 'CEX_ONLY_NO_CONTRACT_CONTEXT', 'cex-only').labelShort, `UNKNOWN ${MID} CEX-only`);
-  assert.equal(fmt('UNKNOWN', 'MISSING_CONTRACT_METADATA', 'none').labelShort, `UNKNOWN ${MID} missing metadata`);
-  assert.equal(fmt('UNKNOWN', 'AMBIGUOUS_CONTRACT_MAPPING', 'none').labelShort, `UNKNOWN ${MID} ambiguous`);
-  assert.equal(fmt('UNKNOWN', 'METADATA_FETCH_FAILED', 'provider').labelShort, `UNKNOWN ${MID} provider failed`);
-  assert.equal(fmt('CAUTION', 'UNVERIFIED_CONTRACT', 'market-row').labelShort, `CAUTION ${MID} unverified contract`);
-  assert.equal(fmt('DANGER', 'HOLDER_CONCENTRATION', 'market-row').labelShort, `DANGER ${MID} risky contract`);
+test('shipped JS wires dual-model into scanner / RADAR / detail / cockpit', () => {
+  assert.match(TERMINAL_JS, /function formatSafetyLabel\(status, reason, source, chain, contract, basis\)/);
+  assert.match(TERMINAL_JS, /formatSafetyLabel\(s\.status, s\.code, s\.source, s\.chain, s\.contract, s\.basis\)/);
+  assert.match(TERMINAL_JS, /formatSafetyLabel\(c\.safetyStatus, c\.safetyReason, c\.safetySource, c\.chain, c\.contractAddress, c\.safetyBasis\)/);
+  assert.match(TERMINAL_JS, /<span>Safety basis<\/span>/);
+  assert.match(TERMINAL_JS, /<span>Chain safety<\/span>/);
+  assert.match(TERMINAL_JS, /<span>Listing safety<\/span>/);
+  assert.match(TERMINAL_JS, /Binance listed/);
 });
 
-test('formatSafetyLabel never renders a reasonless UNKNOWN', () => {
-  // missing status + missing reason
-  const a = fmt(null, null, null);
-  assert.equal(a.labelShort.startsWith('UNKNOWN ' + MID), true);
-  assert.notEqual(a.labelShort, 'UNKNOWN');
-  assert.match(a.labelFull, /\((MISSING_CONTRACT_METADATA|CEX_ONLY_NO_CONTRACT_CONTEXT)\)/);
-  // CEX source but empty reason -> CEX-only
-  assert.equal(fmt('UNKNOWN', '', 'scanner').labelShort, `UNKNOWN ${MID} CEX-only`);
-  // every non-SAFE blocks telegram + tooltip says so
-  const b = fmt('UNKNOWN', 'CEX_ONLY_NO_CONTRACT_CONTEXT', 'cex-only');
-  assert.equal(b.blocksTelegram, true);
-  assert.match(b.tooltip, /Telegram blocked: safety is not SAFE/);
-  assert.match(b.tooltip, /Reason: CEX_ONLY_NO_CONTRACT_CONTEXT/);
-});
-
-test('shipped JS wires label helper into scanner / RADAR / detail / cockpit', () => {
-  assert.match(TERMINAL_JS, /function formatSafetyLabel\(/);
-  // scanner cell renders the label short text, not bare status
-  assert.match(TERMINAL_JS, /const f = formatSafetyLabel\(s\.status, s\.code, s\.source, s\.chain, s\.contract\);/);
-  assert.match(TERMINAL_JS, /\$\{_esc\(f\.labelShort\)\}/);
-  // RADAR matrix cell uses helper
-  assert.match(TERMINAL_JS, /formatSafetyLabel\(c\.safetyStatus, c\.safetyReason, c\.safetySource, c\.chain, c\.contractAddress\)/);
-  // detail panel shows full reason code
-  assert.match(TERMINAL_JS, /detailSafetyF\.labelFull/);
-  // cockpit telegram-blocked note
-  assert.match(TERMINAL_JS, /Telegram blocked: safety is not SAFE/);
+test('cron telegram message includes safetyBasis', () => {
+  const cron = fs.readFileSync(new URL('../netlify/functions/cron-alerts.mjs', import.meta.url), 'utf8');
+  assert.match(cron, /Safety basis: \$\{escHtml\(candidate\.safetyBasis/);
 });

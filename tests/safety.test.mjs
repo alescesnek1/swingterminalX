@@ -49,12 +49,15 @@ test('UNKNOWN safety blocks Telegram eligibility (only SAFE is alertable)', () =
   assert.equal(isRadarTelegramQualifiedCandidate(entryCandidate({ safetyStatus: 'SAFE' })), true);
 });
 
-test('engine: a row with no chain/contract resolves UNKNOWN and is never Telegram-eligible', () => {
-  // FULL has no chain/contractAddress → safety UNKNOWN. Even if it otherwise
-  // looks entry-ready, UNKNOWN safety must keep telegramEligible false.
+test('engine: a row with no chain/contract has chain UNKNOWN; active Binance listing yields final SAFE via CEX_LISTING (never chain-verified)', () => {
+  // FULL has no chain/contractAddress -> CHAIN axis stays UNKNOWN. It is an
+  // active Binance listing, so the LISTING axis can make the FINAL SAFE with
+  // an explicit CEX_LISTING basis. We must never claim a verified contract.
   const c = evaluateTradingRadar({ markets: [BTC, ETH, FULL], now: Date.now() }).candidates.find((x) => x.symbol === 'SIRENUSDT');
-  assert.equal(c.safetyStatus, 'UNKNOWN');
-  assert.equal(c.telegramEligible, false);
+  assert.equal(c.chainSafetyStatus, 'UNKNOWN');
+  assert.equal(c.safetyStatus, 'SAFE');
+  assert.equal(c.safetyBasis, 'CEX_LISTING');
+  assert.notEqual(c.safetyBasis, 'CHAIN_VERIFIED');
 });
 
 test('BscScan adapter: empty ABI is NOT treated as verified', async () => {

@@ -2,34 +2,36 @@
 //
 // Honesty contract:
 //   - NEVER guess chain/contract from a ticker alone.
-//   - A base asset is only auto-resolved if it is in the curated allowlist OR
-//     the caller already supplied an unambiguous chain+contract (e.g. scanner
-//     row metadata). Otherwise the resolver returns an explicit reason.
-//   - CEX/futures listings without on-chain contract context are reported as
-//     CEX_ONLY_NO_CONTRACT_CONTEXT and stay UNKNOWN (strict chain-only model).
-//   - No secrets required. External fetch is OPTIONAL; failures are reported as
-//     METADATA_FETCH_FAILED, never silently treated as "resolved".
+//   - Binance LISTING is a separate axis from CHAIN-CONTRACT safety. A confirmed
+//     active Binance listing supports listingSafetyStatus = LISTING_SAFE
+//     (basis CEX_LISTING) but NEVER fakes chainSafetyStatus = SAFE.
+//   - External providers (CoinGecko / GeckoTerminal) are OPTIONAL. They only run
+//     when a fetch impl is injected, are cached + rate-capped, and fail soft
+//     (PROVIDER_RATE_LIMITED / METADATA_FETCH_FAILED). Scanner/RADAR must keep
+//     working when providers are unavailable.
 
 export const METADATA_REASONS = Object.freeze({
-  ALLOWLISTED: 'ALLOWLISTED',                       // curated canonical asset
-  RESOLVED: 'RESOLVED',                             // unambiguous chain+contract from row/provider
+  ALLOWLISTED: 'ALLOWLISTED',
+  RESOLVED: 'RESOLVED',
   MISSING_CONTRACT_METADATA: 'MISSING_CONTRACT_METADATA',
   AMBIGUOUS_CONTRACT_MAPPING: 'AMBIGUOUS_CONTRACT_MAPPING',
   METADATA_FETCH_FAILED: 'METADATA_FETCH_FAILED',
+  PROVIDER_RATE_LIMITED: 'PROVIDER_RATE_LIMITED',
   CEX_ONLY_NO_CONTRACT_CONTEXT: 'CEX_ONLY_NO_CONTRACT_CONTEXT',
 });
 
-// Pair quotes that indicate a centralized-exchange listing (Binance et al).
-const CEX_QUOTES = ['USDT', 'USDC', 'BUSD', 'FDUSD', 'TUSD', 'USD', 'BTC', 'ETH', 'BNB'];
+export const LISTING_STATUS = Object.freeze({
+  LISTING_SAFE: 'LISTING_SAFE',
+  LISTING_CAUTION: 'LISTING_CAUTION',
+  LISTING_UNKNOWN: 'LISTING_UNKNOWN',
+});
 
-// Curated allowlist of top tracked assets. Each entry is an explicit human
-// decision: "this canonical asset is recognised". `contractAddress` is the
-// canonical mainnet ERC-20 address where one exists, or `native:<chain>` for
-// L1/L0 coins that have NO token contract (and therefore no contract-honeypot
-// risk). `allowlisted:true` lets the safety layer treat it as SAFE with an
-// explicit ALLOWLISTED reason rather than UNKNOWN. Conservative on purpose.
+const CEX_QUOTES = ['USDT', 'USDC', 'BUSD', 'FDUSD', 'TUSD', 'USD', 'BTC', 'ETH', 'BNB'];
+const MIN_ACTIVE_VOL_USD = 1_000_000;
+const META_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+const DEFAULT_MAX_PROVIDER_CALLS = 25;   // hard cap per warm pass
+
 const ALLOWLIST = Object.freeze({
-  // --- Native L1 / L0 coins (no token contract; canonical asset) ---
   BTC: { chain: 'bitcoin', contractAddress: 'native:bitcoin', name: 'Bitcoin' },
   ETH: { chain: 'ethereum', contractAddress: 'native:ethereum', name: 'Ether' },
   BNB: { chain: 'bsc', contractAddress: 'native:bsc', name: 'BNB' },
@@ -79,7 +81,6 @@ const ALLOWLIST = Object.freeze({
   ZEC: { chain: 'zcash', contractAddress: 'native:zcash', name: 'Zcash' },
   RVN: { chain: 'ravencoin', contractAddress: 'native:ravencoin', name: 'Ravencoin' },
   ONE: { chain: 'harmony', contractAddress: 'native:harmony', name: 'Harmony' },
-  // --- Canonical Ethereum-mainnet ERC-20s (well-known addresses) ---
   USDC: { chain: 'ethereum', contractAddress: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', name: 'USD Coin' },
   USDT: { chain: 'ethereum', contractAddress: '0xdac17f958d2ee523a2206206994597c13d831ec7', name: 'Tether USD' },
   LINK: { chain: 'ethereum', contractAddress: '0x514910771af9ca656af840dff83e8264ecf986ca', name: 'Chainlink' },
@@ -93,132 +94,266 @@ const ALLOWLIST = Object.freeze({
   ARB: { chain: 'arbitrum', contractAddress: '0x912ce59144191c1204e64559fe8253a0e49e6548', name: 'Arbitrum' },
 });
 
-// Base assets that legitimately map to MANY chains/contracts with no reliable
-// disambiguator from a CEX ticker. These must NEVER be auto-resolved by symbol.
 const AMBIGUOUS = new Set(['BTCB', 'WETH', 'WBTC', 'MULTI', 'BRIDGE', 'O3', 'BIT', 'GAS', 'CAT', 'GMT', 'AGI', 'KEY', 'FT']);
 
-const CACHE_TTL_MS = 15 * 60 * 1000;
-const cache = new Map();
+// ---- module cache + provider counters (fail-soft, observable) ----
+const cache = new Map();           // base -> { at, value }  (provider chain meta)
+const listCache = new Map();       // 'coingecko-list' -> { at, value }
+let counters = freshCounters();
+function freshCounters() {
+  return {
+    metadataProviderCalls: 0,
+    metadataProviderFailures: 0,
+    metadataCacheHits: 0,
+    metadataCacheMisses: 0,
+    coingeckoResolvedCount: 0,
+    geckoTerminalResolvedCount: 0,
+    ambiguousMetadataCount: 0,
+    providerRateLimitedCount: 0,
+  };
+}
+export function getMetadataDiagnostics() { return { ...counters }; }
+export function __clearTokenMetadataCache() { cache.clear(); listCache.clear(); counters = freshCounters(); }
+
+function num(v) { const x = Number(v); return Number.isFinite(x) ? x : null; }
+function isAddress(v) { return typeof v === 'string' && v.trim().length > 0; }
 
 function baseInfo(input) {
-  if (input && input.baseAsset) return { base: String(input.baseAsset).toUpperCase(), hadQuote: true };
+  if (input && input.baseAsset) {
+    return { base: String(input.baseAsset).toUpperCase(), quote: input.quoteAsset ? String(input.quoteAsset).toUpperCase() : null, hadQuote: true };
+  }
   const s = String((input && (input.symbol || input.pair)) || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
   for (const q of CEX_QUOTES) {
-    if (s.length > q.length && s.endsWith(q)) return { base: s.slice(0, -q.length), hadQuote: true };
+    if (s.length > q.length && s.endsWith(q)) return { base: s.slice(0, -q.length), quote: q, hadQuote: true };
   }
-  return { base: s, hadQuote: false };
+  return { base: s, quote: null, hadQuote: false };
 }
 
-function isAddress(v) {
-  return typeof v === 'string' && v.trim().length > 0;
+// ---- Binance listing axis (offline; derived from the Binance-sourced row) ----
+export function resolveBinanceListing(market = {}, opts = {}) {
+  const sym = String(market.symbol || '').toUpperCase();
+  const activeSet = opts.binanceActiveSymbols instanceof Set ? opts.binanceActiveSymbols : null;
+  const statusTrading = String(market.status || '').toUpperCase() === 'TRADING';
+  const inActiveSet = activeSet ? activeSet.has(sym) : false;
+  const listedFlag = market.binanceListed === true || /binance/i.test(String(market.exchange || market.venue || ''));
+  const vol = num(market.quoteVolume24h ?? market.volume24hUsd ?? market.quoteVolume ?? market.volume ?? market.total_volume);
+  const hasVol = vol != null && vol > 0;
+  const known = statusTrading || inActiveSet || listedFlag;
+
+  if (!known) {
+    return { listed: false, active: false, exchange: null, listingStatus: 'UNKNOWN', listingSafetyStatus: LISTING_STATUS.LISTING_UNKNOWN, listingSafetyReason: 'NO_LISTING_CONTEXT' };
+  }
+  const active = statusTrading || inActiveSet || (listedFlag && hasVol);
+  if (active && hasVol && vol < MIN_ACTIVE_VOL_USD) {
+    return { listed: true, active: true, exchange: 'binance', listingStatus: 'TRADING', listingSafetyStatus: LISTING_STATUS.LISTING_CAUTION, listingSafetyReason: 'LOW_LIQUIDITY_LISTING' };
+  }
+  if (active) {
+    return { listed: true, active: true, exchange: 'binance', listingStatus: 'TRADING', listingSafetyStatus: LISTING_STATUS.LISTING_SAFE, listingSafetyReason: 'BINANCE_LISTED_ACTIVE' };
+  }
+  return { listed: true, active: false, exchange: 'binance', listingStatus: 'LISTED', listingSafetyStatus: LISTING_STATUS.LISTING_UNKNOWN, listingSafetyReason: 'LISTING_NOT_ACTIVE' };
 }
 
 function result(base, fields) {
   return {
     baseAsset: base,
+    quoteAsset: fields.quoteAsset || null,
+    exchange: fields.exchange || null,
+    listed: fields.listed === true,
+    listingStatus: fields.listingStatus || 'UNKNOWN',
+    listingSafetyStatus: fields.listingSafetyStatus || LISTING_STATUS.LISTING_UNKNOWN,
+    listingSafetyReason: fields.listingSafetyReason || 'NO_LISTING_CONTEXT',
     chain: fields.chain || null,
     contractAddress: fields.contractAddress || null,
+    chainCandidates: Array.isArray(fields.chainCandidates) ? fields.chainCandidates : [],
     name: fields.name || null,
     verified: fields.verified === true ? true : (fields.verified === false ? false : null),
     allowlisted: fields.allowlisted === true,
     ambiguous: fields.ambiguous === true,
     cexOnly: fields.cexOnly === true,
-    source: fields.source || null,
-    confidence: fields.confidence || 'none',
     reason: fields.reason,
+    source: fields.source || null,
+    sourceName: fields.sourceName || fields.source || null,
+    confidence: Number.isFinite(fields.confidence) ? fields.confidence : 0,
+    confidenceReasons: Array.isArray(fields.confidenceReasons) ? fields.confidenceReasons : [],
   };
 }
 
-// Resolve metadata for a single market/candidate row. Pure + deterministic
-// unless a fetcher is injected via opts.fetchImpl.
+// ---- main sync resolver (chain axis + listing axis + confidence) ----
 export function resolveTokenMetadata(input = {}, opts = {}) {
-  const { base, hadQuote } = baseInfo(input);
-  const cexContext = hadQuote
-    || input.cexOnly === true
-    || input.isScannerContext === true
+  const { base, quote, hadQuote } = baseInfo(input);
+  const listing = resolveBinanceListing(input, opts);
+  const cexContext = hadQuote || input.cexOnly === true || input.isScannerContext === true || listing.listed
     || /binance|bybit|okx|futures|spot/i.test(String(input.venue || input.exchange || ''));
+  const cr = []; // confidenceReasons
 
-  if (!base) {
-    return result('', { reason: METADATA_REASONS.MISSING_CONTRACT_METADATA, source: 'none' });
-  }
+  const base_fields = {
+    quoteAsset: quote, exchange: listing.exchange, listed: listing.listed,
+    listingStatus: listing.listingStatus, listingSafetyStatus: listing.listingSafetyStatus, listingSafetyReason: listing.listingSafetyReason,
+  };
+  if (listing.listingSafetyStatus === LISTING_STATUS.LISTING_SAFE) cr.push('binance_active_listing');
 
-  // 1) Caller already supplied unambiguous chain + contract.
+  if (!base) return result('', { ...base_fields, reason: METADATA_REASONS.MISSING_CONTRACT_METADATA, source: 'none', confidence: 0, confidenceReasons: cr });
+
+  // 1) direct row chain+contract
   const rowChain = input.chain || input.network || input.contractChain;
   const rowContract = input.contractAddress || input.contract || input.tokenAddress;
   if (rowChain && isAddress(rowContract)) {
+    cr.push('direct_row_chain_contract');
     return result(base, {
-      chain: String(rowChain).toLowerCase(),
-      contractAddress: String(rowContract),
-      name: input.tokenName || input.name || null,
-      verified: input.contractVerified,
-      source: 'market-row',
-      confidence: 'high',
-      reason: METADATA_REASONS.RESOLVED,
+      ...base_fields, chain: String(rowChain).toLowerCase(), contractAddress: String(rowContract),
+      name: input.tokenName || input.name || null, verified: input.contractVerified,
+      reason: METADATA_REASONS.RESOLVED, source: 'market-row', sourceName: 'row metadata',
+      confidence: input.contractVerified === true ? 100 : 90, confidenceReasons: cr,
     });
   }
 
-  // 2) Curated allowlist (explicit human decision).
+  // 2) curated allowlist
   if (ALLOWLIST[base]) {
     const m = ALLOWLIST[base];
+    cr.push('curated_allowlist');
     return result(base, {
-      chain: m.chain,
-      contractAddress: m.contractAddress,
-      name: m.name,
-      verified: true,
-      allowlisted: true,
-      source: 'curated-allowlist',
-      confidence: 'high',
-      reason: METADATA_REASONS.ALLOWLISTED,
+      ...base_fields, chain: m.chain, contractAddress: m.contractAddress, name: m.name, verified: true, allowlisted: true,
+      reason: METADATA_REASONS.ALLOWLISTED, source: 'curated-allowlist', sourceName: 'curated allowlist',
+      confidence: 95, confidenceReasons: cr,
     });
   }
 
-  // 3) Known-ambiguous base asset: refuse to guess.
+  // 3) known-ambiguous base asset
   if (AMBIGUOUS.has(base)) {
-    return result(base, { ambiguous: true, source: 'none', reason: METADATA_REASONS.AMBIGUOUS_CONTRACT_MAPPING });
+    cr.push('known_multichain_symbol');
+    return result(base, { ...base_fields, ambiguous: true, source: 'none', sourceName: 'ambiguity rule', reason: METADATA_REASONS.AMBIGUOUS_CONTRACT_MAPPING, confidence: listing.listed ? 75 : 60, confidenceReasons: cr });
   }
 
-  // 4) Optional external provider (only if injected; never required, no secret).
-  if (typeof opts.fetchImpl === 'function') {
-    const key = `meta:${base}`;
-    const now = opts.now || Date.now();
-    const cached = cache.get(key);
-    if (cached && now - cached.at < CACHE_TTL_MS) return cached.value;
-    try {
-      const fetched = opts.fetchImpl(base, input);
-      if (fetched && fetched.ambiguous === true) {
-        const v = result(base, { ambiguous: true, source: fetched.source || 'provider', reason: METADATA_REASONS.AMBIGUOUS_CONTRACT_MAPPING });
-        cache.set(key, { at: now, value: v });
-        return v;
-      }
-      if (fetched && fetched.chain && isAddress(fetched.contractAddress)) {
-        const v = result(base, {
-          chain: String(fetched.chain).toLowerCase(),
-          contractAddress: String(fetched.contractAddress),
-          name: fetched.name || null,
-          verified: fetched.verified,
-          source: fetched.source || 'provider',
-          confidence: fetched.confidence || 'medium',
-          reason: METADATA_REASONS.RESOLVED,
-        });
-        cache.set(key, { at: now, value: v });
-        return v;
-      }
-      const v = cexContext
-        ? result(base, { cexOnly: true, source: 'cex-listing', reason: METADATA_REASONS.CEX_ONLY_NO_CONTRACT_CONTEXT })
-        : result(base, { source: (fetched && fetched.source) || 'provider', reason: METADATA_REASONS.MISSING_CONTRACT_METADATA });
-      cache.set(key, { at: now, value: v });
-      return v;
-    } catch (err) {
-      return result(base, { source: 'provider', reason: METADATA_REASONS.METADATA_FETCH_FAILED });
+  // 4) provider cache (populated out-of-band by warmChainMetadata; never guesses)
+  const cached = opts.providerCache instanceof Map ? opts.providerCache.get(base) : (cache.get(base) ? cache.get(base).value : null);
+  if (cached) {
+    if (cached.reason === METADATA_REASONS.AMBIGUOUS_CONTRACT_MAPPING) {
+      cr.push('coingecko_ambiguous_symbol');
+      return result(base, { ...base_fields, ambiguous: true, chainCandidates: cached.candidates || [], source: cached.source || 'coingecko', sourceName: cached.sourceName || 'CoinGecko', reason: METADATA_REASONS.AMBIGUOUS_CONTRACT_MAPPING, confidence: 60, confidenceReasons: cr });
+    }
+    if (cached.chain && isAddress(cached.contractAddress)) {
+      cr.push('provider_unique_mapping');
+      if (listing.listed) cr.push('binance_active_listing_plus_provider');
+      return result(base, { ...base_fields, chain: cached.chain, contractAddress: cached.contractAddress, name: cached.name || null, verified: cached.verified, chainCandidates: cached.candidates || [], reason: METADATA_REASONS.RESOLVED, source: cached.source || 'coingecko', sourceName: cached.sourceName || 'CoinGecko', confidence: listing.listed ? 85 : 80, confidenceReasons: cr });
     }
   }
 
-  // 5) Nothing available. Distinguish CEX-listed (no on-chain context) from a
-  //    bare/on-chain token with genuinely missing metadata.
-  if (cexContext) {
-    return result(base, { cexOnly: true, source: 'cex-listing', reason: METADATA_REASONS.CEX_ONLY_NO_CONTRACT_CONTEXT });
+  // 5) no chain context. If Binance-listed, that is still a real CEX listing.
+  if (listing.listed) {
+    cr.push('binance_listed_no_contract');
+    return result(base, { ...base_fields, cexOnly: true, source: 'binance', sourceName: 'Binance listing', reason: METADATA_REASONS.CEX_ONLY_NO_CONTRACT_CONTEXT, confidence: listing.listingSafetyStatus === LISTING_STATUS.LISTING_SAFE ? 75 : 50, confidenceReasons: cr });
   }
-  return result(base, { source: 'none', reason: METADATA_REASONS.MISSING_CONTRACT_METADATA });
+  if (cexContext) {
+    return result(base, { ...base_fields, cexOnly: true, source: 'cex-only', sourceName: 'CEX context', reason: METADATA_REASONS.CEX_ONLY_NO_CONTRACT_CONTEXT, confidence: 40, confidenceReasons: cr });
+  }
+  return result(base, { ...base_fields, source: 'none', sourceName: 'none', reason: METADATA_REASONS.MISSING_CONTRACT_METADATA, confidence: 0, confidenceReasons: cr });
 }
 
-export function __clearTokenMetadataCache() { cache.clear(); }
+// ---- optional async CoinGecko provider (only with injected fetchImpl) ----
+async function fetchCoinGeckoList(opts, now) {
+  const cached = listCache.get('coingecko-list');
+  if (cached && now - cached.at < META_TTL_MS) { counters.metadataCacheHits += 1; return cached.value; }
+  counters.metadataCacheMisses += 1;
+  if (Array.isArray(opts.coinList)) { listCache.set('coingecko-list', { at: now, value: opts.coinList }); return opts.coinList; }
+  counters.metadataProviderCalls += 1;
+  const res = await opts.fetchImpl('https://api.coingecko.com/api/v3/coins/list?include_platform=true');
+  if (res && res.status === 429) { counters.providerRateLimitedCount += 1; throw new Error('rate_limited'); }
+  if (!res || !res.ok) throw new Error('coingecko_list_failed');
+  const list = await res.json();
+  listCache.set('coingecko-list', { at: now, value: list });
+  return list;
+}
+
+export async function resolveCoinGeckoMetadata(base, opts = {}) {
+  const now = opts.now || Date.now();
+  const key = String(base || '').toUpperCase();
+  if (!key) return null;
+  const cached = cache.get(key);
+  if (cached && now - cached.at < META_TTL_MS) { counters.metadataCacheHits += 1; return cached.value; }
+  counters.metadataCacheMisses += 1;
+  if (typeof opts.fetchImpl !== 'function') return null;
+  try {
+    const list = await fetchCoinGeckoList(opts, now);
+    const matches = (Array.isArray(list) ? list : []).filter((c) => String(c.symbol || '').toUpperCase() === key);
+    if (matches.length === 0) {
+      const v = { reason: METADATA_REASONS.MISSING_CONTRACT_METADATA, source: 'coingecko', sourceName: 'CoinGecko' };
+      cache.set(key, { at: now, value: v });
+      return v;
+    }
+    if (matches.length > 1) {
+      counters.ambiguousMetadataCount += 1;
+      const candidates = matches.slice(0, 6).map((m) => ({ id: m.id, platforms: m.platforms || null }));
+      const v = { reason: METADATA_REASONS.AMBIGUOUS_CONTRACT_MAPPING, candidates, source: 'coingecko', sourceName: 'CoinGecko' };
+      cache.set(key, { at: now, value: v });
+      return v;
+    }
+    const only = matches[0];
+    const platforms = only.platforms && typeof only.platforms === 'object' ? Object.entries(only.platforms).filter(([k, v]) => k && v) : [];
+    if (platforms.length === 1) {
+      counters.coingeckoResolvedCount += 1;
+      const [chain, contractAddress] = platforms[0];
+      const v = { chain: String(chain).toLowerCase(), contractAddress: String(contractAddress), name: only.name, verified: null, source: 'coingecko', sourceName: 'CoinGecko' };
+      cache.set(key, { at: now, value: v });
+      return v;
+    }
+    if (platforms.length > 1) {
+      counters.ambiguousMetadataCount += 1;
+      const candidates = platforms.slice(0, 6).map(([chain, contractAddress]) => ({ chain, contractAddress }));
+      const v = { reason: METADATA_REASONS.AMBIGUOUS_CONTRACT_MAPPING, candidates, source: 'coingecko', sourceName: 'CoinGecko' };
+      cache.set(key, { at: now, value: v });
+      return v;
+    }
+    const v = { reason: METADATA_REASONS.MISSING_CONTRACT_METADATA, source: 'coingecko', sourceName: 'CoinGecko' };
+    cache.set(key, { at: now, value: v });
+    return v;
+  } catch (err) {
+    counters.metadataProviderFailures += 1;
+    return { reason: /rate/i.test(String(err && err.message)) ? METADATA_REASONS.PROVIDER_RATE_LIMITED : METADATA_REASONS.METADATA_FETCH_FAILED, source: 'coingecko', sourceName: 'CoinGecko' };
+  }
+}
+
+// ---- optional async GeckoTerminal provider (only with injected fetchImpl) ----
+export async function resolveGeckoTerminalMetadata(base, opts = {}) {
+  if (typeof opts.geckoTerminalFetch !== 'function') return null;
+  const now = opts.now || Date.now();
+  try {
+    counters.metadataProviderCalls += 1;
+    const res = await opts.geckoTerminalFetch(base);
+    if (res && res.status === 429) { counters.providerRateLimitedCount += 1; return { reason: METADATA_REASONS.PROVIDER_RATE_LIMITED, source: 'geckoterminal', sourceName: 'GeckoTerminal' }; }
+    if (!res || !res.ok) throw new Error('gt_failed');
+    const j = await res.json();
+    const tok = j && j.data && j.data.attributes ? j.data.attributes : null;
+    if (tok && tok.address && (tok.network || tok.chain)) {
+      counters.geckoTerminalResolvedCount += 1;
+      return { chain: String(tok.network || tok.chain).toLowerCase(), contractAddress: String(tok.address), name: tok.name || null, verified: null, source: 'geckoterminal', sourceName: 'GeckoTerminal' };
+    }
+    return { reason: METADATA_REASONS.MISSING_CONTRACT_METADATA, source: 'geckoterminal', sourceName: 'GeckoTerminal' };
+  } catch (err) {
+    counters.metadataProviderFailures += 1;
+    return { reason: METADATA_REASONS.METADATA_FETCH_FAILED, source: 'geckoterminal', sourceName: 'GeckoTerminal' };
+  }
+}
+
+// ---- batch warmer: populate provider cache for uncovered bases (rate-capped) ----
+export async function warmChainMetadata(bases = [], opts = {}) {
+  const maxCalls = Number.isFinite(opts.maxCalls) ? opts.maxCalls : DEFAULT_MAX_PROVIDER_CALLS;
+  const now = opts.now || Date.now();
+  let used = 0;
+  const seen = new Set();
+  for (const raw of bases) {
+    const base = String(raw || '').toUpperCase();
+    if (!base || seen.has(base) || ALLOWLIST[base] || AMBIGUOUS.has(base)) continue;
+    seen.add(base);
+    const cached = cache.get(base);
+    if (cached && now - cached.at < META_TTL_MS) continue;
+    if (used >= maxCalls) break;
+    used += 1;
+    let meta = await resolveCoinGeckoMetadata(base, opts);
+    if ((!meta || (!meta.chain && meta.reason !== METADATA_REASONS.AMBIGUOUS_CONTRACT_MAPPING)) && typeof opts.geckoTerminalFetch === 'function') {
+      const gt = await resolveGeckoTerminalMetadata(base, { ...opts, now });
+      if (gt && gt.chain) meta = gt;
+    }
+    if (meta) cache.set(base, { at: now, value: meta });
+  }
+  return { ...counters, providerCallsThisPass: used };
+}

@@ -272,6 +272,7 @@ export function buildRadarTelegramMessage(candidate) {
     `Stop / invalidation: ${escHtml(stop)} / ${escHtml(inval)}`,
     `TP1 / TP2 / TP3: ${escHtml(tp1)} / ${escHtml(tp2)} / ${escHtml(tp3)}`,
     `Safety: ${escHtml(candidate.safetyStatus || 'UNKNOWN')}`,
+    `Safety basis: ${escHtml(candidate.safetyBasis || '--')}`,
     `Reason: ${escHtml(reasons.slice(0, 3).join(' | ') || '--')}`,
     `Next action: ${escHtml(action)}`,
     `Time: ${escHtml(new Date().toISOString())}`,
