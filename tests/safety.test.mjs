@@ -25,7 +25,10 @@ function entryCandidate(over = {}) {
   return {
     symbol: 'SOLUSDT', STATUS: 'STANDARD_ENTRY_READY', stage: 'ENTRY_READY', actionability: 'ENTRY_READY',
     telegramEligible: true, safetyStatus: 'SAFE', allRadarConditionsPassed: true, confidence: 82,
-    entryZone: { low: 139.5, high: 141.2 }, invalidationLevel: 132.4, suggestedStop: 131.8, ...over,
+    entryZone: { low: 139.5, high: 141.2 }, invalidationLevel: 132.4, suggestedStop: 131.8,
+    SETUP_SCORE: 74, EXECUTION_SCORE: 70, RISK_REWARD_SCORE: 64, MARKET_REGIME_SCORE: 61, FINAL_CONFIDENCE: 82,
+    TAKE_PROFIT_LEVELS: [{ label: 'TP1', level: 152 }, { label: 'TP2', level: 160 }, { label: 'TP3', level: 172 }],
+    tpZonesExist: true, executionDataMissing: [], stale: false, ...over,
   };
 }
 
