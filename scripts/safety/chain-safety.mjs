@@ -5,6 +5,10 @@
 //   - never crashes on missing keys/contracts
 //   - caches chain API reads to reduce rate-limit pressure
 //   - every result carries a machine-readable safetyReason explaining WHY
+//   - strict chain-only model: a CEX/futures listing with no on-chain contract
+//     context stays UNKNOWN (reason CEX_ONLY_NO_CONTRACT_CONTEXT). Telegram
+//     therefore stays blocked for it - we do NOT treat a Binance listing as
+//     chain-SAFE.
 
 import { resolveTokenMetadata, METADATA_REASONS } from './token-metadata.mjs';
 
@@ -18,6 +22,7 @@ export const SAFETY_REASONS = Object.freeze({
   MISSING_CONTRACT_METADATA: 'MISSING_CONTRACT_METADATA',
   AMBIGUOUS_CONTRACT_MAPPING: 'AMBIGUOUS_CONTRACT_MAPPING',
   METADATA_FETCH_FAILED: 'METADATA_FETCH_FAILED',
+  CEX_ONLY_NO_CONTRACT_CONTEXT: 'CEX_ONLY_NO_CONTRACT_CONTEXT',
   VERIFICATION_UNAVAILABLE: 'VERIFICATION_UNAVAILABLE',
   UNVERIFIED_CONTRACT: 'UNVERIFIED_CONTRACT',
   HOLDER_CONCENTRATION: 'HOLDER_CONCENTRATION',
@@ -50,6 +55,15 @@ function normChain(chain) {
   return c || null;
 }
 
+function reasonText(code) {
+  return {
+    CEX_ONLY_NO_CONTRACT_CONTEXT: 'CEX-listed, no on-chain contract context',
+    AMBIGUOUS_CONTRACT_MAPPING: 'ambiguous chain/contract mapping',
+    MISSING_CONTRACT_METADATA: 'missing contract metadata',
+    METADATA_FETCH_FAILED: 'metadata provider failed',
+  }[code] || 'missing chain safety data';
+}
+
 function emptyResult({ chain = null, contractAddress = null, status = 'UNKNOWN', score = 35, reasons = [], safetyReason = SAFETY_REASONS.MISSING_CONTRACT_METADATA, source = 'chain-safety' } = {}) {
   return {
     safetyStatus: status,
@@ -60,7 +74,7 @@ function emptyResult({ chain = null, contractAddress = null, status = 'UNKNOWN',
     contractVerified: null,
     chain: normChain(chain),
     contractAddress: contractAddress || null,
-    reasons: reasons.length ? reasons : ['missing chain safety data'],
+    reasons: reasons.length ? reasons : [reasonText(safetyReason)],
     checkedAt: nowIso(),
     source,
   };
@@ -85,18 +99,20 @@ export function evaluateKnownSafety(input = {}) {
   if (!chain || !contractAddress) {
     let safetyReason = SAFETY_REASONS.MISSING_CONTRACT_METADATA;
     if (input.ambiguous === true) safetyReason = SAFETY_REASONS.AMBIGUOUS_CONTRACT_MAPPING;
+    else if (input.cexOnly === true) safetyReason = SAFETY_REASONS.CEX_ONLY_NO_CONTRACT_CONTEXT;
     else if (input.metadataReason && META_REASON_SET.has(input.metadataReason)) safetyReason = input.metadataReason;
-    if (!chain) reasons.push('missing chain');
-    if (!contractAddress) reasons.push('missing contract address');
-    if (input.ambiguous === true) reasons.push('ambiguous chain/contract mapping');
+    if (safetyReason === SAFETY_REASONS.CEX_ONLY_NO_CONTRACT_CONTEXT) reasons.push(reasonText(safetyReason));
+    else {
+      if (!chain) reasons.push('missing chain');
+      if (!contractAddress) reasons.push('missing contract address');
+      if (input.ambiguous === true) reasons.push('ambiguous chain/contract mapping');
+    }
     return emptyResult({ chain, contractAddress, status: 'UNKNOWN', score: 35, reasons, safetyReason, source: input.source || 'chain-safety' });
   }
 
   const allowlisted = input.allowlisted === true;
   let safetyReason = allowlisted ? SAFETY_REASONS.ALLOWLISTED : SAFETY_REASONS.RESOLVED;
 
-  // Holder concentration: only downgrades when we actually have data; for a
-  // non-allowlisted token, unknown holders is NOT provably safe.
   const holder = classifyHolderConcentration(input.topHolderPercent ?? input.topHolderPct);
   if (holder.status !== 'UNKNOWN') {
     reasons.push(holder.reason);
@@ -159,7 +175,7 @@ export function evaluateKnownSafety(input = {}) {
 }
 
 // One-stop entry point: resolve metadata for a market row, then classify.
-// NEVER fakes SAFE - missing/ambiguous metadata stays UNKNOWN with a reason.
+// NEVER fakes SAFE - missing/ambiguous/CEX-only metadata stays UNKNOWN.
 export function classifyMarketSafety(market = {}, opts = {}) {
   const meta = resolveTokenMetadata(market, opts);
   const safety = evaluateKnownSafety({
@@ -168,6 +184,7 @@ export function classifyMarketSafety(market = {}, opts = {}) {
     contractVerified: market.contractVerified != null ? market.contractVerified : meta.verified,
     allowlisted: meta.allowlisted,
     ambiguous: meta.ambiguous,
+    cexOnly: meta.cexOnly,
     metadataReason: meta.reason,
     topHolderPercent: market.topHolderPercent ?? market.topHolderPct,
     ownerPrivilegeRisk: market.ownerPrivilegeRisk,
@@ -193,8 +210,6 @@ function parseBscScanSource(source) {
   if (!source || typeof source !== 'object') return null;
   const result = Array.isArray(source.result) ? source.result[0] : null;
   if (!result || typeof result !== 'object') return null;
-  // A contract is "verified" only if BscScan returns actual source code, or an
-  // ABI that is both non-empty AND not the explicit "not verified" sentinel.
   const sourceCode = String(result.SourceCode || '').trim();
   const abi = String(result.ABI || '').trim();
   const hasSourceCode = sourceCode.length > 0;
@@ -248,21 +263,46 @@ export async function checkBscScanTokenSafety({ contractAddress, chain = 'bsc', 
 
 export function buildSafetyDiagnostics(results = []) {
   const rows = Array.isArray(results) ? results.filter(Boolean) : [];
+  const total = rows.length;
   const countStatus = (status) => rows.filter((r) => r.safetyStatus === status).length;
   const countReason = (reason) => rows.filter((r) => r.safetyReason === reason).length;
+  const classified = rows.filter((r) => r.safetyStatus && r.safetyStatus !== 'UNKNOWN').length;
+
+  const sourceBreakdown = { directRowMetadata: 0, curatedAllowlist: 0, provider: 0, missing: 0, ambiguous: 0, cexOnly: 0 };
+  for (const r of rows) {
+    switch (r.safetyReason) {
+      case SAFETY_REASONS.ALLOWLISTED: sourceBreakdown.curatedAllowlist += 1; break;
+      case SAFETY_REASONS.RESOLVED:
+        if (r.metadataSource === 'market-row') sourceBreakdown.directRowMetadata += 1; else sourceBreakdown.provider += 1; break;
+      case SAFETY_REASONS.METADATA_FETCH_FAILED: sourceBreakdown.provider += 1; break;
+      case SAFETY_REASONS.AMBIGUOUS_CONTRACT_MAPPING: sourceBreakdown.ambiguous += 1; break;
+      case SAFETY_REASONS.CEX_ONLY_NO_CONTRACT_CONTEXT: sourceBreakdown.cexOnly += 1; break;
+      default: sourceBreakdown.missing += 1; break;
+    }
+  }
+
+  const symOf = (r) => r.symbol || null;
+  const topMissingSymbols = rows.filter((r) => r.safetyReason === SAFETY_REASONS.MISSING_CONTRACT_METADATA).map(symOf).filter(Boolean).slice(0, 12);
+  const topAmbiguousSymbols = rows.filter((r) => r.safetyReason === SAFETY_REASONS.AMBIGUOUS_CONTRACT_MAPPING).map(symOf).filter(Boolean).slice(0, 12);
+
   return {
-    safetyRowsChecked: rows.length,
+    safetyRowsChecked: total,
+    safetyCoveragePct: total ? Math.round((classified / total) * 100) : 0,
     safetySafeCount: countStatus('SAFE'),
     safetyCautionCount: countStatus('CAUTION'),
     safetyDangerCount: countStatus('DANGER'),
     safetyUnknownCount: countStatus('UNKNOWN'),
-    // legacy field names kept for back-compat with existing consumers
+    // legacy field names kept for back-compat
     safetyRowsUnknown: countStatus('UNKNOWN'),
     safetyRowsCaution: countStatus('CAUTION'),
     safetyRowsDanger: countStatus('DANGER'),
     missingContractMetadataCount: countReason(SAFETY_REASONS.MISSING_CONTRACT_METADATA),
     ambiguousContractMappingCount: countReason(SAFETY_REASONS.AMBIGUOUS_CONTRACT_MAPPING),
+    cexOnlyNoContextCount: countReason(SAFETY_REASONS.CEX_ONLY_NO_CONTRACT_CONTEXT),
     safetyProviderFailedCount: countReason(SAFETY_REASONS.METADATA_FETCH_FAILED),
+    resolverSourceBreakdown: sourceBreakdown,
+    topMissingSymbols,
+    topAmbiguousSymbols,
     chainApiAvailable: rows.some((r) => r.source && !String(r.source).includes('unavailable') && r.safetyStatus !== 'UNKNOWN'),
     lastSafetyCheckAt: rows.map((r) => r.checkedAt).filter(Boolean).sort().at(-1) || null,
     sampleSafetyReasons: rows.slice(0, 12).map((r) => ({

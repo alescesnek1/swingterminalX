@@ -1592,28 +1592,31 @@ function renderList() {
     if (!label || (label.toUpperCase() === 'NEUT' && !(Number(s && s.score) > 0))) return emptySignal;
     return `<span class="bdg ${_esc(s.cls || 'neut')}">${_esc(label)}</span>`;
   };
-  const _SAFE_ALLOW = new Set(['BTC','ETH','BNB','SOL','ADA','AVAX','DOT','TRX','XRP','LTC','ATOM','NEAR','APT','SUI','INJ','USDC','USDT','LINK','UNI','AAVE','MKR','LDO','CRV','COMP','SNX','ARB']);
+  const _SAFE_ALLOW = new Set(['BTC','ETH','BNB','SOL','ADA','AVAX','DOT','TRX','XRP','LTC','ATOM','NEAR','APT','SUI','INJ','DOGE','BCH','ETC','XLM','XMR','XTZ','ALGO','HBAR','ICP','FIL','EGLD','FLOW','KAS','TON','RUNE','STX','KAVA','MINA','ROSE','ZIL','CELO','EOS','NEO','VET','QTUM','WAVES','OSMO','KSM','SEI','TIA','DASH','ZEC','RVN','ONE','USDC','USDT','LINK','UNI','AAVE','MKR','LDO','CRV','COMP','SNX','ARB']);
   const _SAFE_AMBIG = new Set(['BTCB','WETH','WBTC','MULTI','BRIDGE','O3','BIT','GAS','CAT','GMT','AGI','KEY','FT']);
-  const _SAFE_TXT = { ALLOWLISTED:'allowlisted asset', RESOLVED:'verified metadata', MISSING_CONTRACT_METADATA:'missing contract', AMBIGUOUS_CONTRACT_MAPPING:'ambiguous chain', METADATA_FETCH_FAILED:'provider failed', VERIFICATION_UNAVAILABLE:'verification unavailable', UNVERIFIED_CONTRACT:'unverified contract', HOLDER_CONCENTRATION:'holder concentration', OWNER_PRIVILEGE_RISK:'owner/admin risk', LIQUIDITY_RISK:'liquidity risk', CRITICAL_EVENT_RISK:'exploit/delisting risk' };
+  const _SAFE_CEXQ = ['USDT','USDC','BUSD','FDUSD','TUSD','USD','BTC','ETH','BNB'];
+  const _SAFE_TXT = { ALLOWLISTED:'curated verified asset', RESOLVED:'verified metadata', MISSING_CONTRACT_METADATA:'missing contract metadata', AMBIGUOUS_CONTRACT_MAPPING:'ambiguous contract mapping', METADATA_FETCH_FAILED:'provider failed', CEX_ONLY_NO_CONTRACT_CONTEXT:'CEX-only, no contract context', VERIFICATION_UNAVAILABLE:'verification unavailable', UNVERIFIED_CONTRACT:'unverified contract', HOLDER_CONCENTRATION:'risky contract', OWNER_PRIVILEGE_RISK:'risky contract', LIQUIDITY_RISK:'liquidity risk', CRITICAL_EVENT_RISK:'risky contract' };
   const _safeFriendly = (c) => _SAFE_TXT[c] || String(c||'').toLowerCase().replace(/_/g,' ') || 'not checked';
-  const _safeBase = (row) => { const raw=String(row.baseAsset||row.symbol||row.pair||row.base||'').toUpperCase().replace(/[^A-Z0-9]/g,''); for(const q of ['USDT','USDC','BUSD','FDUSD','TUSD','BTC','ETH','BNB']){ if(raw.length>q.length&&raw.endsWith(q)) return raw.slice(0,-q.length);} return raw; };
+  const _safeBaseInfo = (row) => { const raw=String(row.baseAsset||row.symbol||row.pair||row.base||'').toUpperCase().replace(/[^A-Z0-9]/g,''); for(const q of _SAFE_CEXQ){ if(raw.length>q.length&&raw.endsWith(q)) return {base:raw.slice(0,-q.length),cex:true}; } return {base:raw,cex:!!row.baseAsset}; };
   const safetyOf = (row) => {
     const status = String(row.safetyStatus || row.safety_status || '').toUpperCase();
+    const chain = row.chain || row.network || row.contract_chain || null;
+    const contract = row.contractAddress || row.contract_address || row.token_address || null;
     if (['SAFE','CAUTION','DANGER','UNKNOWN'].includes(status)) {
       const code = row.safetyReason || row.safety_reason || (Array.isArray(row.safetyReasons) ? row.safetyReasons[0] : '');
-      return { status, reason: _safeFriendly(code) };
+      return { status, reason: _safeFriendly(code), source: row.safetySource || row.safety_source || (status==='SAFE'?'curated-allowlist':'server'), chain, contract };
     }
-    if (row.contractAddress || row.contract_address || row.token_address) {
-      return (row.chain || row.network || row.contract_chain) ? { status:'UNKNOWN', reason:'chain safety not checked' } : { status:'UNKNOWN', reason:'missing chain' };
-    }
-    const base = _safeBase(row);
-    if (_SAFE_ALLOW.has(base)) return { status:'SAFE', reason:'allowlisted asset' };
-    if (_SAFE_AMBIG.has(base)) return { status:'UNKNOWN', reason:'ambiguous chain' };
-    return { status:'UNKNOWN', reason:'missing contract' };
+    if (contract) return { status:'UNKNOWN', reason: chain ? 'chain safety not checked' : _safeFriendly('MISSING_CONTRACT_METADATA'), source:'market-row', chain, contract };
+    const bi = _safeBaseInfo(row);
+    if (_SAFE_ALLOW.has(bi.base)) return { status:'SAFE', reason:_safeFriendly('ALLOWLISTED'), source:'curated-allowlist', chain:null, contract:null };
+    if (_SAFE_AMBIG.has(bi.base)) return { status:'UNKNOWN', reason:_safeFriendly('AMBIGUOUS_CONTRACT_MAPPING'), source:'none', chain:null, contract:null };
+    if (bi.cex) return { status:'UNKNOWN', reason:_safeFriendly('CEX_ONLY_NO_CONTRACT_CONTEXT'), source:'cex-listing', chain:null, contract:null };
+    return { status:'UNKNOWN', reason:_safeFriendly('MISSING_CONTRACT_METADATA'), source:'none', chain:null, contract:null };
   };
   const safetyMarkup = (row) => {
     const s = safetyOf(row || {});
-    return `<span class="safety-pill safety-${_esc(s.status.toLowerCase())}" title="${_esc(s.status + ' - ' + s.reason)}">${_esc(s.status)}</span>`;
+    const extra = [s.source?('src:'+s.source):'', s.chain?('chain:'+s.chain):'', s.contract?('contract:'+s.contract):''].filter(Boolean).join(' | ');
+    return `<span class="safety-pill safety-${_esc(s.status.toLowerCase())}" title="${_esc(s.status + ' - ' + s.reason + (extra?(' | '+extra):''))}">${_esc(s.status)}</span>`;
   };
   // V7.4.5 — defensive timeframe extractor. The upstream payload
   // shape varies depending on which build branch in markets.js
@@ -1789,25 +1792,27 @@ function pickCoin(id) {
   const validity = getSetupValidity(d);
   const binance = getBinanceLink(d);
   const detailSafety = (() => {
-    const _ALLOW = new Set(['BTC','ETH','BNB','SOL','ADA','AVAX','DOT','TRX','XRP','LTC','ATOM','NEAR','APT','SUI','INJ','USDC','USDT','LINK','UNI','AAVE','MKR','LDO','CRV','COMP','SNX','ARB']);
+    const _ALLOW = new Set(['BTC','ETH','BNB','SOL','ADA','AVAX','DOT','TRX','XRP','LTC','ATOM','NEAR','APT','SUI','INJ','DOGE','BCH','ETC','XLM','XMR','XTZ','ALGO','HBAR','ICP','FIL','EGLD','FLOW','KAS','TON','RUNE','STX','KAVA','MINA','ROSE','ZIL','CELO','EOS','NEO','VET','QTUM','WAVES','OSMO','KSM','SEI','TIA','DASH','ZEC','RVN','ONE','USDC','USDT','LINK','UNI','AAVE','MKR','LDO','CRV','COMP','SNX','ARB']);
     const _AMBIG = new Set(['BTCB','WETH','WBTC','MULTI','BRIDGE','O3','BIT','GAS','CAT','GMT','AGI','KEY','FT']);
-    const _TXT = {ALLOWLISTED:'allowlisted asset',RESOLVED:'verified metadata',MISSING_CONTRACT_METADATA:'missing contract',AMBIGUOUS_CONTRACT_MAPPING:'ambiguous chain',METADATA_FETCH_FAILED:'provider failed',VERIFICATION_UNAVAILABLE:'verification unavailable',UNVERIFIED_CONTRACT:'unverified contract',HOLDER_CONCENTRATION:'holder concentration',OWNER_PRIVILEGE_RISK:'owner/admin risk',LIQUIDITY_RISK:'liquidity risk',CRITICAL_EVENT_RISK:'exploit/delisting risk'};
+    const _CEXQ = ['USDT','USDC','BUSD','FDUSD','TUSD','USD','BTC','ETH','BNB'];
+    const _TXT = { ALLOWLISTED:'curated verified asset', RESOLVED:'verified metadata', MISSING_CONTRACT_METADATA:'missing contract metadata', AMBIGUOUS_CONTRACT_MAPPING:'ambiguous contract mapping', METADATA_FETCH_FAILED:'provider failed', CEX_ONLY_NO_CONTRACT_CONTEXT:'CEX-only, no contract context', VERIFICATION_UNAVAILABLE:'verification unavailable', UNVERIFIED_CONTRACT:'unverified contract', HOLDER_CONCENTRATION:'risky contract', OWNER_PRIVILEGE_RISK:'risky contract', LIQUIDITY_RISK:'liquidity risk', CRITICAL_EVENT_RISK:'risky contract' };
     const fr=(c)=>_TXT[c]||String(c||'').toLowerCase().replace(/_/g,' ')||'not checked';
     const status = String(d.safetyStatus || d.safety_status || '').toUpperCase();
+    const chain = d.chain || d.network || d.contract_chain || null;
+    const contract = d.contractAddress || d.contract_address || d.token_address || null;
     if (['SAFE','CAUTION','DANGER','UNKNOWN'].includes(status)) {
       const code = d.safetyReason || d.safety_reason || (Array.isArray(d.safetyReasons) ? d.safetyReasons[0] : '');
-      return { status, reason: fr(code) };
+      return { status, reason: fr(code), source: d.safetySource || d.safety_source || (status==='SAFE'?'curated-allowlist':'server'), chain, contract };
     }
-    if (d.contractAddress || d.contract_address || d.token_address) {
-      return (d.chain || d.network || d.contract_chain) ? { status:'UNKNOWN', reason:'chain safety not checked' } : { status:'UNKNOWN', reason:'missing chain' };
-    }
+    if (contract) return { status:'UNKNOWN', reason: chain ? 'chain safety not checked' : fr('MISSING_CONTRACT_METADATA'), source:'market-row', chain, contract };
     const raw=String(d.baseAsset||d.symbol||d.id||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
-    let base=raw; for(const q of ['USDT','USDC','BUSD','FDUSD','TUSD','BTC','ETH','BNB']){ if(raw.length>q.length&&raw.endsWith(q)){base=raw.slice(0,-q.length);break;} }
-    if (_ALLOW.has(base)) return { status:'SAFE', reason:'allowlisted asset' };
-    if (_AMBIG.has(base)) return { status:'UNKNOWN', reason:'ambiguous chain' };
-    return { status:'UNKNOWN', reason:'missing contract' };
+    let base=raw, cex=!!d.baseAsset; for(const q of _CEXQ){ if(raw.length>q.length&&raw.endsWith(q)){base=raw.slice(0,-q.length);cex=true;break;} }
+    if (_ALLOW.has(base)) return { status:'SAFE', reason:fr('ALLOWLISTED'), source:'curated-allowlist', chain:null, contract:null };
+    if (_AMBIG.has(base)) return { status:'UNKNOWN', reason:fr('AMBIGUOUS_CONTRACT_MAPPING'), source:'none', chain:null, contract:null };
+    if (cex) return { status:'UNKNOWN', reason:fr('CEX_ONLY_NO_CONTRACT_CONTEXT'), source:'cex-listing', chain:null, contract:null };
+    return { status:'UNKNOWN', reason:fr('MISSING_CONTRACT_METADATA'), source:'none', chain:null, contract:null };
   })();
-  const detailSafetyHtml = `<span class="safety-pill safety-${_esc(detailSafety.status.toLowerCase())}" title="${_esc(detailSafety.status + ' - ' + detailSafety.reason)}">${_esc(detailSafety.status)}</span>`;
+  const detailSafetyHtml = `<span class="safety-pill safety-${_esc(detailSafety.status.toLowerCase())}" title="${_esc(detailSafety.status + ' - ' + detailSafety.reason + (detailSafety.source?(' | src:'+detailSafety.source):'') + (detailSafety.chain?(' | chain:'+detailSafety.chain):'') + (detailSafety.contract?(' | contract:'+detailSafety.contract):''))}">${_esc(detailSafety.status)}</span>`;
 
   // V6.8 Sprint 1 (FIX-3): sym, d.name, d.id are upstream strings.
   // textContent on dlbl is already safe; every other interpolation
