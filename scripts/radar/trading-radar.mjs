@@ -7,7 +7,7 @@
 // It consumes public market snapshots plus optional microstructure/position context
 // and returns advisory candidates and exit guidance only.
 
-import { buildSafetyDiagnostics, evaluateKnownSafety } from '../safety/chain-safety.mjs';
+import { buildSafetyDiagnostics, evaluateKnownSafety, classifyMarketSafety } from '../safety/chain-safety.mjs';
 
 const WEIRD_BASE_RE = /(UP|DOWN|BULL|BEAR)$|\d+(L|S)$/;
 const QUOTES = new Set(['USDC', 'USDT']);
@@ -1174,23 +1174,10 @@ export function evaluateTradingRadar({
       for (const miss of missingForMarket(m)) allMissing.add(miss);
       const stageInfo = classifyRadarStage(m, regime);
       const levels = buildPriceLevels(m, stageInfo);
-      const safety = evaluateKnownSafety({
-        symbol: m.symbol,
-        chain: m.chain || m.network || m.contractChain,
-        contractAddress: m.contractAddress || m.contract || m.tokenAddress,
-        topHolderPercent: m.topHolderPercent ?? m.topHolderPct,
-        contractVerified: m.contractVerified,
-        ownerPrivilegeRisk: m.ownerPrivilegeRisk,
-        mintRisk: m.mintRisk,
-        pauseRisk: m.pauseRisk,
-        liquidityRisk: m.liquidityRisk,
-        exploitRisk: m.exploitRisk,
-        hackRisk: m.hackRisk,
-        delistingRisk: m.delistingRisk,
-        unlockRisk: m.unlockRisk,
-        newsRisk: m.newsRisk,
-        source: m.safetySource,
-      });
+      // Resolve token metadata (curated allowlist / row context / optional
+      // provider) then classify honestly. Missing/ambiguous metadata stays
+      // UNKNOWN with a specific safetyReason - never faked SAFE.
+      const safety = classifyMarketSafety(m);
       safety.symbol = m.symbol;
       safetyResults.push(safety);
       const v1 = buildRadarV1Output(m, regime, stageInfo, levels, safety);
@@ -1230,7 +1217,11 @@ export function evaluateTradingRadar({
         safety,
         safetyStatus: safety.safetyStatus,
         safetyScore: safety.safetyScore,
+        safetyReason: safety.safetyReason,
         safetyReasons: safety.reasons,
+        chain: safety.chain,
+        contractAddress: safety.contractAddress,
+        safetySource: safety.metadataSource || safety.source,
         ...v1,
         reasons: stageInfo.reasons,
         riskFlags: compactReasons([

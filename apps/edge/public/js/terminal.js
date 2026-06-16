@@ -1592,18 +1592,28 @@ function renderList() {
     if (!label || (label.toUpperCase() === 'NEUT' && !(Number(s && s.score) > 0))) return emptySignal;
     return `<span class="bdg ${_esc(s.cls || 'neut')}">${_esc(label)}</span>`;
   };
+  const _SAFE_ALLOW = new Set(['BTC','ETH','BNB','SOL','ADA','AVAX','DOT','TRX','XRP','LTC','ATOM','NEAR','APT','SUI','INJ','USDC','USDT','LINK','UNI','AAVE','MKR','LDO','CRV','COMP','SNX','ARB']);
+  const _SAFE_AMBIG = new Set(['BTCB','WETH','WBTC','MULTI','BRIDGE','O3','BIT','GAS','CAT','GMT','AGI','KEY','FT']);
+  const _SAFE_TXT = { ALLOWLISTED:'allowlisted asset', RESOLVED:'verified metadata', MISSING_CONTRACT_METADATA:'missing contract', AMBIGUOUS_CONTRACT_MAPPING:'ambiguous chain', METADATA_FETCH_FAILED:'provider failed', VERIFICATION_UNAVAILABLE:'verification unavailable', UNVERIFIED_CONTRACT:'unverified contract', HOLDER_CONCENTRATION:'holder concentration', OWNER_PRIVILEGE_RISK:'owner/admin risk', LIQUIDITY_RISK:'liquidity risk', CRITICAL_EVENT_RISK:'exploit/delisting risk' };
+  const _safeFriendly = (c) => _SAFE_TXT[c] || String(c||'').toLowerCase().replace(/_/g,' ') || 'not checked';
+  const _safeBase = (row) => { const raw=String(row.baseAsset||row.symbol||row.pair||row.base||'').toUpperCase().replace(/[^A-Z0-9]/g,''); for(const q of ['USDT','USDC','BUSD','FDUSD','TUSD','BTC','ETH','BNB']){ if(raw.length>q.length&&raw.endsWith(q)) return raw.slice(0,-q.length);} return raw; };
   const safetyOf = (row) => {
     const status = String(row.safetyStatus || row.safety_status || '').toUpperCase();
     if (['SAFE','CAUTION','DANGER','UNKNOWN'].includes(status)) {
-      return { status, reason: row.safetyReason || row.safety_reason || (Array.isArray(row.safetyReasons) ? row.safetyReasons[0] : '') || status };
+      const code = row.safetyReason || row.safety_reason || (Array.isArray(row.safetyReasons) ? row.safetyReasons[0] : '');
+      return { status, reason: _safeFriendly(code) };
     }
-    if (!(row.contractAddress || row.contract_address || row.token_address)) return { status: 'UNKNOWN', reason: 'missing contract address' };
-    if (!(row.chain || row.network || row.contract_chain)) return { status: 'UNKNOWN', reason: 'missing chain data' };
-    return { status: 'UNKNOWN', reason: 'chain safety not checked' };
+    if (row.contractAddress || row.contract_address || row.token_address) {
+      return (row.chain || row.network || row.contract_chain) ? { status:'UNKNOWN', reason:'chain safety not checked' } : { status:'UNKNOWN', reason:'missing chain' };
+    }
+    const base = _safeBase(row);
+    if (_SAFE_ALLOW.has(base)) return { status:'SAFE', reason:'allowlisted asset' };
+    if (_SAFE_AMBIG.has(base)) return { status:'UNKNOWN', reason:'ambiguous chain' };
+    return { status:'UNKNOWN', reason:'missing contract' };
   };
   const safetyMarkup = (row) => {
     const s = safetyOf(row || {});
-    return `<span class="safety-pill safety-${_esc(s.status.toLowerCase())}" title="${_esc(s.reason)}">${_esc(s.status)}</span>`;
+    return `<span class="safety-pill safety-${_esc(s.status.toLowerCase())}" title="${_esc(s.status + ' - ' + s.reason)}">${_esc(s.status)}</span>`;
   };
   // V7.4.5 — defensive timeframe extractor. The upstream payload
   // shape varies depending on which build branch in markets.js
@@ -1779,15 +1789,25 @@ function pickCoin(id) {
   const validity = getSetupValidity(d);
   const binance = getBinanceLink(d);
   const detailSafety = (() => {
+    const _ALLOW = new Set(['BTC','ETH','BNB','SOL','ADA','AVAX','DOT','TRX','XRP','LTC','ATOM','NEAR','APT','SUI','INJ','USDC','USDT','LINK','UNI','AAVE','MKR','LDO','CRV','COMP','SNX','ARB']);
+    const _AMBIG = new Set(['BTCB','WETH','WBTC','MULTI','BRIDGE','O3','BIT','GAS','CAT','GMT','AGI','KEY','FT']);
+    const _TXT = {ALLOWLISTED:'allowlisted asset',RESOLVED:'verified metadata',MISSING_CONTRACT_METADATA:'missing contract',AMBIGUOUS_CONTRACT_MAPPING:'ambiguous chain',METADATA_FETCH_FAILED:'provider failed',VERIFICATION_UNAVAILABLE:'verification unavailable',UNVERIFIED_CONTRACT:'unverified contract',HOLDER_CONCENTRATION:'holder concentration',OWNER_PRIVILEGE_RISK:'owner/admin risk',LIQUIDITY_RISK:'liquidity risk',CRITICAL_EVENT_RISK:'exploit/delisting risk'};
+    const fr=(c)=>_TXT[c]||String(c||'').toLowerCase().replace(/_/g,' ')||'not checked';
     const status = String(d.safetyStatus || d.safety_status || '').toUpperCase();
     if (['SAFE','CAUTION','DANGER','UNKNOWN'].includes(status)) {
-      return { status, reason: d.safetyReason || d.safety_reason || (Array.isArray(d.safetyReasons) ? d.safetyReasons[0] : '') || status };
+      const code = d.safetyReason || d.safety_reason || (Array.isArray(d.safetyReasons) ? d.safetyReasons[0] : '');
+      return { status, reason: fr(code) };
     }
-    if (!(d.contractAddress || d.contract_address || d.token_address)) return { status: 'UNKNOWN', reason: 'missing contract address' };
-    if (!(d.chain || d.network || d.contract_chain)) return { status: 'UNKNOWN', reason: 'missing chain data' };
-    return { status: 'UNKNOWN', reason: 'chain safety not checked' };
+    if (d.contractAddress || d.contract_address || d.token_address) {
+      return (d.chain || d.network || d.contract_chain) ? { status:'UNKNOWN', reason:'chain safety not checked' } : { status:'UNKNOWN', reason:'missing chain' };
+    }
+    const raw=String(d.baseAsset||d.symbol||d.id||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+    let base=raw; for(const q of ['USDT','USDC','BUSD','FDUSD','TUSD','BTC','ETH','BNB']){ if(raw.length>q.length&&raw.endsWith(q)){base=raw.slice(0,-q.length);break;} }
+    if (_ALLOW.has(base)) return { status:'SAFE', reason:'allowlisted asset' };
+    if (_AMBIG.has(base)) return { status:'UNKNOWN', reason:'ambiguous chain' };
+    return { status:'UNKNOWN', reason:'missing contract' };
   })();
-  const detailSafetyHtml = `<span class="safety-pill safety-${_esc(detailSafety.status.toLowerCase())}" title="${_esc(detailSafety.reason)}">${_esc(detailSafety.status)}</span>`;
+  const detailSafetyHtml = `<span class="safety-pill safety-${_esc(detailSafety.status.toLowerCase())}" title="${_esc(detailSafety.status + ' - ' + detailSafety.reason)}">${_esc(detailSafety.status)}</span>`;
 
   // V6.8 Sprint 1 (FIX-3): sym, d.name, d.id are upstream strings.
   // textContent on dlbl is already safe; every other interpolation
@@ -3906,7 +3926,7 @@ function renderCockpit() {
     const suggest = (r.suggestedStop != null && t.stopLoss != null && Number(r.suggestedStop) !== Number(t.stopLoss)) ? `<button type="button" class="cp-movestop" data-cp-movestop="${_esc(t.id)}" data-cp-newstop="${_esc(r.suggestedStop)}">move stop → ${_esc(_cpFmt(r.suggestedStop))}</button>` : '';
     return `<div class="cockpit-card" data-id="${_esc(t.id)}" data-mode="${_esc(r.mode)}">
       <div class="cockpit-main">
-        <div><div class="cockpit-symbol">${_esc(t.symbol)} <span class="safety-pill ${safeCls}" title="safety">${_esc(r.safetyStatus)}</span>${t.fromRadar ? '<span class="cockpit-fromradar" title="imported from RADAR">RADAR</span>' : ''}</div>
+        <div><div class="cockpit-symbol">${_esc(t.symbol)} <span class="safety-pill ${safeCls}" title="${_esc('safety: ' + (r.safetyReason || r.safetyStatus || 'UNKNOWN'))}">${_esc(r.safetyStatus)}</span>${String(r.safetyStatus||'UNKNOWN')!=='SAFE' ? '<span class="cockpit-tg-blocked" title="Only SAFE setups can alert">Telegram blocked: safety is not SAFE</span>' : ''}${t.fromRadar ? '<span class="cockpit-fromradar" title="imported from RADAR">RADAR</span>' : ''}</div>
           <div class="cockpit-meta">${_esc(t.venue || 'Binance')} · ${_esc(t.entryType || 'manual')} · ${_esc(_cpAge(t.entryTime))}${r.stale ? ' · <span class="cockpit-stale">stale</span>' : ''}</div></div>
         <div class="cockpit-pnl ${pnlCls}">${pnlMain}${realLine}</div>
         <div class="cockpit-grid">
@@ -6929,8 +6949,13 @@ function _renderTradingRadar(radar, esc) {
         <div><span>Risk/Reward</span><b>${esc(_fleetFmtRadarValue(selected.RISK_REWARD_SCORE, 0))}</b></div>
         <div><span>Regime</span><b>${esc(_fleetFmtRadarValue(selected.MARKET_REGIME_SCORE, 0))}</b></div>
         <div><span>Safety</span><b>${esc(selected.safetyStatus || 'UNKNOWN')} ${esc(selected.safetyScore != null ? selected.safetyScore : '')}</b></div>
+        <div><span>Safety reason</span><b>${esc(selected.safetyReason || (selected.safetyReasons||[])[0] || '--')}</b></div>
+        <div><span>Chain</span><b>${esc(selected.chain || '--')}</b></div>
+        <div><span>Contract</span><b>${esc(selected.contractAddress || '--')}</b></div>
+        <div><span>Safety source</span><b>${esc(selected.safetySource || '--')}</b></div>
         <div><span>Size</span><b>${esc(selected.POSITION_SIZE_GUIDANCE || '--')}</b></div>
       </div>
+      <div class="radar-focus-blocked"><span>Telegram</span><b>${String(selected.safetyStatus||'UNKNOWN')==='SAFE' ? 'safety OK (other gates still apply)' : 'blocked: safety is not SAFE'}</b></div>
       <div class="radar-focus-grid">
         <div><span>Passed</span><div class="radar-chip-row">${chipList(groups.passed, 'radar-status-chip radar-status-chip--pass')}</div></div>
         <div><span>Waiting</span><div class="radar-chip-row">${chipList(groups.waiting, 'radar-status-chip radar-status-chip--wait')}</div></div>
