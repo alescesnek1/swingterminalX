@@ -5,6 +5,7 @@ import { computeMarketRegime } from './_market-regime.mjs';
 import { evaluateAutoTrader, evaluateAutoTraderWithFallback, marketsFromSnapshot } from '../../scripts/auto/auto-trader.mjs';
 import { fetchBinancePublicUniverse } from '../../scripts/auto/binance-public.mjs';
 import { evaluateTradingRadar, defaultTradingRadarState } from '../../scripts/radar/trading-radar.mjs';
+import { warmBinanceAlphaMapping } from '../../scripts/safety/token-metadata.mjs';
 
 const DEFAULT_STATE = {
   status: 'safety',
@@ -1977,15 +1978,26 @@ function radarPositionContexts(fleet) {
   return out.filter((p) => p.symbol);
 }
 
-function refreshTradingRadarFromFleet(fleet, nowMs = Date.now()) {
+async function refreshTradingRadarFromFleet(fleet, nowMs = Date.now()) {
   const snapshot = fleet && fleet.autoMarketSnapshot;
   const previousRadar = fleet && fleet.tradingRadar && typeof fleet.tradingRadar === 'object' ? fleet.tradingRadar : null;
   const markets = snapshot ? marketsFromSnapshot(snapshot) : [];
   const radarContext = fleet && fleet.radarContext && Array.isArray(fleet.radarContext.scannerCandidates) ? fleet.radarContext.scannerCandidates : [];
+  let alphaMapping = null;
+  try {
+    alphaMapping = await warmBinanceAlphaMapping({ now: nowMs });
+  } catch (err) {
+    alphaMapping = { ok: false, byLookup: new Map(), listings: [], error: err && err.message ? err.message : String(err) };
+  }
+  const scannerContext = {
+    ...(fleet && fleet.radarContext ? fleet.radarContext : {}),
+    binanceAlphaSymbolMap: alphaMapping && alphaMapping.byLookup instanceof Map ? alphaMapping.byLookup : null,
+    binanceAlphaListings: alphaMapping && Array.isArray(alphaMapping.listings) ? alphaMapping.listings : null,
+  };
   const radar = evaluateTradingRadar({
     markets,
     scannerCandidates: radarContext,
-    scannerContext: fleet && fleet.radarContext ? fleet.radarContext : {},
+    scannerContext,
     source: snapshot && snapshot.source ? snapshot.source : 'no_public_snapshot',
     fetchedAt: snapshot && snapshot.fetchedAt,
     receivedAt: snapshot && snapshot.receivedAt,
@@ -2231,7 +2243,7 @@ async function handleFleetWorker(req, base, body) {
         markets,
         diagnostics,
       };
-      refreshTradingRadarFromFleet(fleet);
+      await refreshTradingRadarFromFleet(fleet);
       // Anti-spam: a snapshot lands every ~60s; only state TRANSITIONS are events.
       if (failed && (!prevFailed || !prev || (prev.diagnostics && prev.diagnostics.error) !== diagnostics.error)) {
         fevent(fleet, 'AUTO_MARKET_SNAPSHOT_FAILED', 'warn',
@@ -2918,7 +2930,7 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
         topRejectedSamples,
         receivedAt: new Date().toISOString()
       };
-      refreshTradingRadarFromFleet(fleet);
+      await refreshTradingRadarFromFleet(fleet);
       return json(req, { ok: true, received: rawCandidates.length, stored: sanitized.length, rejected: rawCandidates.length - sanitized.length, rejectedByReason });
     });
   }
@@ -3083,7 +3095,7 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
     // --- End Opportunistic Tick ---
 
     const tradingRadarView = shouldRefreshTradingRadar(fleet, nowMs)
-      ? refreshTradingRadarFromFleet(fleet, nowMs)
+      ? await refreshTradingRadarFromFleet(fleet, nowMs)
       : (fleet.tradingRadar || defaultTradingRadarState(new Date(nowMs).toISOString()));
 
     return json(req, {

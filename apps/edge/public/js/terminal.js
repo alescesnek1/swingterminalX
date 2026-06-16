@@ -2,13 +2,13 @@ console.log('TERMINAL_X_LOADED');
 // Shared safety display model. Always returns a visible, explainable label so
 // no row ever renders a plain reasonless UNKNOWN.
 function formatSafetyLabel(status, reason, source, chain, contract, basis) {
-  var SHORT = { ALLOWLISTED:'curated asset', RESOLVED:'verified contract', CEX_ONLY_NO_CONTRACT_CONTEXT:'no listing context', AMBIGUOUS_CONTRACT_MAPPING:'ambiguous', MISSING_CONTRACT_METADATA:'missing metadata', METADATA_FETCH_FAILED:'provider failed', PROVIDER_RATE_LIMITED:'provider rate-limited', VERIFICATION_UNAVAILABLE:'unverified contract', UNVERIFIED_CONTRACT:'unverified contract', HOLDER_CONCENTRATION:'risky contract', OWNER_PRIVILEGE_RISK:'risky contract', LIQUIDITY_RISK:'liquidity risk', CRITICAL_EVENT_RISK:'risky contract', BINANCE_LISTED_ACTIVE:'Binance listed', BINANCE_ALPHA_LISTED_ACTIVE:'Binance Alpha listed', BINANCE_ALPHA_NOT_CONFIRMED:'Alpha not confirmed', LOW_LIQUIDITY_LISTING:'low liquidity' };
+  var SHORT = { ALLOWLISTED:'curated asset', RESOLVED:'verified contract', CEX_ONLY_NO_CONTRACT_CONTEXT:'no listing context', AMBIGUOUS_CONTRACT_MAPPING:'ambiguous', MISSING_CONTRACT_METADATA:'missing metadata', METADATA_FETCH_FAILED:'provider failed', PROVIDER_RATE_LIMITED:'provider rate-limited', VERIFICATION_UNAVAILABLE:'unverified contract', UNVERIFIED_CONTRACT:'unverified contract', HOLDER_CONCENTRATION:'risky contract', OWNER_PRIVILEGE_RISK:'risky contract', LIQUIDITY_RISK:'liquidity risk', CRITICAL_EVENT_RISK:'risky contract', BINANCE_LISTED_ACTIVE:'Binance listed', BINANCE_ALPHA_LISTED_ACTIVE:'Binance Alpha listed', BINANCE_ALPHA_NOT_CONFIRMED:'Alpha not confirmed', ALPHA_SYMBOL_MAPPING_MISSING:'Alpha mapping missing', ALPHA_SYMBOL_AMBIGUOUS:'Alpha mapping ambiguous', LOW_LIQUIDITY_LISTING:'low liquidity' };
   var st = String(status || '').toUpperCase();
   if (['SAFE','CAUTION','DANGER','UNKNOWN'].indexOf(st) < 0) st = 'UNKNOWN';
   var src = String(source || '').toLowerCase();
   var bs = String(basis || '').toUpperCase();
   var code = String(reason || '').toUpperCase();
-  var isAlpha = /binance[-_\s]?alpha|alpha[-_\s]?(spot|trade|listing)/.test(src) || bs === 'ALPHA_LISTING' || code === 'BINANCE_ALPHA_LISTED_ACTIVE' || code === 'BINANCE_ALPHA_NOT_CONFIRMED';
+  var isAlpha = /binance[-_\s]?alpha|alpha[-_\s]?(spot|trade|listing)/.test(src) || bs === 'ALPHA_LISTING' || code === 'BINANCE_ALPHA_LISTED_ACTIVE' || code === 'BINANCE_ALPHA_NOT_CONFIRMED' || code === 'ALPHA_SYMBOL_MAPPING_MISSING' || code === 'ALPHA_SYMBOL_AMBIGUOUS';
   var isCex = /cex|scanner|futures|spot|binance/.test(src) || bs === 'CEX_LISTING' || isAlpha;
   if (!code || !SHORT[code]) {
     if (st === 'SAFE') code = bs === 'ALPHA_LISTING' || isAlpha ? 'BINANCE_ALPHA_LISTED_ACTIVE' : bs === 'CEX_LISTING' ? 'BINANCE_LISTED_ACTIVE' : (bs === 'CURATED_ASSET' || /curated|allowlist/.test(src)) ? 'ALLOWLISTED' : 'RESOLVED';
@@ -7010,6 +7010,7 @@ function _renderTradingRadar(radar, esc) {
         <div><span>Listing source</span><b>${esc(selected.listingSource || (selected.listingType === 'BINANCE_ALPHA' ? 'Binance Alpha' : selected.exchange === 'binance' ? 'Binance' : '--'))}</b></div>
         <div><span>Listing type</span><b>${esc(selected.listingType || '--')}</b></div>
         <div><span>Alpha token id</span><b>${esc(selected.alphaTokenId || '--')}</b></div>
+        <div><span>Alpha pair</span><b>${esc(selected.alphaPair || '--')}</b></div>
         <div><span>Size</span><b>${esc(selected.POSITION_SIZE_GUIDANCE || '--')}</b></div>
       </div>
       <div class="radar-focus-blocked"><span>Telegram</span><b>${String(selected.safetyStatus||'UNKNOWN')==='SAFE' ? 'allowed by safety only; ENTRY_READY microstructure gates still apply' : 'blocked: safety is not SAFE'}</b></div>
@@ -7068,6 +7069,9 @@ function _renderTradingRadar(radar, esc) {
     + '<li>Radar Rows Displayed: ' + esc(rowsToRender.length || 0) + '</li>'
     + '<li>Safety: checked ' + esc(diag.safetyRowsChecked || 0) + ', unknown ' + esc(diag.safetyRowsUnknown || 0) + ', caution ' + esc(diag.safetyRowsCaution || 0) + ', danger ' + esc(diag.safetyRowsDanger || 0) + '</li>'
     + '<li>Binance Alpha: calls ' + esc(diag.binanceAlphaProviderCalls || 0) + ', failures ' + esc(diag.binanceAlphaProviderFailures || 0) + ', resolved ' + esc(diag.binanceAlphaResolvedCount || 0) + ', safe ' + esc(diag.binanceAlphaListingSafeCount || 0) + ', unknown ' + esc(diag.alphaListingUnknownCount || 0) + '</li>'
+    + '<li>Alpha mapping: calls ' + esc(diag.alphaMappingProviderCalls || 0) + ', failures ' + esc(diag.alphaMappingProviderFailures || 0) + ', mapped ' + esc(diag.alphaTokenIdMappedCount || 0) + ', missing ' + esc(diag.alphaSymbolMappingMissingCount || 0) + ', ambiguous ' + esc(diag.alphaSymbolAmbiguousCount || 0) + '</li>'
+    + '<li>Alpha mapped examples: ' + esc((diag.alphaMappedExamples || []).join(', ') || 'none') + '</li>'
+    + '<li>Alpha unmapped examples: ' + esc((diag.alphaUnmappedExamples || []).join(', ') || 'none') + '</li>'
     + '<li>Alpha symbols sample: ' + esc((diag.alphaSymbolsSample || []).join(', ') || 'none') + '</li>'
     + '<li>Final safety basis: ' + esc(Object.entries(diag.finalSafetyBasisBreakdown || {}).map(([k, v]) => k + ':' + v).join(', ') || 'none') + '</li>'
     + '<li>Chain API Available: ' + esc(diag.chainApiAvailable ? 'yes' : 'no') + '</li>'

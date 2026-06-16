@@ -1136,6 +1136,7 @@ export function evaluateTradingRadar({
         listingSource: sc.listingSource || sc.source || m.listingSource,
         listingType: sc.listingType || m.listingType,
         alphaTokenId: sc.alphaTokenId || sc.tokenId || m.alphaTokenId,
+        alphaPair: sc.alphaPair || m.alphaPair,
         binanceAlphaListed: sc.binanceAlphaListed === true || m.binanceAlphaListed === true || /binance[-_\s]?alpha|BINANCE_ALPHA/i.test(String(sc.source || sc.exchange || sc.listingType || '')),
         isScannerContext: true,
         change1hPct: m.change1hPct ?? sc.c1,
@@ -1165,6 +1166,7 @@ export function evaluateTradingRadar({
                listingSource: sc.listingSource || sc.source || null,
                listingType: sc.listingType || null,
                alphaTokenId: sc.alphaTokenId || sc.tokenId || null,
+               alphaPair: sc.alphaPair || null,
                binanceAlphaListed: sc.binanceAlphaListed === true || /binance[-_\s]?alpha|BINANCE_ALPHA/i.test(String(sc.source || sc.exchange || sc.listingType || '')),
                isScannerContext: true,
                change1hPct: sc.c1,
@@ -1189,7 +1191,10 @@ export function evaluateTradingRadar({
       // Resolve token metadata (curated allowlist / row context / optional
       // provider) then classify honestly. Missing/ambiguous metadata stays
       // UNKNOWN with a specific safetyReason - never faked SAFE.
-      const safety = classifyMarketSafety(m, { binanceAlphaListings: scannerContext.binanceAlphaListings });
+      const safety = classifyMarketSafety(m, {
+        binanceAlphaListings: scannerContext.binanceAlphaListings,
+        binanceAlphaSymbolMap: scannerContext.binanceAlphaSymbolMap,
+      });
       safety.symbol = m.symbol;
       safetyResults.push(safety);
       const v1 = buildRadarV1Output(m, regime, stageInfo, levels, safety);
@@ -1240,6 +1245,9 @@ export function evaluateTradingRadar({
         listingSource: safety.listingSource,
         listingType: safety.listingType,
         alphaTokenId: safety.alphaTokenId,
+        alphaPair: safety.alphaPair,
+        humanSymbol: safety.humanSymbol,
+        alphaCandidates: safety.alphaCandidates,
         safetyConfidence: safety.confidence,
         chain: safety.chain,
         contractAddress: safety.contractAddress,

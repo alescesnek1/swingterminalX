@@ -7,9 +7,9 @@ import fs from 'node:fs';
 
 import {
   resolveTokenMetadata, resolveBinanceListing, resolveBinanceAlphaListing, resolveCoinGeckoMetadata, resolveGeckoTerminalMetadata,
-  warmChainMetadata, warmBinanceAlphaListings, getMetadataDiagnostics, __clearTokenMetadataCache, METADATA_REASONS, LISTING_STATUS,
+  warmChainMetadata, warmBinanceAlphaListings, warmBinanceAlphaMapping, getMetadataDiagnostics, __clearTokenMetadataCache, METADATA_REASONS, LISTING_STATUS,
 } from '../scripts/safety/token-metadata.mjs';
-import { BINANCE_ALPHA_EXCHANGE_INFO_URL, parseBinanceAlphaExchangeInfo } from '../scripts/safety/binance-alpha-provider.mjs';
+import { BINANCE_ALPHA_EXCHANGE_INFO_URL, BINANCE_ALPHA_TOKEN_LIST_URL, parseBinanceAlphaExchangeInfo, parseBinanceAlphaTokenList, buildBinanceAlphaSymbolMap } from '../scripts/safety/binance-alpha-provider.mjs';
 import { classifyMarketSafety, evaluateKnownSafety, buildSafetyDiagnostics, SAFETY_BASIS, SAFETY_REASONS } from '../scripts/safety/chain-safety.mjs';
 import { evaluateTradingRadar } from '../scripts/radar/trading-radar.mjs';
 import { evaluateConfirmedRadarEntryReady, TELEGRAM_CODES, isTelegramHardDisabled } from '../netlify/functions/cron-alerts.mjs';
@@ -25,6 +25,21 @@ function loadFormatSafetyLabel() {
 const fmt = loadFormatSafetyLabel();
 
 const cgResponse = (list) => ({ ok: true, status: 200, json: async () => list });
+const okJson = (data) => ({ ok: true, status: 200, json: async () => data });
+
+function alphaFixture() {
+  const tokens = parseBinanceAlphaTokenList({ data: [
+    { alphaId: 'ALPHA_105', symbol: 'OPG', name: 'Openverse Game' },
+    { alphaId: 'ALPHA_118', symbol: 'TST', name: 'Test Token' },
+    { alphaId: 'ALPHA_106', symbol: 'LAB', name: 'Lab Token' },
+  ] });
+  const listings = parseBinanceAlphaExchangeInfo({ data: { symbols: [
+    { symbol: 'ALPHA_105USDT', status: 'TRADING', baseAsset: 'ALPHA_105', quoteAsset: 'USDT' },
+    { symbol: 'ALPHA_118USDC', status: 'TRADING', baseAsset: 'ALPHA_118', quoteAsset: 'USDC' },
+    { symbol: 'ALPHA_106USDC', status: 'TRADING', baseAsset: 'ALPHA_106', quoteAsset: 'USDC' },
+  ] } });
+  return buildBinanceAlphaSymbolMap({ tokens, listings });
+}
 
 test('Binance active listing -> listing SAFE, final SAFE, basis CEX_LISTING (chain UNKNOWN)', () => {
   const s = classifyMarketSafety({ symbol: 'HYPEUSDT', status: 'TRADING', quoteVolume24h: 5_000_000 });
@@ -47,6 +62,17 @@ test('Binance Alpha exchange-info fixture resolves OPG/USDC', () => {
   assert.equal(listings[0].alphaTokenId, 'alpha-opg');
   assert.equal(listings[0].source, 'binance-alpha');
   assert.equal(listings[0].listingType, 'BINANCE_ALPHA');
+});
+
+test('Binance Alpha token list fixture maps ALPHA_105 to OPG', () => {
+  const tokens = parseBinanceAlphaTokenList({ data: [
+    { alphaId: 'ALPHA_105', symbol: 'OPG', name: 'Openverse Game', chainId: '56', contractAddress: '0xopg' },
+  ] });
+  assert.equal(BINANCE_ALPHA_TOKEN_LIST_URL, 'https://www.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/cex/alpha/all/token/list');
+  assert.equal(tokens.length, 1);
+  assert.equal(tokens[0].alphaTokenId, 'ALPHA_105');
+  assert.equal(tokens[0].symbol, 'OPG');
+  assert.equal(tokens[0].name, 'Openverse Game');
 });
 
 test('Binance Alpha provider parses live exchange-info bucket shape', () => {
@@ -75,6 +101,76 @@ test('Binance Alpha active listing -> final SAFE label and no chain SAFE', () =>
   assert.equal(s.chainSafetyReason, 'CEX_ONLY_NO_CONTRACT_CONTEXT');
   assert.equal(s.alphaTokenId, 'alpha-opg');
   assert.equal(fmt('SAFE', s.safetyReason, s.safetySource, s.chain, s.contractAddress, s.safetyBasis).labelShort, `SAFE ${MID} Binance Alpha listed`);
+});
+
+test('scanner row OPG/TST resolve through Alpha token-id mapping', () => {
+  const mapping = alphaFixture();
+  for (const symbol of ['OPG', 'TST']) {
+    const s = classifyMarketSafety({ symbol, isScannerContext: true }, { binanceAlphaSymbolMap: mapping.byLookup });
+    assert.equal(s.finalSafetyStatus, 'SAFE');
+    assert.equal(s.listingSafetyStatus, LISTING_STATUS.LISTING_SAFE);
+    assert.equal(s.safetyBasis, SAFETY_BASIS.ALPHA_LISTING);
+    assert.equal(s.safetyReason, 'BINANCE_ALPHA_LISTED_ACTIVE');
+    assert.equal(s.chainSafetyStatus, 'UNKNOWN');
+    assert.equal(s.chainSafetyReason, 'CEX_ONLY_NO_CONTRACT_CONTEXT');
+    assert.ok(s.alphaTokenId.startsWith('ALPHA_'));
+    assert.ok(s.alphaPair.includes('/'));
+  }
+});
+
+test('unmapped Alpha-like scanner symbol remains UNKNOWN with ALPHA_SYMBOL_MAPPING_MISSING', () => {
+  const mapping = alphaFixture();
+  const s = classifyMarketSafety({ symbol: 'NOPE', isScannerContext: true }, { binanceAlphaSymbolMap: mapping.byLookup });
+  assert.equal(s.finalSafetyStatus, 'UNKNOWN');
+  assert.equal(s.listingSafetyStatus, LISTING_STATUS.LISTING_UNKNOWN);
+  assert.equal(s.safetyReason, 'ALPHA_SYMBOL_MAPPING_MISSING');
+  assert.equal(s.chainSafetyStatus, 'UNKNOWN');
+});
+
+test('ambiguous Alpha mapping remains UNKNOWN with ALPHA_SYMBOL_AMBIGUOUS', () => {
+  const tokens = parseBinanceAlphaTokenList({ data: [
+    { alphaId: 'ALPHA_201', symbol: 'DUP', name: 'Dup One' },
+    { alphaId: 'ALPHA_202', symbol: 'DUP', name: 'Dup Two' },
+  ] });
+  const listings = parseBinanceAlphaExchangeInfo({ data: { symbols: [
+    { symbol: 'ALPHA_201USDC', status: 'TRADING', baseAsset: 'ALPHA_201', quoteAsset: 'USDC' },
+    { symbol: 'ALPHA_202USDC', status: 'TRADING', baseAsset: 'ALPHA_202', quoteAsset: 'USDC' },
+  ] } });
+  const mapping = buildBinanceAlphaSymbolMap({ tokens, listings });
+  const s = classifyMarketSafety({ symbol: 'DUP', isScannerContext: true }, { binanceAlphaSymbolMap: mapping.byLookup });
+  assert.equal(s.finalSafetyStatus, 'UNKNOWN');
+  assert.equal(s.safetyReason, 'ALPHA_SYMBOL_AMBIGUOUS');
+  assert.equal(s.alphaCandidates.length, 2);
+});
+
+test('Alpha mapping cache prevents repeated provider calls', async () => {
+  __clearTokenMetadataCache();
+  let calls = 0;
+  const fetchImpl = async (url) => {
+    calls += 1;
+    if (String(url).includes('/alpha/all/token/list')) return okJson({ data: [{ alphaId: 'ALPHA_105', symbol: 'OPG', name: 'Openverse Game' }] });
+    return okJson({ data: { symbols: [{ symbol: 'ALPHA_105USDC', status: 'TRADING', baseAsset: 'ALPHA_105', quoteAsset: 'USDC' }] } });
+  };
+  const a = await warmBinanceAlphaMapping({ fetchImpl, now: 1000 });
+  const b = await warmBinanceAlphaMapping({ fetchImpl, now: 2000 });
+  assert.equal(a.ok, true);
+  assert.equal(b.ok, true);
+  assert.equal(calls, 2, 'two upstream calls total: token list + exchange info, then cache');
+});
+
+test('Alpha mapping provider failure fails soft and RADAR still evaluates', async () => {
+  __clearTokenMetadataCache();
+  const mapping = await warmBinanceAlphaMapping({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }), now: Date.now() });
+  assert.equal(mapping.ok, false);
+  assert.equal(getMetadataDiagnostics().alphaMappingProviderFailures, 1);
+  const r = evaluateTradingRadar({
+    markets: [{ symbol: 'BTCUSDT', baseAsset: 'BTC', quoteAsset: 'USDT', status: 'TRADING', quoteVolume24h: 9e8, bidPrice: 1, askPrice: 1.001, spreadPct: 0.02, depthUsdWithin1Pct: 1e6 }],
+    scannerCandidates: [{ symbol: 'OPG', score: 8, c24: -7, volume: 20_000_000, price: 0.2 }],
+    scannerContext: { binanceAlphaSymbolMap: mapping.byLookup },
+    now: Date.now(),
+  });
+  assert.ok(Array.isArray(r.candidates));
+  assert.equal(r.status === 'ERROR', false);
 });
 
 test('Binance Alpha inactive/missing -> UNKNOWN / BINANCE_ALPHA_NOT_CONFIRMED', () => {
@@ -226,6 +322,23 @@ test('Scanner UI/RADAR renders Alpha source and token id', () => {
   assert.ok(r.universeDiagnostics.binanceAlphaListingSafeCount >= 1);
 });
 
+test('Scanner UI/RADAR renders mapped Alpha source, token id and pair', () => {
+  const mapping = alphaFixture();
+  const r = evaluateTradingRadar({
+    markets: [{ symbol: 'BTCUSDC', baseAsset: 'BTC', quoteAsset: 'USDC', status: 'TRADING', quoteVolume24h: 9e8, bidPrice: 1, askPrice: 1.001, spreadPct: 0.02, change24hPct: -5, depthUsdWithin1Pct: 300_000 }],
+    scannerCandidates: [{ symbol: 'OPG', score: 8, c24: -7, volume: 20_000_000, price: 0.2 }],
+    scannerContext: { binanceAlphaSymbolMap: mapping.byLookup },
+    now: Date.now(),
+  });
+  const opg = r.candidates.find((c) => c.symbol === 'OPGUSDT');
+  assert.ok(opg);
+  assert.equal(opg.safetyBasis, SAFETY_BASIS.ALPHA_LISTING);
+  assert.equal(opg.alphaTokenId, 'ALPHA_105');
+  assert.equal(opg.alphaPair, 'ALPHA_105/USDT');
+  assert.equal(opg.listingSource, 'Binance Alpha');
+  assert.equal(fmt(opg.safetyStatus, opg.safetyReason, opg.safetySource, opg.chain, opg.contractAddress, opg.safetyBasis).labelShort, `SAFE ${MID} Binance Alpha listed`);
+});
+
 test('Telegram: scanner/forbidden stages blocked; final SAFE passes safety gate; microstructure still required', () => {
   const base = {
     symbol: 'SOLUSDT', actionability: 'ENTRY_READY', telegramEligible: true, allRadarConditionsPassed: true,
@@ -258,6 +371,8 @@ test('formatSafetyLabel: basis-aware SAFE labels + chain note for CEX listing', 
   assert.equal(fmt('CAUTION', 'LOW_LIQUIDITY_LISTING', 'binance', null, null, 'LISTING_CAUTION').labelShort, `CAUTION ${MID} low liquidity`);
   assert.equal(fmt('UNKNOWN', '', 'none', null, null, '').labelShort, `UNKNOWN ${MID} missing metadata`);
   assert.equal(fmt('UNKNOWN', 'BINANCE_ALPHA_NOT_CONFIRMED', 'binance-alpha', null, null, '').labelShort, `UNKNOWN ${MID} Alpha not confirmed`);
+  assert.equal(fmt('UNKNOWN', 'ALPHA_SYMBOL_MAPPING_MISSING', 'binance-alpha', null, null, '').labelShort, `UNKNOWN ${MID} Alpha mapping missing`);
+  assert.equal(fmt('UNKNOWN', 'ALPHA_SYMBOL_AMBIGUOUS', 'binance-alpha', null, null, '').labelShort, `UNKNOWN ${MID} Alpha mapping ambiguous`);
   const cex = fmt('SAFE', 'BINANCE_LISTED_ACTIVE', 'binance', null, null, 'CEX_LISTING');
   assert.match(cex.tooltip, /Chain safety: UNKNOWN - no contract context/);
   assert.match(cex.tooltip, /Basis: CEX_LISTING/);
@@ -275,6 +390,8 @@ test('shipped JS wires dual-model into scanner / RADAR / detail / cockpit', () =
   assert.match(TERMINAL_JS, /<span>Listing safety<\/span>/);
   assert.match(TERMINAL_JS, /<span>Listing source<\/span>/);
   assert.match(TERMINAL_JS, /<span>Alpha token id<\/span>/);
+  assert.match(TERMINAL_JS, /<span>Alpha pair<\/span>/);
+  assert.match(TERMINAL_JS, /Alpha mapping:/);
   assert.match(TERMINAL_JS, /Binance listed/);
   assert.match(TERMINAL_JS, /Binance Alpha listed/);
 });

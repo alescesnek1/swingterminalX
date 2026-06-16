@@ -32,6 +32,8 @@ export const SAFETY_REASONS = Object.freeze({
   BINANCE_LISTED_ACTIVE: 'BINANCE_LISTED_ACTIVE',
   BINANCE_ALPHA_LISTED_ACTIVE: 'BINANCE_ALPHA_LISTED_ACTIVE',
   BINANCE_ALPHA_NOT_CONFIRMED: 'BINANCE_ALPHA_NOT_CONFIRMED',
+  ALPHA_SYMBOL_MAPPING_MISSING: 'ALPHA_SYMBOL_MAPPING_MISSING',
+  ALPHA_SYMBOL_AMBIGUOUS: 'ALPHA_SYMBOL_AMBIGUOUS',
   LOW_LIQUIDITY_LISTING: 'LOW_LIQUIDITY_LISTING',
 });
 
@@ -166,8 +168,12 @@ export function classifyMarketSafety(market = {}, opts = {}) {
   else {
     finalSafetyStatus = 'UNKNOWN';
     safetyBasis = SAFETY_BASIS.NONE;
-    safetyReason = meta.listingType === 'BINANCE_ALPHA' && listingSafetyReason === SAFETY_REASONS.BINANCE_ALPHA_NOT_CONFIRMED
-      ? SAFETY_REASONS.BINANCE_ALPHA_NOT_CONFIRMED
+    safetyReason = meta.listingType === 'BINANCE_ALPHA' && [
+      SAFETY_REASONS.BINANCE_ALPHA_NOT_CONFIRMED,
+      SAFETY_REASONS.ALPHA_SYMBOL_MAPPING_MISSING,
+      SAFETY_REASONS.ALPHA_SYMBOL_AMBIGUOUS,
+    ].includes(listingSafetyReason)
+      ? listingSafetyReason
       : chainSafetyReason;
   }
 
@@ -189,6 +195,9 @@ export function classifyMarketSafety(market = {}, opts = {}) {
     exchange: meta.exchange, listed: meta.listed, baseAsset: meta.baseAsset, quoteAsset: meta.quoteAsset,
     listingType: meta.listingType || null,
     alphaTokenId: meta.alphaTokenId || null,
+    alphaPair: meta.alphaPair || null,
+    humanSymbol: meta.humanSymbol || null,
+    alphaCandidates: meta.alphaCandidates || [],
     listingSource: meta.exchange === 'binance-alpha' ? 'Binance Alpha' : (meta.exchange === 'binance' ? 'Binance' : null),
     chain: meta.chain || chainEval.chain || null,
     contractAddress: meta.contractAddress || chainEval.contractAddress || null,
@@ -280,6 +289,13 @@ export function buildSafetyDiagnostics(results = []) {
     binanceAlphaListingSafeCount: alphaRows.filter((r) => r.listingSafetyStatus === LISTING_STATUS.LISTING_SAFE).length,
     alphaListingUnknownCount: alphaRows.filter((r) => r.listingSafetyStatus !== LISTING_STATUS.LISTING_SAFE).length,
     alphaSymbolsSample: (prov.alphaSymbolsSample && prov.alphaSymbolsSample.length ? prov.alphaSymbolsSample : alphaRows.map((r) => r.symbol || r.baseAsset).filter(Boolean)).slice(0, 12),
+    alphaTokenIdMappedCount: prov.alphaTokenIdMappedCount,
+    alphaSymbolMappingMissingCount: prov.alphaSymbolMappingMissingCount,
+    alphaSymbolAmbiguousCount: prov.alphaSymbolAmbiguousCount,
+    alphaMappingProviderCalls: prov.alphaMappingProviderCalls,
+    alphaMappingProviderFailures: prov.alphaMappingProviderFailures,
+    alphaMappedExamples: prov.alphaMappedExamples,
+    alphaUnmappedExamples: prov.alphaUnmappedExamples,
     coingeckoResolvedCount: prov.coingeckoResolvedCount,
     geckoTerminalResolvedCount: prov.geckoTerminalResolvedCount,
     ambiguousMetadataCount: prov.ambiguousMetadataCount,

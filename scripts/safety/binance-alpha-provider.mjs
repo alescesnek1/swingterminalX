@@ -1,4 +1,5 @@
 export const BINANCE_ALPHA_EXCHANGE_INFO_URL = 'https://www.binance.com/bapi/defi/v1/public/alpha-trade/get-exchange-info';
+export const BINANCE_ALPHA_TOKEN_LIST_URL = 'https://www.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/cex/alpha/all/token/list';
 
 const ACTIVE_STATUSES = new Set(['TRADING', 'ACTIVE', 'ENABLED', 'ONLINE', '1', 'TRUE']);
 const INACTIVE_STATUSES = new Set(['BREAK', 'HALT', 'HALTED', 'SUSPENDED', 'OFFLINE', 'DELISTED', 'DISABLED', '0', 'FALSE']);
@@ -33,6 +34,10 @@ function firstString(row = {}, keys = []) {
     if (value != null && String(value).trim()) return String(value).trim();
   }
   return null;
+}
+
+function normalizedKey(v) {
+  return upper(v).replace(/[^A-Z0-9]/g, '');
 }
 
 function collectRows(payload) {
@@ -91,6 +96,61 @@ export function parseBinanceAlphaExchangeInfo(payload) {
   return listings;
 }
 
+export function parseBinanceAlphaTokenList(payload) {
+  const rows = collectRows(payload);
+  const tokens = [];
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    const alphaTokenId = firstString(row, ['alphaId', 'alphaTokenId', 'baseAsset', 'tokenId']);
+    const symbol = firstString(row, ['symbol', 'tokenSymbol', 'displaySymbol', 'cexCoinName']);
+    const name = firstString(row, ['name', 'tokenName', 'displayName', 'cexCoinName']);
+    if (!alphaTokenId || (!symbol && !name)) continue;
+    tokens.push({
+      alphaTokenId: upper(alphaTokenId),
+      symbol: upper(symbol || name),
+      name: name || symbol || null,
+      tokenId: firstString(row, ['tokenId']),
+      chainId: firstString(row, ['chainId']),
+      chainName: firstString(row, ['chainName']),
+      contractAddress: firstString(row, ['contractAddress']),
+      source: 'binance-alpha-token-list',
+      raw: row,
+    });
+  }
+  return tokens;
+}
+
+export function buildBinanceAlphaSymbolMap({ tokens = [], listings = [] } = {}) {
+  const activeByTokenId = new Map();
+  for (const listing of listings || []) {
+    if (!listing || listing.active !== true || !listing.alphaTokenId) continue;
+    const key = upper(listing.alphaTokenId);
+    if (!activeByTokenId.has(key)) activeByTokenId.set(key, []);
+    activeByTokenId.get(key).push(listing);
+  }
+
+  const byLookup = new Map();
+  const examples = [];
+  for (const token of tokens || []) {
+    if (!token || !token.alphaTokenId) continue;
+    const activeListings = activeByTokenId.get(upper(token.alphaTokenId)) || [];
+    for (const lookup of [token.symbol, token.name]) {
+      const key = normalizedKey(lookup);
+      if (!key) continue;
+      if (!byLookup.has(key)) byLookup.set(key, []);
+      byLookup.get(key).push({ token, listings: activeListings });
+    }
+    if (examples.length < 12) examples.push({
+      symbol: token.symbol,
+      name: token.name,
+      alphaTokenId: token.alphaTokenId,
+      pairs: activeListings.map((x) => x.pair).filter(Boolean).slice(0, 3),
+    });
+  }
+
+  return { byLookup, examples };
+}
+
 export async function fetchBinanceAlphaExchangeInfo({ fetchImpl = globalThis.fetch, url = BINANCE_ALPHA_EXCHANGE_INFO_URL } = {}) {
   if (typeof fetchImpl !== 'function') return { ok: false, listings: [], error: 'fetch unavailable' };
   try {
@@ -100,5 +160,17 @@ export async function fetchBinanceAlphaExchangeInfo({ fetchImpl = globalThis.fet
     return { ok: true, listings: parseBinanceAlphaExchangeInfo(json), error: null };
   } catch (err) {
     return { ok: false, listings: [], error: err && err.message ? err.message : String(err) };
+  }
+}
+
+export async function fetchBinanceAlphaTokenList({ fetchImpl = globalThis.fetch, url = BINANCE_ALPHA_TOKEN_LIST_URL } = {}) {
+  if (typeof fetchImpl !== 'function') return { ok: false, tokens: [], error: 'fetch unavailable' };
+  try {
+    const res = await fetchImpl(url);
+    if (!res || !res.ok) throw new Error(`Binance Alpha token list HTTP ${res ? res.status : 'unknown'}`);
+    const json = await res.json();
+    return { ok: true, tokens: parseBinanceAlphaTokenList(json), error: null };
+  } catch (err) {
+    return { ok: false, tokens: [], error: err && err.message ? err.message : String(err) };
   }
 }

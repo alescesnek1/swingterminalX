@@ -10,7 +10,12 @@
 //     (PROVIDER_RATE_LIMITED / METADATA_FETCH_FAILED). Scanner/RADAR must keep
 //     working when providers are unavailable.
 
-import { fetchBinanceAlphaExchangeInfo, normalizeAlphaPairSymbol } from './binance-alpha-provider.mjs';
+import {
+  fetchBinanceAlphaExchangeInfo,
+  fetchBinanceAlphaTokenList,
+  buildBinanceAlphaSymbolMap,
+  normalizeAlphaPairSymbol,
+} from './binance-alpha-provider.mjs';
 
 export const METADATA_REASONS = Object.freeze({
   ALLOWLISTED: 'ALLOWLISTED',
@@ -20,6 +25,8 @@ export const METADATA_REASONS = Object.freeze({
   METADATA_FETCH_FAILED: 'METADATA_FETCH_FAILED',
   PROVIDER_RATE_LIMITED: 'PROVIDER_RATE_LIMITED',
   CEX_ONLY_NO_CONTRACT_CONTEXT: 'CEX_ONLY_NO_CONTRACT_CONTEXT',
+  ALPHA_SYMBOL_MAPPING_MISSING: 'ALPHA_SYMBOL_MAPPING_MISSING',
+  ALPHA_SYMBOL_AMBIGUOUS: 'ALPHA_SYMBOL_AMBIGUOUS',
 });
 
 export const LISTING_STATUS = Object.freeze({
@@ -102,6 +109,7 @@ const AMBIGUOUS = new Set(['BTCB', 'WETH', 'WBTC', 'MULTI', 'BRIDGE', 'O3', 'BIT
 const cache = new Map();           // base -> { at, value }  (provider chain meta)
 const listCache = new Map();       // 'coingecko-list' -> { at, value }
 const alphaCache = new Map();      // 'binance-alpha-list' -> { at, value }
+const alphaMappingCache = new Map(); // 'binance-alpha-mapping' -> { at, value }
 let counters = freshCounters();
 function freshCounters() {
   return {
@@ -119,10 +127,17 @@ function freshCounters() {
     binanceAlphaListingSafeCount: 0,
     alphaListingUnknownCount: 0,
     alphaSymbolsSample: [],
+    alphaTokenIdMappedCount: 0,
+    alphaSymbolMappingMissingCount: 0,
+    alphaSymbolAmbiguousCount: 0,
+    alphaMappingProviderCalls: 0,
+    alphaMappingProviderFailures: 0,
+    alphaMappedExamples: [],
+    alphaUnmappedExamples: [],
   };
 }
 export function getMetadataDiagnostics() { return { ...counters }; }
-export function __clearTokenMetadataCache() { cache.clear(); listCache.clear(); alphaCache.clear(); counters = freshCounters(); }
+export function __clearTokenMetadataCache() { cache.clear(); listCache.clear(); alphaCache.clear(); alphaMappingCache.clear(); counters = freshCounters(); }
 
 function num(v) { const x = Number(v); return Number.isFinite(x) ? x : null; }
 function isAddress(v) { return typeof v === 'string' && v.trim().length > 0; }
@@ -195,13 +210,83 @@ function asAlphaMap(input) {
   return map;
 }
 
+function normalizeLookup(v) {
+  return String(v == null ? '' : v).toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+function scannerBaseForAlpha(market = {}) {
+  const info = baseInfo(market);
+  return info.base || normalizeLookup(market.base || market.tokenSymbol || market.name || market.tokenName);
+}
+
+function resolveAlphaMappedListing(market = {}, opts = {}) {
+  const mapping = opts.binanceAlphaSymbolMap;
+  const byLookup = mapping instanceof Map ? mapping : (mapping && mapping.byLookup instanceof Map ? mapping.byLookup : null);
+  if (!byLookup) return null;
+  const keys = Array.from(new Set([
+    scannerBaseForAlpha(market),
+    normalizeLookup(market.tokenSymbol),
+    normalizeLookup(market.tokenName),
+    normalizeLookup(market.name),
+  ].filter(Boolean)));
+  if (!keys.length) return null;
+
+  let matches = [];
+  for (const key of keys) {
+    if (byLookup.has(key)) matches = matches.concat(byLookup.get(key) || []);
+  }
+  const unique = new Map();
+  for (const match of matches) {
+    if (!match || !match.token) continue;
+    unique.set(`${match.token.alphaTokenId}:${match.token.symbol}`, match);
+  }
+  const candidates = Array.from(unique.values());
+  if (candidates.length === 0) {
+    counters.alphaSymbolMappingMissingCount += 1;
+    const symbol = scannerBaseForAlpha(market);
+    if (symbol && counters.alphaUnmappedExamples.length < 12 && !counters.alphaUnmappedExamples.includes(symbol)) counters.alphaUnmappedExamples.push(symbol);
+    return { listed: true, active: false, exchange: 'binance-alpha', listingStatus: 'UNKNOWN', listingSafetyStatus: LISTING_STATUS.LISTING_UNKNOWN, listingSafetyReason: METADATA_REASONS.ALPHA_SYMBOL_MAPPING_MISSING, source: 'binance-alpha', sourceName: 'Binance Alpha token mapping', listingType: 'BINANCE_ALPHA' };
+  }
+  if (candidates.length > 1) {
+    counters.alphaSymbolAmbiguousCount += 1;
+    return { listed: true, active: false, exchange: 'binance-alpha', listingStatus: 'UNKNOWN', listingSafetyStatus: LISTING_STATUS.LISTING_UNKNOWN, listingSafetyReason: METADATA_REASONS.ALPHA_SYMBOL_AMBIGUOUS, source: 'binance-alpha', sourceName: 'Binance Alpha token mapping', listingType: 'BINANCE_ALPHA', alphaCandidates: candidates.slice(0, 6).map((m) => ({ symbol: m.token.symbol, name: m.token.name, alphaTokenId: m.token.alphaTokenId })) };
+  }
+  const match = candidates[0];
+  const activeListings = Array.isArray(match.listings) ? match.listings : [];
+  const preferredQuote = String(market.quoteAsset || '').toUpperCase();
+  const listing = (preferredQuote ? activeListings.find((x) => x.quoteAsset === preferredQuote) : null) || activeListings.find((x) => x.quoteAsset === 'USDC') || activeListings.find((x) => x.quoteAsset === 'USDT') || activeListings[0] || null;
+  if (!listing) {
+    return { listed: true, active: false, exchange: 'binance-alpha', listingStatus: 'UNKNOWN', listingSafetyStatus: LISTING_STATUS.LISTING_UNKNOWN, listingSafetyReason: 'BINANCE_ALPHA_NOT_CONFIRMED', source: 'binance-alpha', sourceName: 'Binance Alpha token mapping', listingType: 'BINANCE_ALPHA', alphaTokenId: match.token.alphaTokenId, tokenName: match.token.name, humanSymbol: match.token.symbol };
+  }
+  counters.alphaTokenIdMappedCount += 1;
+  const ex = `${match.token.symbol}:${match.token.alphaTokenId}:${listing.pair}`;
+  if (counters.alphaMappedExamples.length < 12 && !counters.alphaMappedExamples.includes(ex)) counters.alphaMappedExamples.push(ex);
+  return {
+    ...listing,
+    listed: true,
+    active: true,
+    exchange: 'binance-alpha',
+    source: 'binance-alpha',
+    sourceName: 'Binance Alpha token mapping',
+    listingType: 'BINANCE_ALPHA',
+    alphaTokenId: match.token.alphaTokenId,
+    humanSymbol: match.token.symbol,
+    tokenName: match.token.name,
+    pair: listing.pair,
+    listingStatus: 'TRADING',
+    listingSafetyStatus: LISTING_STATUS.LISTING_SAFE,
+    listingSafetyReason: 'BINANCE_ALPHA_LISTED_ACTIVE',
+  };
+}
+
 export function resolveBinanceAlphaListing(market = {}, opts = {}) {
   const pair = normalizeAlphaPairSymbol(market);
   const symbol = pair.replace('/', '').toUpperCase();
   const activeMap = asAlphaMap(opts.binanceAlphaListings);
-  const found = activeMap.get(symbol) || null;
+  const mapped = resolveAlphaMappedListing(market, opts);
+  const found = activeMap.get(symbol) || mapped || null;
   const row = found || market;
-  const hasAlphaContext = Boolean(found) || alphaContext(market);
+  const hasAlphaContext = Boolean(found) || Boolean(mapped) || alphaContext(market);
   if (!hasAlphaContext) return { listed: false, active: false, exchange: null, listingStatus: 'UNKNOWN', listingSafetyStatus: LISTING_STATUS.LISTING_UNKNOWN, listingSafetyReason: 'NO_LISTING_CONTEXT' };
 
   const rawStatus = String(row.status || row.tradingStatus || row.listingStatus || '').toUpperCase();
@@ -221,8 +306,15 @@ export function resolveBinanceAlphaListing(market = {}, opts = {}) {
     baseAsset: base || row.baseAsset || null,
     quoteAsset: quote || row.quoteAsset || null,
     alphaTokenId: row.alphaTokenId || market.alphaTokenId || row.tokenId || row.tokenID || row.baseAssetId || null,
+    humanSymbol: row.humanSymbol || market.humanSymbol || null,
+    tokenName: row.tokenName || market.tokenName || market.name || null,
+    alphaPair: row.pair || null,
+    alphaCandidates: row.alphaCandidates || [],
     raw: row.raw || null,
   };
+  if (row.listingSafetyReason === METADATA_REASONS.ALPHA_SYMBOL_MAPPING_MISSING || row.listingSafetyReason === METADATA_REASONS.ALPHA_SYMBOL_AMBIGUOUS) {
+    return { ...common, listingSafetyStatus: LISTING_STATUS.LISTING_UNKNOWN, listingSafetyReason: row.listingSafetyReason, alphaCandidates: row.alphaCandidates || [] };
+  }
   if (!active) {
     return { ...common, listingSafetyStatus: LISTING_STATUS.LISTING_UNKNOWN, listingSafetyReason: 'BINANCE_ALPHA_NOT_CONFIRMED' };
   }
@@ -240,6 +332,9 @@ function result(base, fields) {
     listingSafetyReason: fields.listingSafetyReason || 'NO_LISTING_CONTEXT',
     listingType: fields.listingType || null,
     alphaTokenId: fields.alphaTokenId || null,
+    alphaPair: fields.alphaPair || fields.pair || null,
+    humanSymbol: fields.humanSymbol || null,
+    alphaCandidates: Array.isArray(fields.alphaCandidates) ? fields.alphaCandidates : [],
     chain: fields.chain || null,
     contractAddress: fields.contractAddress || null,
     chainCandidates: Array.isArray(fields.chainCandidates) ? fields.chainCandidates : [],
@@ -261,7 +356,9 @@ export function resolveTokenMetadata(input = {}, opts = {}) {
   const { base, quote, hadQuote } = baseInfo(input);
   const binanceListing = resolveBinanceListing(input, opts);
   const alphaListing = resolveBinanceAlphaListing(input, opts);
-  const listing = binanceListing.listed ? binanceListing : (alphaListing.listed ? alphaListing : binanceListing);
+  const listing = alphaListing.listed && (input.isScannerContext === true || alphaListing.listingSafetyStatus === LISTING_STATUS.LISTING_SAFE || alphaListing.listingSafetyReason === METADATA_REASONS.ALPHA_SYMBOL_MAPPING_MISSING || alphaListing.listingSafetyReason === METADATA_REASONS.ALPHA_SYMBOL_AMBIGUOUS)
+    ? alphaListing
+    : (binanceListing.listed ? binanceListing : alphaListing);
   const cexContext = hadQuote || input.cexOnly === true || input.isScannerContext === true || listing.listed
     || /binance|bybit|okx|futures|spot/i.test(String(input.venue || input.exchange || ''));
   const cr = []; // confidenceReasons
@@ -269,7 +366,7 @@ export function resolveTokenMetadata(input = {}, opts = {}) {
   const base_fields = {
     quoteAsset: quote, exchange: listing.exchange, listed: listing.listed,
     listingStatus: listing.listingStatus, listingSafetyStatus: listing.listingSafetyStatus, listingSafetyReason: listing.listingSafetyReason,
-    listingType: listing.listingType, alphaTokenId: listing.alphaTokenId,
+    listingType: listing.listingType, alphaTokenId: listing.alphaTokenId, alphaPair: listing.alphaPair || listing.pair, humanSymbol: listing.humanSymbol, alphaCandidates: listing.alphaCandidates,
   };
   if (listing.listingSafetyStatus === LISTING_STATUS.LISTING_SAFE) cr.push(listing.exchange === 'binance-alpha' ? 'binance_alpha_active_listing' : 'binance_active_listing');
 
@@ -322,12 +419,40 @@ export function resolveTokenMetadata(input = {}, opts = {}) {
   // 5) no chain context. If Binance-listed, that is still a real CEX listing.
   if (listing.listed) {
     cr.push('binance_listed_no_contract');
-    return result(base, { ...base_fields, cexOnly: true, source: listing.source || 'binance', sourceName: listing.sourceName || 'Binance listing', reason: METADATA_REASONS.CEX_ONLY_NO_CONTRACT_CONTEXT, confidence: listing.listingSafetyStatus === LISTING_STATUS.LISTING_SAFE ? 75 : 50, confidenceReasons: cr });
+    const reason = listing.listingSafetyReason === METADATA_REASONS.ALPHA_SYMBOL_MAPPING_MISSING || listing.listingSafetyReason === METADATA_REASONS.ALPHA_SYMBOL_AMBIGUOUS
+      ? listing.listingSafetyReason
+      : METADATA_REASONS.CEX_ONLY_NO_CONTRACT_CONTEXT;
+    return result(base, { ...base_fields, cexOnly: true, source: listing.source || 'binance', sourceName: listing.sourceName || 'Binance listing', reason, confidence: listing.listingSafetyStatus === LISTING_STATUS.LISTING_SAFE ? 75 : 50, confidenceReasons: cr });
   }
   if (cexContext) {
     return result(base, { ...base_fields, cexOnly: true, source: 'cex-only', sourceName: 'CEX context', reason: METADATA_REASONS.CEX_ONLY_NO_CONTRACT_CONTEXT, confidence: 40, confidenceReasons: cr });
   }
   return result(base, { ...base_fields, source: 'none', sourceName: 'none', reason: METADATA_REASONS.MISSING_CONTRACT_METADATA, confidence: 0, confidenceReasons: cr });
+}
+
+export async function warmBinanceAlphaMapping(opts = {}) {
+  const now = opts.now || Date.now();
+  const cached = alphaMappingCache.get('binance-alpha-mapping');
+  if (cached && now - cached.at < META_TTL_MS) { counters.metadataCacheHits += 1; return cached.value; }
+  counters.metadataCacheMisses += 1;
+  counters.alphaMappingProviderCalls += 1;
+  const [tokenRes, listingRes] = await Promise.all([
+    fetchBinanceAlphaTokenList(opts),
+    fetchBinanceAlphaExchangeInfo(opts),
+  ]);
+  if (!tokenRes.ok || !listingRes.ok) {
+    counters.alphaMappingProviderFailures += 1;
+    const value = { ok: false, tokens: [], listings: [], byLookup: new Map(), examples: [], error: tokenRes.error || listingRes.error || 'Binance Alpha mapping failed' };
+    alphaMappingCache.set('binance-alpha-mapping', { at: now, value });
+    return value;
+  }
+  const tokens = tokenRes.tokens || [];
+  const listings = listingRes.listings || [];
+  const built = buildBinanceAlphaSymbolMap({ tokens, listings });
+  counters.alphaMappedExamples = (built.examples || []).slice(0, 12).map((x) => `${x.symbol}:${x.alphaTokenId}:${(x.pairs || []).join('|')}`);
+  const value = { ok: true, tokens, listings, byLookup: built.byLookup, examples: built.examples || [], error: null };
+  alphaMappingCache.set('binance-alpha-mapping', { at: now, value });
+  return value;
 }
 
 export async function warmBinanceAlphaListings(opts = {}) {
