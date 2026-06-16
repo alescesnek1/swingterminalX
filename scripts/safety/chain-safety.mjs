@@ -3,19 +3,17 @@
 // Safety contract:
 //   - never marks missing chain/API data as SAFE
 //   - never crashes on missing keys/contracts
-//   - caches chain API reads to reduce rate-limit pressure
-//   - every result carries a machine-readable safetyReason explaining WHY
+//   - every result ALWAYS carries safetyStatus, safetyReason, safetySource,
+//     chain, contractAddress, blocksTelegram (no empty/plain UNKNOWN ever)
 //   - strict chain-only model: a CEX/futures listing with no on-chain contract
-//     context stays UNKNOWN (reason CEX_ONLY_NO_CONTRACT_CONTEXT). Telegram
-//     therefore stays blocked for it - we do NOT treat a Binance listing as
-//     chain-SAFE.
+//     context stays UNKNOWN (reason CEX_ONLY_NO_CONTRACT_CONTEXT, source
+//     cex-only). Telegram stays blocked for it.
 
 import { resolveTokenMetadata, METADATA_REASONS } from './token-metadata.mjs';
 
 const CACHE_TTL_MS = 15 * 60 * 1000;
 const cache = new Map();
 
-// Machine-readable reason codes attached to every safety result.
 export const SAFETY_REASONS = Object.freeze({
   ALLOWLISTED: 'ALLOWLISTED',
   RESOLVED: 'RESOLVED',
@@ -33,18 +31,9 @@ export const SAFETY_REASONS = Object.freeze({
 
 const META_REASON_SET = new Set(Object.values(METADATA_REASONS));
 
-function nowIso() {
-  return new Date().toISOString();
-}
-
-function n(v, fallback = null) {
-  const x = Number(v);
-  return Number.isFinite(x) ? x : fallback;
-}
-
-function clamp(v, lo = 0, hi = 100) {
-  return Math.max(lo, Math.min(hi, Number(v) || 0));
-}
+function nowIso() { return new Date().toISOString(); }
+function n(v, fallback = null) { const x = Number(v); return Number.isFinite(x) ? x : fallback; }
+function clamp(v, lo = 0, hi = 100) { return Math.max(lo, Math.min(hi, Number(v) || 0)); }
 
 function normChain(chain) {
   const c = String(chain || '').trim().toLowerCase();
@@ -57,10 +46,18 @@ function normChain(chain) {
 
 function reasonText(code) {
   return {
+    ALLOWLISTED: 'curated canonical asset',
+    RESOLVED: 'verified contract metadata',
     CEX_ONLY_NO_CONTRACT_CONTEXT: 'CEX-listed, no on-chain contract context',
     AMBIGUOUS_CONTRACT_MAPPING: 'ambiguous chain/contract mapping',
     MISSING_CONTRACT_METADATA: 'missing contract metadata',
     METADATA_FETCH_FAILED: 'metadata provider failed',
+    VERIFICATION_UNAVAILABLE: 'contract verification unavailable',
+    UNVERIFIED_CONTRACT: 'contract not verified',
+    HOLDER_CONCENTRATION: 'holder concentration risk',
+    OWNER_PRIVILEGE_RISK: 'owner/privilege risk',
+    LIQUIDITY_RISK: 'liquidity risk',
+    CRITICAL_EVENT_RISK: 'exploit/delisting/unlock/news risk',
   }[code] || 'missing chain safety data';
 }
 
@@ -69,6 +66,8 @@ function emptyResult({ chain = null, contractAddress = null, status = 'UNKNOWN',
     safetyStatus: status,
     safetyScore: clamp(score),
     safetyReason,
+    safetySource: source,
+    blocksTelegram: status !== 'SAFE',
     topHolderPercent: null,
     holderConcentrationRisk: 'UNKNOWN',
     contractVerified: null,
@@ -95,19 +94,20 @@ export function evaluateKnownSafety(input = {}) {
   let score = 82;
   let status = 'SAFE';
 
-  // No chain/contract => honest UNKNOWN with a specific machine reason.
   if (!chain || !contractAddress) {
     let safetyReason = SAFETY_REASONS.MISSING_CONTRACT_METADATA;
     if (input.ambiguous === true) safetyReason = SAFETY_REASONS.AMBIGUOUS_CONTRACT_MAPPING;
     else if (input.cexOnly === true) safetyReason = SAFETY_REASONS.CEX_ONLY_NO_CONTRACT_CONTEXT;
     else if (input.metadataReason && META_REASON_SET.has(input.metadataReason)) safetyReason = input.metadataReason;
-    if (safetyReason === SAFETY_REASONS.CEX_ONLY_NO_CONTRACT_CONTEXT) reasons.push(reasonText(safetyReason));
+    const cexOnly = safetyReason === SAFETY_REASONS.CEX_ONLY_NO_CONTRACT_CONTEXT;
+    if (cexOnly) reasons.push(reasonText(safetyReason));
     else {
       if (!chain) reasons.push('missing chain');
       if (!contractAddress) reasons.push('missing contract address');
       if (input.ambiguous === true) reasons.push('ambiguous chain/contract mapping');
     }
-    return emptyResult({ chain, contractAddress, status: 'UNKNOWN', score: 35, reasons, safetyReason, source: input.source || 'chain-safety' });
+    const source = cexOnly ? 'cex-only' : (input.safetySource || input.source || 'chain-safety');
+    return emptyResult({ chain, contractAddress, status: 'UNKNOWN', score: 35, reasons, safetyReason, source });
   }
 
   const allowlisted = input.allowlisted === true;
@@ -159,10 +159,13 @@ export function evaluateKnownSafety(input = {}) {
     reasons.push('critical exploit/delisting/unlock/news risk');
   }
 
+  const source = input.safetySource || input.source || 'known-chain-data';
   return {
     safetyStatus: status,
     safetyScore: clamp(score),
     safetyReason,
+    safetySource: source,
+    blocksTelegram: status !== 'SAFE',
     topHolderPercent: n(input.topHolderPercent ?? input.topHolderPct),
     holderConcentrationRisk: holder.risk,
     contractVerified: verified == null ? null : !!verified,
@@ -170,12 +173,11 @@ export function evaluateKnownSafety(input = {}) {
     contractAddress,
     reasons: Array.from(new Set(reasons)).slice(0, 8),
     checkedAt: nowIso(),
-    source: input.source || 'known-chain-data',
+    source,
   };
 }
 
 // One-stop entry point: resolve metadata for a market row, then classify.
-// NEVER fakes SAFE - missing/ambiguous/CEX-only metadata stays UNKNOWN.
 export function classifyMarketSafety(market = {}, opts = {}) {
   const meta = resolveTokenMetadata(market, opts);
   const safety = evaluateKnownSafety({
@@ -196,11 +198,12 @@ export function classifyMarketSafety(market = {}, opts = {}) {
     delistingRisk: market.delistingRisk,
     unlockRisk: market.unlockRisk,
     newsRisk: market.newsRisk,
-    source: meta.source || market.safetySource || 'chain-safety',
+    source: meta.reason === METADATA_REASONS.CEX_ONLY_NO_CONTRACT_CONTEXT ? 'cex-only' : (meta.source || market.safetySource),
   });
   safety.metadataSource = meta.source;
   safety.metadataConfidence = meta.confidence;
   safety.tokenName = meta.name;
+  if (!safety.safetySource) safety.safetySource = meta.source || 'chain-safety';
   if (!safety.chain) safety.chain = meta.chain || null;
   if (!safety.contractAddress) safety.contractAddress = meta.contractAddress || null;
   return safety;
@@ -281,9 +284,14 @@ export function buildSafetyDiagnostics(results = []) {
     }
   }
 
+  const unknownRows = rows.filter((r) => r.safetyStatus === 'UNKNOWN');
+  const plainUnknownCount = unknownRows.filter((r) => !r.safetyReason).length;
+  const unknownWithReasonCount = unknownRows.filter((r) => !!r.safetyReason).length;
+  const reasonCounts = {};
+  for (const r of unknownRows) { const k = r.safetyReason || 'EMPTY'; reasonCounts[k] = (reasonCounts[k] || 0) + 1; }
+  const topUnknownReasons = Object.entries(reasonCounts).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([reason, count]) => ({ reason, count }));
+  const topUnknownSymbols = unknownRows.map((r) => r.symbol).filter(Boolean).slice(0, 12);
   const symOf = (r) => r.symbol || null;
-  const topMissingSymbols = rows.filter((r) => r.safetyReason === SAFETY_REASONS.MISSING_CONTRACT_METADATA).map(symOf).filter(Boolean).slice(0, 12);
-  const topAmbiguousSymbols = rows.filter((r) => r.safetyReason === SAFETY_REASONS.AMBIGUOUS_CONTRACT_MAPPING).map(symOf).filter(Boolean).slice(0, 12);
 
   return {
     safetyRowsChecked: total,
@@ -292,7 +300,10 @@ export function buildSafetyDiagnostics(results = []) {
     safetyCautionCount: countStatus('CAUTION'),
     safetyDangerCount: countStatus('DANGER'),
     safetyUnknownCount: countStatus('UNKNOWN'),
-    // legacy field names kept for back-compat
+    plainUnknownCount,
+    unknownWithReasonCount,
+    topUnknownReasons,
+    topUnknownSymbols,
     safetyRowsUnknown: countStatus('UNKNOWN'),
     safetyRowsCaution: countStatus('CAUTION'),
     safetyRowsDanger: countStatus('DANGER'),
@@ -301,22 +312,11 @@ export function buildSafetyDiagnostics(results = []) {
     cexOnlyNoContextCount: countReason(SAFETY_REASONS.CEX_ONLY_NO_CONTRACT_CONTEXT),
     safetyProviderFailedCount: countReason(SAFETY_REASONS.METADATA_FETCH_FAILED),
     resolverSourceBreakdown: sourceBreakdown,
-    topMissingSymbols,
-    topAmbiguousSymbols,
+    topMissingSymbols: rows.filter((r) => r.safetyReason === SAFETY_REASONS.MISSING_CONTRACT_METADATA).map(symOf).filter(Boolean).slice(0, 12),
+    topAmbiguousSymbols: rows.filter((r) => r.safetyReason === SAFETY_REASONS.AMBIGUOUS_CONTRACT_MAPPING).map(symOf).filter(Boolean).slice(0, 12),
     chainApiAvailable: rows.some((r) => r.source && !String(r.source).includes('unavailable') && r.safetyStatus !== 'UNKNOWN'),
     lastSafetyCheckAt: rows.map((r) => r.checkedAt).filter(Boolean).sort().at(-1) || null,
-    sampleSafetyReasons: rows.slice(0, 12).map((r) => ({
-      symbol: r.symbol || null,
-      status: r.safetyStatus,
-      reason: r.safetyReason || (Array.isArray(r.reasons) ? r.reasons[0] : null),
-    })),
-    topSafetyRisks: rows
-      .filter((r) => ['DANGER', 'CAUTION', 'UNKNOWN'].includes(r.safetyStatus))
-      .slice(0, 10)
-      .map((r) => ({
-        symbol: r.symbol || null,
-        status: r.safetyStatus,
-        reason: Array.isArray(r.reasons) ? r.reasons[0] : 'risk',
-      })),
+    sampleSafetyReasons: rows.slice(0, 12).map((r) => ({ symbol: r.symbol || null, status: r.safetyStatus, reason: r.safetyReason || (Array.isArray(r.reasons) ? r.reasons[0] : null) })),
+    topSafetyRisks: rows.filter((r) => ['DANGER', 'CAUTION', 'UNKNOWN'].includes(r.safetyStatus)).slice(0, 10).map((r) => ({ symbol: r.symbol || null, status: r.safetyStatus, reason: Array.isArray(r.reasons) ? r.reasons[0] : 'risk' })),
   };
 }

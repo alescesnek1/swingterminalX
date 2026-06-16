@@ -1,4 +1,31 @@
 console.log('TERMINAL_X_LOADED');
+// Shared safety display model. Always returns a visible, explainable label so
+// no row ever renders a plain reasonless UNKNOWN.
+function formatSafetyLabel(status, reason, source, chain, contract) {
+  var SHORT = { ALLOWLISTED:'curated asset', RESOLVED:'verified contract', CEX_ONLY_NO_CONTRACT_CONTEXT:'CEX-only', AMBIGUOUS_CONTRACT_MAPPING:'ambiguous', MISSING_CONTRACT_METADATA:'missing metadata', METADATA_FETCH_FAILED:'provider failed', VERIFICATION_UNAVAILABLE:'unverified contract', UNVERIFIED_CONTRACT:'unverified contract', HOLDER_CONCENTRATION:'risky contract', OWNER_PRIVILEGE_RISK:'risky contract', LIQUIDITY_RISK:'liquidity risk', CRITICAL_EVENT_RISK:'risky contract' };
+  var st = String(status || '').toUpperCase();
+  if (['SAFE','CAUTION','DANGER','UNKNOWN'].indexOf(st) < 0) st = 'UNKNOWN';
+  var src = String(source || '').toLowerCase();
+  var code = String(reason || '').toUpperCase();
+  var isCex = /cex|scanner|futures|spot|binance/.test(src);
+  if (!code || !SHORT[code]) {
+    if (st === 'SAFE') code = (/curated|allowlist/.test(src)) ? 'ALLOWLISTED' : 'RESOLVED';
+    else if (isCex) code = 'CEX_ONLY_NO_CONTRACT_CONTEXT';
+    else if (!chain || !contract) code = 'MISSING_CONTRACT_METADATA';
+    else code = 'VERIFICATION_UNAVAILABLE';
+  }
+  if (st === 'UNKNOWN' && !SHORT[code]) code = isCex ? 'CEX_ONLY_NO_CONTRACT_CONTEXT' : 'MISSING_CONTRACT_METADATA';
+  var shortTxt = SHORT[code] || (st === 'SAFE' ? 'verified contract' : 'missing metadata');
+  var labelShort = st + ' \u00b7 ' + shortTxt;
+  var labelFull = st + ' \u00b7 ' + shortTxt + ' (' + code + ')';
+  var blocksTelegram = st !== 'SAFE';
+  var parts = ['Reason: ' + code];
+  if (source) parts.push('Source: ' + source);
+  if (chain) parts.push('Chain: ' + chain);
+  if (contract) parts.push('Contract: ' + contract);
+  if (blocksTelegram) parts.push('Telegram blocked: safety is not SAFE');
+  return { labelShort: labelShort, labelFull: labelFull, tooltip: parts.join(' | '), cssClass: 'safety-' + st.toLowerCase(), blocksTelegram: blocksTelegram };
+}
 
 // ─────────────────────────────────────────────────────────────
 // V6.8 Sprint 1 (FIX-3): GLOBAL XSS CLOSURE
@@ -1595,28 +1622,26 @@ function renderList() {
   const _SAFE_ALLOW = new Set(['BTC','ETH','BNB','SOL','ADA','AVAX','DOT','TRX','XRP','LTC','ATOM','NEAR','APT','SUI','INJ','DOGE','BCH','ETC','XLM','XMR','XTZ','ALGO','HBAR','ICP','FIL','EGLD','FLOW','KAS','TON','RUNE','STX','KAVA','MINA','ROSE','ZIL','CELO','EOS','NEO','VET','QTUM','WAVES','OSMO','KSM','SEI','TIA','DASH','ZEC','RVN','ONE','USDC','USDT','LINK','UNI','AAVE','MKR','LDO','CRV','COMP','SNX','ARB']);
   const _SAFE_AMBIG = new Set(['BTCB','WETH','WBTC','MULTI','BRIDGE','O3','BIT','GAS','CAT','GMT','AGI','KEY','FT']);
   const _SAFE_CEXQ = ['USDT','USDC','BUSD','FDUSD','TUSD','USD','BTC','ETH','BNB'];
-  const _SAFE_TXT = { ALLOWLISTED:'curated verified asset', RESOLVED:'verified metadata', MISSING_CONTRACT_METADATA:'missing contract metadata', AMBIGUOUS_CONTRACT_MAPPING:'ambiguous contract mapping', METADATA_FETCH_FAILED:'provider failed', CEX_ONLY_NO_CONTRACT_CONTEXT:'CEX-only, no contract context', VERIFICATION_UNAVAILABLE:'verification unavailable', UNVERIFIED_CONTRACT:'unverified contract', HOLDER_CONCENTRATION:'risky contract', OWNER_PRIVILEGE_RISK:'risky contract', LIQUIDITY_RISK:'liquidity risk', CRITICAL_EVENT_RISK:'risky contract' };
-  const _safeFriendly = (c) => _SAFE_TXT[c] || String(c||'').toLowerCase().replace(/_/g,' ') || 'not checked';
   const _safeBaseInfo = (row) => { const raw=String(row.baseAsset||row.symbol||row.pair||row.base||'').toUpperCase().replace(/[^A-Z0-9]/g,''); for(const q of _SAFE_CEXQ){ if(raw.length>q.length&&raw.endsWith(q)) return {base:raw.slice(0,-q.length),cex:true}; } return {base:raw,cex:!!row.baseAsset}; };
   const safetyOf = (row) => {
     const status = String(row.safetyStatus || row.safety_status || '').toUpperCase();
     const chain = row.chain || row.network || row.contract_chain || null;
     const contract = row.contractAddress || row.contract_address || row.token_address || null;
     if (['SAFE','CAUTION','DANGER','UNKNOWN'].includes(status)) {
-      const code = row.safetyReason || row.safety_reason || (Array.isArray(row.safetyReasons) ? row.safetyReasons[0] : '');
-      return { status, reason: _safeFriendly(code), source: row.safetySource || row.safety_source || (status==='SAFE'?'curated-allowlist':'server'), chain, contract };
+      const code = String(row.safetyReason || row.safety_reason || (Array.isArray(row.safetyReasons) ? row.safetyReasons[0] : '') || '').toUpperCase();
+      return { status, code, source: row.safetySource || row.safety_source || (status==='SAFE'?'curated-allowlist':''), chain, contract };
     }
-    if (contract) return { status:'UNKNOWN', reason: chain ? 'chain safety not checked' : _safeFriendly('MISSING_CONTRACT_METADATA'), source:'market-row', chain, contract };
+    if (contract) return { status:'UNKNOWN', code: chain ? 'VERIFICATION_UNAVAILABLE' : 'MISSING_CONTRACT_METADATA', source:'market-row', chain, contract };
     const bi = _safeBaseInfo(row);
-    if (_SAFE_ALLOW.has(bi.base)) return { status:'SAFE', reason:_safeFriendly('ALLOWLISTED'), source:'curated-allowlist', chain:null, contract:null };
-    if (_SAFE_AMBIG.has(bi.base)) return { status:'UNKNOWN', reason:_safeFriendly('AMBIGUOUS_CONTRACT_MAPPING'), source:'none', chain:null, contract:null };
-    if (bi.cex) return { status:'UNKNOWN', reason:_safeFriendly('CEX_ONLY_NO_CONTRACT_CONTEXT'), source:'cex-listing', chain:null, contract:null };
-    return { status:'UNKNOWN', reason:_safeFriendly('MISSING_CONTRACT_METADATA'), source:'none', chain:null, contract:null };
+    if (_SAFE_ALLOW.has(bi.base)) return { status:'SAFE', code:'ALLOWLISTED', source:'curated-allowlist', chain:null, contract:null };
+    if (_SAFE_AMBIG.has(bi.base)) return { status:'UNKNOWN', code:'AMBIGUOUS_CONTRACT_MAPPING', source:'none', chain:null, contract:null };
+    if (bi.cex) return { status:'UNKNOWN', code:'CEX_ONLY_NO_CONTRACT_CONTEXT', source:'cex-only', chain:null, contract:null };
+    return { status:'UNKNOWN', code:'MISSING_CONTRACT_METADATA', source:'none', chain:null, contract:null };
   };
   const safetyMarkup = (row) => {
     const s = safetyOf(row || {});
-    const extra = [s.source?('src:'+s.source):'', s.chain?('chain:'+s.chain):'', s.contract?('contract:'+s.contract):''].filter(Boolean).join(' | ');
-    return `<span class="safety-pill safety-${_esc(s.status.toLowerCase())}" title="${_esc(s.status + ' - ' + s.reason + (extra?(' | '+extra):''))}">${_esc(s.status)}</span>`;
+    const f = formatSafetyLabel(s.status, s.code, s.source, s.chain, s.contract);
+    return `<span class="safety-pill ${f.cssClass}" title="${_esc(f.tooltip)}">${_esc(f.labelShort)}</span>`;
   };
   // V7.4.5 — defensive timeframe extractor. The upstream payload
   // shape varies depending on which build branch in markets.js
@@ -1795,24 +1820,23 @@ function pickCoin(id) {
     const _ALLOW = new Set(['BTC','ETH','BNB','SOL','ADA','AVAX','DOT','TRX','XRP','LTC','ATOM','NEAR','APT','SUI','INJ','DOGE','BCH','ETC','XLM','XMR','XTZ','ALGO','HBAR','ICP','FIL','EGLD','FLOW','KAS','TON','RUNE','STX','KAVA','MINA','ROSE','ZIL','CELO','EOS','NEO','VET','QTUM','WAVES','OSMO','KSM','SEI','TIA','DASH','ZEC','RVN','ONE','USDC','USDT','LINK','UNI','AAVE','MKR','LDO','CRV','COMP','SNX','ARB']);
     const _AMBIG = new Set(['BTCB','WETH','WBTC','MULTI','BRIDGE','O3','BIT','GAS','CAT','GMT','AGI','KEY','FT']);
     const _CEXQ = ['USDT','USDC','BUSD','FDUSD','TUSD','USD','BTC','ETH','BNB'];
-    const _TXT = { ALLOWLISTED:'curated verified asset', RESOLVED:'verified metadata', MISSING_CONTRACT_METADATA:'missing contract metadata', AMBIGUOUS_CONTRACT_MAPPING:'ambiguous contract mapping', METADATA_FETCH_FAILED:'provider failed', CEX_ONLY_NO_CONTRACT_CONTEXT:'CEX-only, no contract context', VERIFICATION_UNAVAILABLE:'verification unavailable', UNVERIFIED_CONTRACT:'unverified contract', HOLDER_CONCENTRATION:'risky contract', OWNER_PRIVILEGE_RISK:'risky contract', LIQUIDITY_RISK:'liquidity risk', CRITICAL_EVENT_RISK:'risky contract' };
-    const fr=(c)=>_TXT[c]||String(c||'').toLowerCase().replace(/_/g,' ')||'not checked';
     const status = String(d.safetyStatus || d.safety_status || '').toUpperCase();
     const chain = d.chain || d.network || d.contract_chain || null;
     const contract = d.contractAddress || d.contract_address || d.token_address || null;
     if (['SAFE','CAUTION','DANGER','UNKNOWN'].includes(status)) {
-      const code = d.safetyReason || d.safety_reason || (Array.isArray(d.safetyReasons) ? d.safetyReasons[0] : '');
-      return { status, reason: fr(code), source: d.safetySource || d.safety_source || (status==='SAFE'?'curated-allowlist':'server'), chain, contract };
+      const code = String(d.safetyReason || d.safety_reason || (Array.isArray(d.safetyReasons) ? d.safetyReasons[0] : '') || '').toUpperCase();
+      return { status, code, source: d.safetySource || d.safety_source || (status==='SAFE'?'curated-allowlist':''), chain, contract };
     }
-    if (contract) return { status:'UNKNOWN', reason: chain ? 'chain safety not checked' : fr('MISSING_CONTRACT_METADATA'), source:'market-row', chain, contract };
+    if (contract) return { status:'UNKNOWN', code: chain ? 'VERIFICATION_UNAVAILABLE' : 'MISSING_CONTRACT_METADATA', source:'market-row', chain, contract };
     const raw=String(d.baseAsset||d.symbol||d.id||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
     let base=raw, cex=!!d.baseAsset; for(const q of _CEXQ){ if(raw.length>q.length&&raw.endsWith(q)){base=raw.slice(0,-q.length);cex=true;break;} }
-    if (_ALLOW.has(base)) return { status:'SAFE', reason:fr('ALLOWLISTED'), source:'curated-allowlist', chain:null, contract:null };
-    if (_AMBIG.has(base)) return { status:'UNKNOWN', reason:fr('AMBIGUOUS_CONTRACT_MAPPING'), source:'none', chain:null, contract:null };
-    if (cex) return { status:'UNKNOWN', reason:fr('CEX_ONLY_NO_CONTRACT_CONTEXT'), source:'cex-listing', chain:null, contract:null };
-    return { status:'UNKNOWN', reason:fr('MISSING_CONTRACT_METADATA'), source:'none', chain:null, contract:null };
+    if (_ALLOW.has(base)) return { status:'SAFE', code:'ALLOWLISTED', source:'curated-allowlist', chain:null, contract:null };
+    if (_AMBIG.has(base)) return { status:'UNKNOWN', code:'AMBIGUOUS_CONTRACT_MAPPING', source:'none', chain:null, contract:null };
+    if (cex) return { status:'UNKNOWN', code:'CEX_ONLY_NO_CONTRACT_CONTEXT', source:'cex-only', chain:null, contract:null };
+    return { status:'UNKNOWN', code:'MISSING_CONTRACT_METADATA', source:'none', chain:null, contract:null };
   })();
-  const detailSafetyHtml = `<span class="safety-pill safety-${_esc(detailSafety.status.toLowerCase())}" title="${_esc(detailSafety.status + ' - ' + detailSafety.reason + (detailSafety.source?(' | src:'+detailSafety.source):'') + (detailSafety.chain?(' | chain:'+detailSafety.chain):'') + (detailSafety.contract?(' | contract:'+detailSafety.contract):''))}">${_esc(detailSafety.status)}</span>`;
+  const detailSafetyF = formatSafetyLabel(detailSafety.status, detailSafety.code, detailSafety.source, detailSafety.chain, detailSafety.contract);
+  const detailSafetyHtml = `<span class="safety-pill ${detailSafetyF.cssClass}" title="${_esc(detailSafetyF.tooltip)}">${_esc(detailSafetyF.labelShort)}</span>`;
 
   // V6.8 Sprint 1 (FIX-3): sym, d.name, d.id are upstream strings.
   // textContent on dlbl is already safe; every other interpolation
@@ -1846,7 +1870,7 @@ function pickCoin(id) {
     <div class="mgrid">
       <div class="mc"><div class="ml">SIGNAL</div><div class="mv"><span class="bdg ${_esc(s.cls)}" data-detail="signal">${_esc(s.label)}</span></div></div>
       <div class="mc"><div class="ml">SCORE</div><div class="mv" data-detail="score">${s.score}/10</div></div>
-      <div class="mc"><div class="ml">SAFETY</div><div class="mv">${detailSafetyHtml}</div><div class="ms">${_esc(detailSafety.reason)}</div></div>
+      <div class="mc"><div class="ml">SAFETY</div><div class="mv">${detailSafetyHtml}</div><div class="ms">${_esc(detailSafetyF.labelFull)}</div><div class="ms">${_esc(detailSafetyF.tooltip)}</div></div>
       <div class="mc"><div class="ml">PANIC</div><div class="mv" data-detail="panic">${panicBadge(Number.isFinite(d._panic) ? d._panic : calcPanic(d))}</div></div>
       <div class="mc"><div class="ml">24H VOL</div><div class="mv" data-detail="qv">${_esc(fmt(d.total_volume || 0))}</div></div>
       <div class="mc"><div class="ml">24H RANGE</div><div class="mv">${_esc(fmt(d.low_24h || 0))}–${_esc(fmt(d.high_24h || 0))}</div></div>
@@ -3748,7 +3772,7 @@ function _cpPrefillFromRadar(c) {
     entryPrice: mid, stopLoss: _cpNum(c.STOP_LOSS_LEVEL ?? c.suggestedStop),
     hardInvalidation: _cpNum(c.HARD_INVALIDATION ?? c.invalidationLevel),
     tp1: lvl(0), tp2: lvl(1), tp3: lvl(2),
-    safetyStatus: c.safetyStatus || 'UNKNOWN', fromRadar: true,
+    safetyStatus: c.safetyStatus || 'UNKNOWN', safetyReason: c.safetyReason || null, safetySource: c.safetySource || null, fromRadar: true,
     notes: Array.isArray(c.REASON) ? c.REASON.join('; ') : (c.reasons || []).join('; '),
   };
 }
@@ -3931,7 +3955,7 @@ function renderCockpit() {
     const suggest = (r.suggestedStop != null && t.stopLoss != null && Number(r.suggestedStop) !== Number(t.stopLoss)) ? `<button type="button" class="cp-movestop" data-cp-movestop="${_esc(t.id)}" data-cp-newstop="${_esc(r.suggestedStop)}">move stop → ${_esc(_cpFmt(r.suggestedStop))}</button>` : '';
     return `<div class="cockpit-card" data-id="${_esc(t.id)}" data-mode="${_esc(r.mode)}">
       <div class="cockpit-main">
-        <div><div class="cockpit-symbol">${_esc(t.symbol)} <span class="safety-pill ${safeCls}" title="${_esc('safety: ' + (r.safetyReason || r.safetyStatus || 'UNKNOWN'))}">${_esc(r.safetyStatus)}</span>${String(r.safetyStatus||'UNKNOWN')!=='SAFE' ? '<span class="cockpit-tg-blocked" title="Only SAFE setups can alert">Telegram blocked: safety is not SAFE</span>' : ''}${t.fromRadar ? '<span class="cockpit-fromradar" title="imported from RADAR">RADAR</span>' : ''}</div>
+        <div><div class="cockpit-symbol">${_esc(t.symbol)} ${(() => { const f = formatSafetyLabel(r.safetyStatus, r.safetyReason || t.safetyReason, r.safetySource || t.safetySource, t.chain, t.contractAddress); return `<span class="safety-pill ${f.cssClass}" title="${_esc(f.tooltip)}">${_esc(f.labelShort)}</span>` + (f.blocksTelegram ? '<span class="cockpit-tg-blocked" title="Only SAFE setups can alert">Telegram blocked: safety is not SAFE</span>' : ''); })()}${t.fromRadar ? '<span class="cockpit-fromradar" title="imported from RADAR">RADAR</span>' : ''}</div>
           <div class="cockpit-meta">${_esc(t.venue || 'Binance')} · ${_esc(t.entryType || 'manual')} · ${_esc(_cpAge(t.entryTime))}${r.stale ? ' · <span class="cockpit-stale">stale</span>' : ''}</div></div>
         <div class="cockpit-pnl ${pnlCls}">${pnlMain}${realLine}</div>
         <div class="cockpit-grid">
@@ -6862,7 +6886,7 @@ function _renderTradingRadar(radar, esc) {
     return `<tr class="radar-matrix-row ${c.actionability === 'ENTRY_READY' ? 'radar-matrix-row--ready' : ''}" onclick="window._radarSelect('${esc(c.symbol)}')">
       <td><b>${esc(c.symbol)}</b></td>
       <td><span class="${_fleetRadarBadgeClass(c.STATUS || c.actionability)}">${esc(c.STATUS || c.actionability)}</span></td>
-      <td><span class="safety-pill safety-${esc(String(c.safetyStatus || 'UNKNOWN').toLowerCase())}" title="${esc((c.safetyReasons || [])[0] || 'missing chain safety data')}">${esc(c.safetyStatus || 'UNKNOWN')}</span></td>
+      <td>${(() => { const f = formatSafetyLabel(c.safetyStatus, c.safetyReason, c.safetySource, c.chain, c.contractAddress); return `<span class="safety-pill ${f.cssClass}" title="${esc(f.tooltip)}">${esc(f.labelShort)}</span>`; })()}</td>
       <td>${esc(_fleetFmtRadarValue(c.distanceToEntryReadyScore, 0))}</td>
       <td><b class="${_fleetRadarScoreClass(c.SETUP_SCORE ?? c.setupQualityScore)}">${esc(_fleetFmtRadarValue(c.SETUP_SCORE ?? c.setupQualityScore, 0))}</b></td>
       <td><b>${esc(_fleetFmtRadarValue(c.EXECUTION_SCORE, 0))}</b></td>
