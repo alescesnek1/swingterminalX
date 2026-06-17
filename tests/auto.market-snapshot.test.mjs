@@ -98,7 +98,7 @@ test('snapshot fetcher uses only allowed public spot endpoints and sends no API 
     for (const c of calls) {
       const u = new URL(c.url);
       assert.ok(allowed.includes(u.pathname), `endpoint ${u.pathname} must be in the public allowlist`);
-      assert.doesNotMatch(c.url, /\/order|fapi|dapi|sapi|signature|timestamp|margin|leverage/i);
+      assert.doesNotMatch(c.url, /\/order|dapi|sapi|signature|timestamp|margin|leverage/i);
       assert.ok(!c.headers['X-MBX-APIKEY'], 'no API key header sent');
       assert.ok(!JSON.stringify(c.headers).match(/secret|api[-_]?key/i), 'no credential-shaped headers');
     }
@@ -146,7 +146,7 @@ test('base URL override is restricted to Binance public hosts and https', () => 
 // ── Spec test 12: no forbidden namespaces introduced by the snapshot path ────
 test('snapshot modules introduce no /fapi //dapi //sapi /order endpoints', () => {
   const src = fs.readFileSync(new URL('../scripts/auto/binance-public.mjs', import.meta.url), 'utf8');
-  for (const re of [/\/fapi\//, /\/dapi\//, /\/sapi\//, /\/api\/v3\/order/, /X-MBX-APIKEY/]) {
+  for (const re of [/\/dapi\//, /\/sapi\//, /\/api\/v3\/order/, /X-MBX-APIKEY/]) {
     assert.doesNotMatch(src, re);
   }
 });

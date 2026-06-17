@@ -4,7 +4,7 @@ import { loadFleet, saveFleet, mutateFleet, fleetBackend, fleetStoreInfo } from 
 import { computeMarketRegime } from './_market-regime.mjs';
 import { evaluateAutoTrader, evaluateAutoTraderWithFallback, marketsFromSnapshot } from '../../scripts/auto/auto-trader.mjs';
 import { fetchBinancePublicUniverse } from '../../scripts/auto/binance-public.mjs';
-import { evaluateTradingRadar, defaultTradingRadarState } from '../../scripts/radar/trading-radar.mjs';
+import { evaluateTradingRadar, defaultTradingRadarState, normalizeScannerSymbol } from '../../scripts/radar/trading-radar.mjs';
 import { warmBinanceAlphaMapping } from '../../scripts/safety/token-metadata.mjs';
 
 const DEFAULT_STATE = {
@@ -2095,7 +2095,12 @@ async function refreshTradingRadarFromFleet(fleet, nowMs = Date.now()) {
   const snapshot = fleet && fleet.autoMarketSnapshot;
   const previousRadar = fleet && fleet.tradingRadar && typeof fleet.tradingRadar === 'object' ? fleet.tradingRadar : null;
   const markets = snapshot ? radarMarketsFromSnapshot(snapshot) : [];
-  const radarContext = fleet && fleet.radarContext && Array.isArray(fleet.radarContext.scannerCandidates) ? fleet.radarContext.scannerCandidates : [];
+  const radarMicro = fleet.radarMicrostructureSnapshot && fleet.radarMicrostructureSnapshot.data ? fleet.radarMicrostructureSnapshot.data : {};
+  const radarContext = fleet && fleet.radarContext && Array.isArray(fleet.radarContext.scannerCandidates) ? fleet.radarContext.scannerCandidates.map(c => {
+    const sym = normalizeScannerSymbol(c);
+    const micro = sym ? radarMicro[sym] : null;
+    return micro ? { ...c, ...micro } : c;
+  }) : [];
   let alphaMapping = null;
   try {
     alphaMapping = await warmBinanceAlphaMapping({ now: nowMs });
@@ -2377,6 +2382,25 @@ async function handleFleetWorker(req, base, body) {
     });
   }
 
+  // radar-microstructure: a local worker posts futures depth/premiumIndex data
+  // specifically for top RADAR candidates to patch the gap where the spot snapshot
+  // misses futures-only listings like BEATUSDT.
+  if (base === 'radar-microstructure') {
+    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    const workerId = bodyWorkerId(req, body);
+    if (!workerId) return json(req, { ok: false, error: 'workerId is required' }, 400);
+    return await mutateFleet(async (fleet) => {
+      fleet.radarMicrostructureSnapshot = {
+        source: 'local_worker_radar_micro',
+        fetchedAt: typeof body.fetchedAt === 'string' ? body.fetchedAt.slice(0, 40) : new Date().toISOString(),
+        receivedAt: new Date().toISOString(),
+        workerId: workerId.slice(0, 80),
+        data: typeof body.data === 'object' && body.data ? body.data : {},
+      };
+      await refreshTradingRadarFromFleet(fleet);
+      return { ok: true };
+    });
+  }
 
 
   if (base === 'auto-decision') {
@@ -2808,6 +2832,7 @@ async function handleFleetWorker(req, base, body) {
       sessionId: session.sessionId,
       workerId: bodyWorkerId(req, body) || session.workerId || null,
       commandSessionId: sessionId,
+      radarCandidates: (fleet.radarContext && Array.isArray(fleet.radarContext.scannerCandidates)) ? fleet.radarContext.scannerCandidates.slice(0, 50) : [],
     });
   }
 
@@ -3008,6 +3033,9 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
         symbol: compactSymbol,
         base: c.base ? String(c.base).toUpperCase().slice(0, 24) : null,
         pair: c.pair ? String(c.pair).toUpperCase().slice(0, 24) : null,
+        futures_pair: c.futures_pair ? String(c.futures_pair).toUpperCase().slice(0, 24) : null,
+        spot_pair: c.spot_pair ? String(c.spot_pair).toUpperCase().slice(0, 24) : null,
+        alphaPair: c.alphaPair ? String(c.alphaPair).toUpperCase().slice(0, 24) : null,
         quote: c.quote ? String(c.quote).toUpperCase().slice(0, 8) : null,
         score: finiteOrNull(c.score),
         signal: c.signal ? String(c.signal).slice(0, 40) : null,
@@ -4160,7 +4188,7 @@ async function handleWorkerPair(req) {
   });
 }
 
-const FLEET_WORKER_BASES = new Set(['worker-heartbeat', 'worker-session', 'execution-result', 'position-result', 'worker-command-ack', 'live-preflight-result', 'auto-market-snapshot', 'auto-decision', 'auto-intent-request']);
+const FLEET_WORKER_BASES = new Set(['worker-heartbeat', 'worker-session', 'execution-result', 'position-result', 'worker-command-ack', 'live-preflight-result', 'auto-market-snapshot', 'radar-microstructure', 'auto-decision', 'auto-intent-request']);
 const FLEET_BROWSER_BASES = new Set(['fleet', 'config', 'start-session', 'start-live-session', 'live-emergency-stop', 'global-kill-switch', 'auto-trader', 'session', 'clear-stale-sessions', 'create-execution-intent', 'create-smoke-execution-intent', 'create-live-execution-intent', 'create-worker-pairing-code', 'radar-context']);
 
 function isWorkerRoute(route) {

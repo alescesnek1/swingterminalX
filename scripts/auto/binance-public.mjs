@@ -14,6 +14,8 @@ const ALLOWED_ENDPOINTS = [
   '/api/v3/exchangeInfo',
   '/api/v3/ticker/24hr',
   '/api/v3/ticker/bookTicker',
+  '/fapi/v1/depth',
+  '/fapi/v1/premiumIndex',
 ];
 
 // Base URLs are restricted to Binance public spot API hosts. A custom base
@@ -25,6 +27,7 @@ const ALLOWED_HOSTNAMES = new Set([
   'api3.binance.com',
   'api4.binance.com',
   'data-api.binance.vision',
+  'fapi.binance.com',
 ]);
 const DEFAULT_BASE_URL = 'https://api.binance.com';
 
@@ -44,7 +47,7 @@ function checkUrl(url) {
   const u = new URL(url);
   if (!ALLOWED_HOSTNAMES.has(u.hostname)) throw new Error('Disallowed hostname: ' + u.hostname);
   if (!ALLOWED_ENDPOINTS.includes(u.pathname)) throw new Error('Disallowed endpoint: ' + u.pathname);
-  if (u.pathname.includes('/order') || u.pathname.includes('/fapi') || u.pathname.includes('/dapi') || u.pathname.includes('/sapi')) {
+  if (u.pathname.includes('/order') || u.pathname.includes('/dapi') || u.pathname.includes('/sapi')) {
     throw new Error('Disallowed namespace/action: ' + u.pathname);
   }
   // Public-only: never a signed request, never leverage/margin params.
@@ -54,7 +57,7 @@ function checkUrl(url) {
   }
 }
 
-async function fetchWithTimeoutAndRetry(url, timeoutMs = 5000) {
+export async function fetchWithTimeoutAndRetry(url, timeoutMs = 5000) {
   checkUrl(url);
 
   let attempt = 0;

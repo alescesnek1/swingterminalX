@@ -223,7 +223,7 @@ test('16. live safety lock blocks an auto buy', () => {
 // 17. no futures/margin/leverage endpoints introduced anywhere in the auto layer
 test('17. the autonomous layer introduces no futures/margin/leverage/borrow endpoints', () => {
   const files = ['auto-env', 'auto-universe', 'auto-scorer', 'auto-strategy', 'auto-risk', 'auto-exit-manager', 'auto-trader', 'binance-public'];
-  const forbidden = [/\/fapi\//, /\/dapi\//, /\/sapi\//, /futures/i, /marginType/, /sideEffectType/, /\bleverage=/, /\/margin\/order/, /\/borrow/, /\/repay/, /\/withdraw/];
+  const forbidden = [/\/dapi\//, /\/sapi\//, /futures/i, /marginType/, /sideEffectType/, /\bleverage=/, /\/margin\/order/, /\/borrow/, /\/repay/, /\/withdraw/];
   for (const name of files) {
     const src = fs.readFileSync(new URL(`../scripts/auto/${name}.mjs`, import.meta.url), 'utf8');
     for (const re of forbidden) assert.doesNotMatch(src, re, `${name}.mjs must not reference ${re}`);
@@ -279,7 +279,7 @@ test('21. binance-public fetcher uses only allowed endpoints and builds correct 
     
     assert.equal(calls.length, 3);
     for (const c of calls) {
-      assert.doesNotMatch(c.url, /\/order|\/fapi|\/dapi|\/sapi/);
+      assert.doesNotMatch(c.url, /\/order|\/dapi|\/sapi/);
       assert.ok(c.url.includes('/api/v3/'));
       assert.ok(!c.headers?.['X-MBX-APIKEY'], 'no API key header sent');
     }

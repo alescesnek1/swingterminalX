@@ -306,3 +306,104 @@ export async function enrichMarketsWithMicrostructure(markets, opts = {}) {
   });
   return { markets: enriched, diagnostics };
 }
+
+export function radarMicrostructureConfigFromEnv(env = {}) {
+  const enabled = String(env.WORKER_RADAR_MICROSTRUCTURE_ENABLED) === 'true';
+  let topN = Number(env.WORKER_RADAR_MICROSTRUCTURE_TOP_N);
+  if (!Number.isInteger(topN) || topN <= 0) topN = 20;
+  topN = Math.min(topN, TOP_N_HARD_CAP);
+  let cacheMs = Number(env.WORKER_RADAR_MICROSTRUCTURE_CACHE_MS);
+  if (!Number.isFinite(cacheMs) || cacheMs < 0) cacheMs = 10000;
+  return { enabled, topN, cacheMs };
+}
+
+export async function enrichRadarCandidatesMicrostructure(candidates, opts = {}) {
+  const config = opts.config || radarMicrostructureConfigFromEnv(opts.env || {});
+  const fetchImpl = opts.fetchImpl || globalThis.fetch;
+  const timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : 4000;
+  const spotBase = String(opts.spotBaseUrl || DEFAULT_SPOT_BASE).replace(/\/+$/, '');
+  const futBase = String(opts.futuresBaseUrl || DEFAULT_FUTURES_BASE).replace(/\/+$/, '');
+  const now = typeof opts.now === 'function' ? opts.now : Date.now;
+  const cache = opts.cache instanceof Map ? opts.cache : null;
+
+  if (!config.enabled || !Array.isArray(candidates) || candidates.length === 0) {
+    return {};
+  }
+
+  const targets = candidates.slice(0, config.topN);
+  const microMap = {};
+
+  for (const c of targets) {
+    if (!c || typeof c !== 'object') continue;
+    const rawSymbol = String(c.pair || c.symbol || c.base || '').trim().toUpperCase();
+    if (!rawSymbol) continue;
+    const compact = rawSymbol.replace(/[^A-Z0-9]/g, '');
+    let normalized = compact;
+    if (!normalized.endsWith('USDT') && !normalized.endsWith('USDC')) {
+      const q = String(c.quote || '').toUpperCase();
+      normalized += (q === 'USDT' || q === 'USDC' ? q : 'USDT');
+    }
+
+    let isFutures = false;
+    let targetPair = null;
+    if (c.futures_pair || c.futuresPair || c.binance_market === 'futures') {
+       isFutures = true;
+       targetPair = c.futures_pair || c.futuresPair || c.pair || normalized;
+    } else if (c.spot_pair || c.spotPair || c.binance_market === 'spot') {
+       isFutures = false;
+       targetPair = c.spot_pair || c.spotPair || c.pair || normalized;
+    } else {
+       isFutures = false;
+       targetPair = c.pair || normalized;
+    }
+
+    if (cache) {
+      const hit = cache.get(normalized);
+      if (hit && now() - hit.at <= config.cacheMs) {
+        if (hit.fields && Object.keys(hit.fields).length) microMap[normalized] = hit.fields;
+        continue;
+      }
+    }
+
+    const fields = {};
+    if (isFutures) {
+       try {
+         const url = `${futBase}/fapi/v1/depth?symbol=${encodeURIComponent(targetPair)}&limit=${DEPTH_LIMIT}`;
+         const book = await getJson(url, { allowed: FUTURES_HOSTS, timeoutMs, fetchImpl });
+         const depth = computeDepthWithin1Pct(book);
+         if (depth) {
+           fields.orderBookDepthWithin1Pct = depth.orderBookDepthWithin1Pct;
+           fields.depthUsdWithin1Pct = depth.depthUsdWithin1Pct;
+           if (Number.isFinite(depth.spreadPct)) fields.spreadPct = depth.spreadPct;
+         }
+       } catch (err) {}
+       
+       if (targetPair.endsWith('USDT')) {
+         try {
+           const url = `${futBase}/fapi/v1/premiumIndex?symbol=${encodeURIComponent(targetPair)}`;
+           const prem = await getJson(url, { allowed: FUTURES_HOSTS, timeoutMs, fetchImpl });
+           const funding = fundingRateFromPremiumIndex(prem);
+           if (funding != null) fields.fundingRate = funding;
+         } catch (err) {}
+       }
+    } else {
+       try {
+         const url = `${spotBase}/api/v3/depth?symbol=${encodeURIComponent(targetPair)}&limit=${DEPTH_LIMIT}`;
+         const book = await getJson(url, { allowed: SPOT_HOSTS, timeoutMs, fetchImpl });
+         const depth = computeDepthWithin1Pct(book);
+         if (depth) {
+           fields.orderBookDepthWithin1Pct = depth.orderBookDepthWithin1Pct;
+           fields.depthUsdWithin1Pct = depth.depthUsdWithin1Pct;
+           if (Number.isFinite(depth.spreadPct)) fields.spreadPct = depth.spreadPct;
+         }
+       } catch (err) {}
+    }
+
+    if (cache) cache.set(normalized, { at: now(), fields });
+    if (Object.keys(fields).length) {
+      microMap[normalized] = fields;
+    }
+  }
+
+  return microMap;
+}

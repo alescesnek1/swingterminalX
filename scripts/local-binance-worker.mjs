@@ -6,10 +6,10 @@ import { fileURLToPath } from 'node:url';
 // Public spot market snapshot fetcher (no API keys, no signed/order endpoints).
 // Shared with the Netlify auto-trader fallback; the worker is the PRIMARY source
 // because serverless egress to Binance public endpoints can be blocked (HTTP 451).
-import { fetchBinancePublicSnapshot, PUBLIC_SNAPSHOT_SOURCE } from './auto/binance-public.mjs';
+import { resolvePublicBaseUrl, PUBLIC_SNAPSHOT_SOURCE, fetchBinancePublicSnapshot, fetchWithTimeoutAndRetry } from './auto/binance-public.mjs';
 import { createAutoLoop } from './auto/auto-loop.mjs';
 // OFF-by-default public-data microstructure sidecar overlay (top-N only).
-import { enrichMarketsWithMicrostructure, microstructureConfigFromEnv } from './auto/microstructure-enrichment.mjs';
+import { enrichMarketsWithMicrostructure, enrichRadarCandidatesMicrostructure, microstructureConfigFromEnv, radarMicrostructureConfigFromEnv } from './auto/microstructure-enrichment.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -480,9 +480,12 @@ let marketSnapshotTimer = null;
 let autoLoop = null;
 let latestAutoControl = null;
 let latestMarketSnapshot = null;
+let latestRadarCandidates = [];
 let hydratedSinceStart = false;
 let lastBackendOkAt = 0;
 let marketSnapshotRunning = false;
+let radarMicrostructureRunning = false;
+let radarMicroCache = new Map();
 let marketSnapshotFailLogged = false;
 // Per-symbol microstructure TTL cache (OFF-by-default feature; only populated
 // when WORKER_MARKET_MICROSTRUCTURE_ENABLED=true). Lives for the worker's
@@ -776,6 +779,44 @@ async function fetchAndPostMarketSnapshot() {
     }
   } finally {
     marketSnapshotRunning = false;
+  }
+}
+
+async function fetchAndPostRadarMicrostructureSnapshot() {
+  if (radarMicrostructureRunning) return { ok: false, count: 0 };
+  const config = radarMicrostructureConfigFromEnv(process.env);
+  if (!config.enabled) return { ok: false, count: 0 };
+  if (!latestRadarCandidates || !latestRadarCandidates.length) return { ok: false, count: 0 };
+  
+  radarMicrostructureRunning = true;
+  try {
+    const microMap = await enrichRadarCandidatesMicrostructure(latestRadarCandidates, {
+      config,
+      env: process.env,
+      fetchImpl: fetchWithTimeoutAndRetry,
+      cache: radarMicroCache,
+      now: Date.now,
+    });
+    const keys = Object.keys(microMap);
+    if (keys.length === 0) return { ok: true, count: 0 };
+    
+    try {
+      const res = await fetch(`${controlUrl}/api/bot/radar-microstructure`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-BOT-WORKER-TOKEN': workerToken },
+        body: JSON.stringify({ workerId, data: microMap, fetchedAt: new Date().toISOString() }),
+      });
+      console.log(`[RADAR-MICRO] Posted radar microstructure (${keys.length} candidates) ok=${res.ok}`);
+      return { ok: res.ok, count: keys.length };
+    } catch (err) {
+      console.log(`[RADAR-MICRO][WARN] Snapshot post failed: ${err.message}`);
+      return { ok: false, error: err.message };
+    }
+  } catch (err) {
+    console.log(`[RADAR-MICRO][WARN] Enrichment failed: ${err.message}`);
+    return { ok: false, error: err.message };
+  } finally {
+    radarMicrostructureRunning = false;
   }
 }
 
@@ -1515,6 +1556,10 @@ async function tick() {
   const config = data.config || {};
   const riskState = session.riskState || data.session.riskState || null;
 
+  if (Array.isArray(data.radarCandidates)) {
+    latestRadarCandidates = data.radarCandidates;
+  }
+
   await processCommands(data.commands);
 
   // Emergency close can also arrive as a session flag (in case the command was
@@ -1695,8 +1740,10 @@ async function main() {
     console.log(`[SNAPSHOT] Public market snapshot feed enabled (every ${Math.round(MARKET_SNAPSHOT_INTERVAL_MS / 1000)}s, public endpoints only).`);
     marketSnapshotTimer = setInterval(() => {
       fetchAndPostMarketSnapshot().catch((err) => console.log(`[SNAPSHOT][WARN] snapshot tick failed: ${err.message}`));
+      fetchAndPostRadarMicrostructureSnapshot().catch((err) => console.log(`[RADAR-MICRO][WARN] tick failed: ${err.message}`));
     }, MARKET_SNAPSHOT_INTERVAL_MS);
     fetchAndPostMarketSnapshot().catch((err) => console.log(`[SNAPSHOT][WARN] snapshot tick failed: ${err.message}`));
+    fetchAndPostRadarMicrostructureSnapshot().catch((err) => console.log(`[RADAR-MICRO][WARN] tick failed: ${err.message}`));
   }
 }
 

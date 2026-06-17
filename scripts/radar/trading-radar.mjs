@@ -1159,7 +1159,7 @@ function buildPipeline(candidates, universeSize) {
   return pipeline;
 }
 
-function normalizeScannerSymbol(c) {
+export function normalizeScannerSymbol(c) {
   const raw = String(c && (c.pair || c.symbol || c.base) || '').trim().toUpperCase();
   if (!raw) return '';
   const compact = raw.replace(/[^A-Z0-9]/g, '');

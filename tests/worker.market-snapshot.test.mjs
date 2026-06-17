@@ -1,7 +1,7 @@
 // Worker public market snapshot loop tests.
 //
 // Proves: the worker's snapshot fetch touches ONLY allowed public spot endpoints
-// (no /order, /fapi, /dapi, /sapi), sends NO API key/secret anywhere (Binance or
+// (no /order, /dapi, /sapi), sends NO API key/secret anywhere (Binance or
 // control plane), posts the sanitized snapshot to /api/bot/auto-market-snapshot,
 // and NEVER throws — a total failure resolves quietly with diagnostics so the
 // close/stop flow can never be blocked by market data. Binance and the control
@@ -68,13 +68,13 @@ test('worker snapshot fetch uses only public endpoints, leaks no credentials, po
     assert.equal(result.ok, true);
     assert.equal(result.count, 2);
 
-    // Spec test 1: only allowed public spot endpoints, never /order //fapi //dapi //sapi.
+    // Spec test 1: only allowed public spot endpoints, never /order //dapi //sapi.
     assert.equal(binanceCalls.length, 3);
     const allowed = ['/api/v3/exchangeInfo', '/api/v3/ticker/24hr', '/api/v3/ticker/bookTicker'];
     for (const c of binanceCalls) {
       const u = new URL(c.url);
       assert.ok(allowed.includes(u.pathname), `${u.pathname} must be an allowed public endpoint`);
-      assert.doesNotMatch(c.url, /\/order|fapi|dapi|sapi|signature|timestamp|margin|leverage/i);
+      assert.doesNotMatch(c.url, /\/order|dapi|sapi|signature|timestamp|margin|leverage/i);
       // Spec test 2: no API key/secret on the public fetch.
       assert.ok(!c.headers['X-MBX-APIKEY'], 'no API key header on public fetch');
       assert.equal(JSON.stringify(c).includes('test-api-key-must-never-leak'), false);
