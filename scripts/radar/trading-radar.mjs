@@ -1212,8 +1212,7 @@ export function evaluateTradingRadar({
       seenSymbols.add(sym);
       const sc = scannerMap.get(sym);
       if (!sc) return m;
-      return {
-        ...m,
+      const overlay = {
         scannerScore: sc.score,
         scannerPanic: sc.panic,
         scannerSignal: sc.signal,
@@ -1233,6 +1232,21 @@ export function evaluateTradingRadar({
         change24hPct: m.change24hPct ?? sc.c24,
         priceChangePercent: m.priceChangePercent ?? sc.c24
       };
+      
+      const MICRO_KEYS = [
+        'orderBookDepthWithin1Pct', 'depthUsdWithin1Pct', 'spreadPct', 'openInterestChangePct',
+        'fundingRate', 'longLiquidationSpike', 'shortLiquidationSpike', 'marketSellRatio',
+        'takerBuySellRatio', 'cumulativeDelta', 'deltaImprovementPct', 'bidDepthRebuildPct',
+        'absorptionScore', 'distanceToSupportPct', 'marketBuyVolumeDominance', 'buyVolumeDominance',
+        'bidAbsorption', 'aggressiveSellsFailed', 'supportRetested', 'liquidationLowRetested',
+        'depthUsd', 'structuralReclaim', 'higherLow', 'noNewLow', 'reclaimLevel', 'squeezeTrigger'
+      ];
+      for (const k of MICRO_KEYS) {
+        if (sc[k] !== undefined && overlay[k] === undefined) {
+          overlay[k] = sc[k];
+        }
+      }
+      return { ...m, ...overlay };
     });
 
     for (const sc of scannerCandidates || []) {
@@ -1240,7 +1254,7 @@ export function evaluateTradingRadar({
          let sym = normalizeScannerSymbol(sc);
          if (!sym) continue;
          if (!seenSymbols.has(sym)) {
-            mergedMarkets.push({
+            const newCandidate = {
                symbol: sym,
                lastPrice: sc.price,
                quoteVolume24h: sc.volume,
@@ -1263,7 +1277,21 @@ export function evaluateTradingRadar({
                change24hPct: sc.c24,
                priceChangePercent: sc.c24,
                status: 'TRADING'
-            });
+            };
+            const MICRO_KEYS = [
+              'orderBookDepthWithin1Pct', 'depthUsdWithin1Pct', 'spreadPct', 'openInterestChangePct',
+              'fundingRate', 'longLiquidationSpike', 'shortLiquidationSpike', 'marketSellRatio',
+              'takerBuySellRatio', 'cumulativeDelta', 'deltaImprovementPct', 'bidDepthRebuildPct',
+              'absorptionScore', 'distanceToSupportPct', 'marketBuyVolumeDominance', 'buyVolumeDominance',
+              'bidAbsorption', 'aggressiveSellsFailed', 'supportRetested', 'liquidationLowRetested',
+              'depthUsd', 'structuralReclaim', 'higherLow', 'noNewLow', 'reclaimLevel', 'squeezeTrigger'
+            ];
+            for (const k of MICRO_KEYS) {
+              if (sc[k] !== undefined && newCandidate[k] === undefined) {
+                newCandidate[k] = sc[k];
+              }
+            }
+            mergedMarkets.push(newCandidate);
          }
        }
     }

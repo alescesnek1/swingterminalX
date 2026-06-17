@@ -2417,10 +2417,99 @@ async function handleFleetWorker(req, base, body) {
     });
   }
 
+  if (base === 'radar-debug') {
+    if (req.method !== 'GET') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    if (!checkWorkerToken(req)) return json(req, { ok: false, error: 'Unauthorized' }, 401);
+    const sym = new URL(req.url).searchParams.get('symbol') || 'BEATUSDT';
+    
+    return await mutateFleet(async (fleet) => {
+      const snap = fleet.radarMicrostructureSnapshot || {};
+      const data = snap.data || {};
+      const microKeys = Object.keys(data);
+      
+      const candidates = (fleet.radarContext && Array.isArray(fleet.radarContext.scannerCandidates)) 
+        ? fleet.radarContext.scannerCandidates 
+        : [];
+      const rawCandidate = candidates.find(c => String(c.symbol).toUpperCase() === sym) || null;
+      
+      function getKeys(c) {
+        if (!c || typeof c !== 'object') return [];
+        const keys = new Set();
+        const add = (k) => {
+          if (typeof k !== 'string' || !k.trim()) return;
+          const s = k.trim().toUpperCase();
+          if (s.includes('ALPHA_') || s.includes('/')) return;
+          keys.add(s.replace(/[^A-Z0-9]/g, ''));
+        };
+        add(normalizeScannerSymbol(c));
+        add(c.futures_pair);
+        add(c.futuresPair);
+        add(c.spot_pair);
+        add(c.spotPair);
+        add(c.pair);
+        add(c.symbol);
+        if (c.base && c.quote) add(`${c.base}${c.quote}`);
+        return Array.from(keys);
+      }
+      
+      const lookupKeys = rawCandidate ? getKeys(rawCandidate) : [];
+      let matchedMicroKey = null;
+      for (const k of lookupKeys) {
+        if (data[k]) { matchedMicroKey = k; break; }
+      }
+      
+      const finalCandidates = fleet.tradingRadar && Array.isArray(fleet.tradingRadar.candidates) ? fleet.tradingRadar.candidates : [];
+      const finalCandidate = finalCandidates.find(c => String(c.symbol).toUpperCase() === sym) || null;
+      
+      return json(req, {
+        ok: true,
+        symbol: sym,
+        rawMicroKeysCount: microKeys.length,
+        rawMicroKeys: microKeys.slice(0, 20),
+        rawCandidate: rawCandidate ? { symbol: rawCandidate.symbol, base: rawCandidate.base, quote: rawCandidate.quote } : null,
+        lookupKeysTried: lookupKeys,
+        matchedMicroKey,
+        mergedCandidateStaticFields: rawCandidate && matchedMicroKey ? {
+          orderBookDepthWithin1Pct: data[matchedMicroKey].orderBookDepthWithin1Pct,
+          depthUsdWithin1Pct: data[matchedMicroKey].depthUsdWithin1Pct,
+          spreadPct: data[matchedMicroKey].spreadPct,
+          fundingRate: data[matchedMicroKey].fundingRate
+        } : null,
+        finalCandidatePresent: !!finalCandidate,
+        hasStaticMicrostructure: finalCandidate ? finalCandidate.hasStaticMicrostructure : null,
+        missingAbsorptionFields: finalCandidate ? finalCandidate.missingAbsorptionFields : null,
+        absorptionBlockedReason: finalCandidate ? finalCandidate.absorptionBlockedReason : null,
+      });
+    });
+  }
+
   // radar-microstructure: a local worker posts futures depth/premiumIndex data
   // specifically for top RADAR candidates to patch the gap where the spot snapshot
   // misses futures-only listings like BEATUSDT.
   if (base === 'radar-microstructure') {
+    if (req.method === 'GET') {
+      if (!checkWorkerToken(req)) return json(req, { ok: false, error: 'Unauthorized' }, 401);
+      return await mutateFleet(async (fleet) => {
+        const snap = fleet.radarMicrostructureSnapshot || {};
+        const data = snap.data || {};
+        const keys = Object.keys(data);
+        const beat = data['BEATUSDT'];
+        return json(req, {
+          ok: true,
+          receivedAt: snap.receivedAt,
+          metrics: keys.length,
+          keys: keys.slice(0, 20),
+          hasBeat: !!beat,
+          beat: beat ? {
+            orderBookDepthWithin1Pct: beat.orderBookDepthWithin1Pct,
+            depthUsdWithin1Pct: beat.depthUsdWithin1Pct,
+            spreadPct: beat.spreadPct,
+            fundingRate: beat.fundingRate
+          } : null
+        });
+      });
+    }
+
     if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
     const workerId = bodyWorkerId(req, body);
     if (!workerId) return json(req, { ok: false, error: 'workerId is required' }, 400);
