@@ -184,6 +184,68 @@ test('Binance Alpha helpers: object-safety, chain normalization, and disabled ch
   assert.doesNotMatch(disabledHtml, /<a /);
 });
 
+test('RIF: inferred spot rows never get a fabricated Binance spot link', () => {
+  const { getBinanceLink, _binanceDetailLinksHtml } = loadTerminalLinkHelpers();
+
+  // 1) Pure inference (symbol/baseAsset/quoteAsset only) -> no spot link.
+  const inferred = getBinanceLink({ symbol: 'RIFUSDT', baseAsset: 'RIF', quoteAsset: 'USDT' });
+  assert.equal(inferred.available, false);
+  assert.equal(inferred.url, null);
+
+  // The real production vector: a futures-venue row carries generic pair/quote.
+  // Those must NOT be turned into a /trade spot URL.
+  const futuresVenueRow = { symbol: 'RIF', pair: 'RIFUSDT', quote: 'USDT', binance_available: true, binance_market: 'futures', futures_pair: 'RIFUSDT' };
+  const fv = getBinanceLink(futuresVenueRow);
+  assert.equal(fv.market, 'futures');
+  assert.equal(fv.url, 'https://www.binance.com/en/futures/RIFUSDT');
+  const fvHtml = _binanceDetailLinksHtml(futuresVenueRow);
+  assert.match(fvHtml, /BINANCE FUTURES → RIFUSDT/);
+  assert.doesNotMatch(fvHtml, /\/trade\/RIF_USDT/);
+  assert.doesNotMatch(fvHtml, /BINANCE SPOT/);
+
+  // A hybrid row with generic pair/quote but NO verified spot/futures metadata
+  // gets no Binance trade link at all (never silently a wrong spot pair).
+  const hybrid = getBinanceLink({ symbol: 'RIF', pair: 'RIFUSDT', quote: 'USDT', binance_available: true });
+  assert.equal(hybrid.available, false);
+  assert.equal(hybrid.url, null);
+});
+
+test('verified futures / verified spot / both / CoinGecko-only link semantics', () => {
+  const { getBinanceLink, _binanceDetailLinksHtml } = loadTerminalLinkHelpers();
+
+  // 2) Verified futures RIF -> futures link.
+  const fut = getBinanceLink({ symbol: 'RIFUSDT', binance_market: 'futures', futures_pair: 'RIFUSDT' });
+  assert.equal(fut.url, 'https://www.binance.com/en/futures/RIFUSDT');
+  assert.equal(fut.market, 'futures');
+
+  // 3) Verified spot RIF (explicit spotPair) -> spot link with split base/quote.
+  const spot = getBinanceLink({ symbol: 'RIFUSDT', binance_market: 'spot', spotPair: 'RIFUSDT' });
+  assert.equal(spot.url, 'https://www.binance.com/en/trade/RIF_USDT?type=spot');
+  assert.equal(spot.pair, 'RIF/USDT');
+  assert.equal(spot.market, 'spot');
+  assert.match(_binanceDetailLinksHtml({ symbol: 'RIFUSDT', binance_market: 'spot', spotPair: 'RIFUSDT', binance_available: true }), /BINANCE SPOT → RIF\/USDT/);
+
+  // 4) Both verified, futures-sourced -> futures primary + spot secondary.
+  const both = { symbol: 'RIF', binance_available: true, binance_market: 'futures', futures_pair: 'RIFUSDT', spot_pair: 'RIFUSDT' };
+  assert.equal(getBinanceLink(both).market, 'futures');
+  const bothHtml = _binanceDetailLinksHtml(both);
+  const futIdx = bothHtml.indexOf('/futures/RIFUSDT');
+  const spotIdx = bothHtml.indexOf('/trade/RIF_USDT');
+  assert.ok(futIdx >= 0 && spotIdx >= 0, 'both links rendered');
+  assert.ok(futIdx < spotIdx, 'futures rendered first for a futures-sourced row');
+
+  // 4b) Both verified, spot-sourced -> spot primary + futures secondary.
+  const bothSpot = { symbol: 'XYZ', binance_available: true, binance_market: 'spot', spot_pair: 'XYZUSDT', futures_pair: 'XYZUSDT' };
+  assert.equal(getBinanceLink(bothSpot).market, 'spot');
+  const bothSpotHtml = _binanceDetailLinksHtml(bothSpot);
+  assert.ok(bothSpotHtml.indexOf('/trade/XYZ_USDT') < bothSpotHtml.indexOf('/futures/XYZUSDT'), 'spot first for a spot-sourced row');
+
+  // 5) CoinGecko-only row -> no fabricated Binance link.
+  const cgOnly = getBinanceLink({ symbol: 'FOO', exchange: 'DEX', name: 'Foo Token' });
+  assert.equal(cgOnly.available, false);
+  assert.equal(cgOnly.url, null);
+});
+
 test('scanner 24h sort is numeric, reversible, null-last, and default sort is unchanged', () => {
   const { _scannerCompare, _scannerC24Value } = loadScannerSortHelpers();
   const rows = [

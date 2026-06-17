@@ -1531,40 +1531,115 @@ function _binanceAlphaLink(d, sym) {
 
   return { url: null, pair: sym || null, available: false, market: 'alpha-unavailable' };
 }
+// Quote assets used to split a compact Binance pair string ("RIFUSDT") into
+// base + quote. Longer / more specific quotes are listed BEFORE their
+// substrings (TUSD/BUSD/FDUSD/USDC/USDT before bare USD) so a pair like
+// "BTCTUSD" resolves to BTC/TUSD, never BTCT/USD.
+const _BINANCE_QUOTE_ASSETS = ['USDT', 'USDC', 'FDUSD', 'TUSD', 'BUSD', 'DAI', 'EUR', 'TRY', 'BTC', 'ETH', 'BNB', 'USD'];
+function _splitBinancePair(pair, fallbackBase) {
+  const compact = _compactBinancePair(pair);
+  if (!compact) return null;
+  for (const q of _BINANCE_QUOTE_ASSETS) {
+    if (compact.length > q.length && compact.endsWith(q)) {
+      return { base: compact.slice(0, -q.length), quote: q };
+    }
+  }
+  // Last resort: if we already know the base symbol, treat the remainder as
+  // the quote. Never invents a quote when the base prefix doesn't match.
+  const fb = _compactBinancePair(fallbackBase);
+  if (fb && compact.startsWith(fb) && compact.length > fb.length) {
+    return { base: fb, quote: compact.slice(fb.length) };
+  }
+  return null;
+}
+
+// Is there a VERIFIED Binance USDⓈ-M futures listing for this row? Verification
+// comes from project data only — never inferred from symbol/baseAsset/quoteAsset.
+function _hasVerifiedFutures(d) {
+  if (!d) return false;
+  return d.binance_market === 'futures'
+    || d.binanceFuturesListed === true
+    || !!_compactBinancePair(d.futures_pair || d.futuresPair);
+}
+
+function _futuresLinkFor(d, sym) {
+  // Pair string for an already-verified futures row. `sym + 'USDT'` is only a
+  // last-resort constructor for a row verified via the binanceFuturesListed
+  // flag that carried no explicit pair — it never establishes the listing.
+  const fpair = _compactBinancePair(
+    d.futures_pair || d.futuresPair || (d.binance_market === 'futures' ? d.pair : '') || (sym + 'USDT'),
+  );
+  if (!fpair) return { url: null, pair: null, available: false, market: 'futures' };
+  return { url: `https://www.binance.com/en/futures/${fpair}`, pair: fpair, available: true, market: 'futures' };
+}
+
+// Verified Binance SPOT pair string for this row, or null. The ONLY accepted
+// sources are project-verified spot metadata — never the generic venue
+// `pair`/`quote`, which on a futures-sourced or CoinGecko/hybrid row is not a
+// spot listing (that inference is exactly what opened the wrong pair, e.g. RIF).
+function _spotPairString(d, sym) {
+  const explicit = _compactBinancePair(d.spot_pair || d.spotPair);
+  if (explicit) return explicit;
+  if (d.binance_market === 'spot') {
+    // A spot-sourced row's venue pair IS the verified spot pair.
+    const p = _compactBinancePair(d.spot_pair || d.spotPair || d.pair);
+    if (p) return p;
+  }
+  if (d.binanceSpotListed === true) {
+    const p = _compactBinancePair(d.spot_pair || d.spotPair || d.pair);
+    if (p) return p;
+    if (d.quote) return _compactBinancePair(sym) + _compactBinancePair(d.quote);
+  }
+  return null;
+}
+
+// Client-side verified spot fallback: the exchangeInfo Sets are built from
+// Binance spot exchangeInfo with isSpotTradingAllowed === true (fetchBinancePairs),
+// so membership is a real listing, not an inference. Used before the first
+// /api/markets row lands, or when the server omitted spot metadata.
+function _clientVerifiedSpotPair(sym) {
+  if (BINANCE_USDC_PAIRS.has(sym + 'USDC')) return sym + 'USDC';
+  if (BINANCE_USDT_PAIRS.has(sym + 'USDT')) return sym + 'USDT';
+  return null;
+}
+
+function _verifiedSpotLink(d, sym) {
+  let pairStr = _spotPairString(d, sym);
+  if (!pairStr) pairStr = _clientVerifiedSpotPair(sym);
+  if (!pairStr) return { url: null, pair: null, available: false, market: 'spot' };
+  const parts = _splitBinancePair(pairStr, sym);
+  if (!parts || !parts.base || !parts.quote) return { url: null, pair: null, available: false, market: 'spot' };
+  return {
+    url: `https://www.binance.com/en/trade/${parts.base}_${parts.quote}?type=spot`,
+    pair: `${parts.base}/${parts.quote}`,
+    available: true,
+    market: 'spot',
+  };
+}
+
+// Resolve the PRIMARY Binance trade link for a row. Trade links are emitted
+// ONLY from verified spot/futures metadata — never fabricated from a row that
+// merely "looks like" a Binance pair. Priority:
+//   • spot-sourced row (binance_market === 'spot') keeps spot as primary;
+//   • otherwise a verified futures link is preferred (its URL has been the most
+//     reliable in this UI);
+//   • then a true Binance Alpha deep link;
+//   • then a verified spot link;
+//   • else no Binance trade link.
 function getBinanceLink(d) {
   d = d || {};
   const sym = String(d.symbol || '').toUpperCase();
   // Honor the server-side hint first — for non-Binance/DEX coins this
-  // short-circuits before we try to construct a fake Binance URL.
+  // short-circuits before we try to construct any Binance URL.
   if (d.binance_available === false) return { url: null, pair: null, available: false };
 
-  // Futures is the PRIMARY trading link when the row is futures-listed —
-  // including rows the /api/markets feed badges exchange:'ALPHA' (its
-  // nickname for Binance USDⓈ-M Futures). The optional Binance Alpha
-  // deep link is rendered separately by the detail panel.
-  if (d.binance_market === 'futures') {
-    const fpair = _compactBinancePair(d.futures_pair || d.pair || (sym + 'USDT'));
-    if (!fpair) return { url: null, pair: null, available: false, market: 'futures' };
-    return {
-      url: `https://www.binance.com/en/futures/${fpair}`,
-      pair: fpair,
-      available: true,
-      market: 'futures',
-    };
-  }
+  const spot = _verifiedSpotLink(d, sym);
+  const futures = _hasVerifiedFutures(d) ? _futuresLinkFor(d, sym) : { url: null, pair: null, available: false, market: 'futures' };
 
-  // True Binance Alpha rows (strong metadata only) resolve to a verified
-  // /en/alpha/<chain>/<contract> deep link, or unavailable.
-  if (_isBinanceAlphaRow(d)) {
-    return _binanceAlphaLink(d, sym);
-  }
-
-  if (d.pair && d.quote) {
-    const quote = String(d.quote || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-    return { url: `https://www.binance.com/en/trade/${sym}_${quote}?type=spot`, pair: `${sym}/${quote}`, available: true, market: 'spot' };
-  }
-  if (BINANCE_USDC_PAIRS.has(sym + 'USDC')) return { url: `https://www.binance.com/en/trade/${sym}_USDC?type=spot`, pair: sym + '/USDC', available: true, market: 'spot' };
-  if (BINANCE_USDT_PAIRS.has(sym + 'USDT')) return { url: `https://www.binance.com/en/trade/${sym}_USDT?type=spot`, pair: sym + '/USDT', available: true, market: 'spot' };
+  if (d.binance_market === 'spot' && spot.available) return spot;
+  if (futures.available) return futures;
+  if (_isBinanceAlphaRow(d)) return _binanceAlphaLink(d, sym);
+  if (spot.available) return spot;
   return { url: null, pair: null, available: false };
 }
 
@@ -1604,11 +1679,26 @@ function _binanceDetailButtonHtml(binance) {
 // when chain/contract metadata is missing).
 function _binanceDetailLinksHtml(d) {
   d = d || {};
+  const sym = String(d.symbol || '').toUpperCase();
   const primary = getBinanceLink(d);
   let html = _binanceDetailButtonHtml(primary);
+
+  // Secondary verified trade link for the OTHER venue, only when BOTH spot and
+  // futures are independently verified. Futures-primary rows (e.g. RIF, BEAT)
+  // gain a spot chip only if a real spot listing exists; spot-primary rows gain
+  // a futures chip only if a real futures listing exists. Never fabricated.
+  if (primary.available && primary.market === 'futures') {
+    const spot = _verifiedSpotLink(d, sym);
+    if (spot.available) html += _binanceDetailButtonHtml(spot);
+  } else if (primary.available && primary.market === 'spot' && _hasVerifiedFutures(d)) {
+    const futures = _futuresLinkFor(d, sym);
+    if (futures.available) html += _binanceDetailButtonHtml(futures);
+  }
+
+  // Optional Binance Alpha deep link for true Alpha rows whose primary link is
+  // not already the Alpha link (e.g. a futures-listed Alpha token like BEAT).
   const primaryIsAlpha = primary.market === 'alpha' || primary.market === 'alpha-unavailable';
   if (_isBinanceAlphaRow(d) && !primaryIsAlpha) {
-    const sym = String(d.symbol || '').toUpperCase();
     html += _binanceDetailButtonHtml(_binanceAlphaLink(d, sym));
   }
   return html;
