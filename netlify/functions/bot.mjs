@@ -2382,6 +2382,19 @@ async function handleFleetWorker(req, base, body) {
     });
   }
 
+  // radar-candidates: safe, read-only endpoint returning the top RADAR candidates
+  // for the standalone microstructure producer to pull targets without initiating
+  // a worker session.
+  if (base === 'radar-candidates') {
+    if (req.method !== 'GET') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    return await mutateFleet(async (fleet) => {
+      const candidates = (fleet.radarContext && Array.isArray(fleet.radarContext.scannerCandidates)) 
+        ? fleet.radarContext.scannerCandidates.slice(0, 50) 
+        : [];
+      return json(req, { ok: true, radarCandidates: candidates });
+    });
+  }
+
   // radar-microstructure: a local worker posts futures depth/premiumIndex data
   // specifically for top RADAR candidates to patch the gap where the spot snapshot
   // misses futures-only listings like BEATUSDT.
@@ -4188,7 +4201,7 @@ async function handleWorkerPair(req) {
   });
 }
 
-const FLEET_WORKER_BASES = new Set(['worker-heartbeat', 'worker-session', 'execution-result', 'position-result', 'worker-command-ack', 'live-preflight-result', 'auto-market-snapshot', 'radar-microstructure', 'auto-decision', 'auto-intent-request']);
+const FLEET_WORKER_BASES = new Set(['worker-heartbeat', 'worker-session', 'execution-result', 'position-result', 'worker-command-ack', 'live-preflight-result', 'auto-market-snapshot', 'radar-microstructure', 'radar-candidates', 'auto-decision', 'auto-intent-request']);
 const FLEET_BROWSER_BASES = new Set(['fleet', 'config', 'start-session', 'start-live-session', 'live-emergency-stop', 'global-kill-switch', 'auto-trader', 'session', 'clear-stale-sessions', 'create-execution-intent', 'create-smoke-execution-intent', 'create-live-execution-intent', 'create-worker-pairing-code', 'radar-context']);
 
 function isWorkerRoute(route) {
