@@ -1611,6 +1611,7 @@ function _clientVerifiedSpotPair(sym) {
 // metadata; keep futures link only.
 const _BINANCE_SPOT_WEBROUTE_DENYLIST = new Set([
   'RIFUSDT',
+  'PORTALUSDT',
 ]);
 function _isSpotWebRouteSafe(pairStr) {
   return !_BINANCE_SPOT_WEBROUTE_DENYLIST.has(_compactBinancePair(pairStr));

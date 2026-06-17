@@ -246,7 +246,7 @@ test('verified futures / verified spot / both / CoinGecko-only link semantics', 
   assert.equal(cgOnly.url, null);
 });
 
-test('RIF: spot web route is unsafe — futures stays, spot link suppressed even with spot_pair', () => {
+test('RIF and PORTAL: spot web route is unsafe — futures stays, spot link suppressed even with spot_pair', () => {
   const { getBinanceLink, _binanceDetailLinksHtml } = loadTerminalLinkHelpers();
 
   // 1) Both spot+futures verified, but RIFUSDT spot web route redirects to
@@ -261,6 +261,16 @@ test('RIF: spot web route is unsafe — futures stays, spot link suppressed even
   assert.doesNotMatch(html, /\/trade\/RIF_USDT/);
   assert.doesNotMatch(html, /BINANCE SPOT/);
 
+  // 1b) Same for PORTALUSDT
+  const portalBoth = { symbol: 'PORTALUSDT', binance_available: true, binance_market: 'futures', futures_pair: 'PORTALUSDT', spot_pair: 'PORTALUSDT' };
+  const portalPrimary = getBinanceLink(portalBoth);
+  assert.equal(portalPrimary.market, 'futures');
+  assert.equal(portalPrimary.url, 'https://www.binance.com/en/futures/PORTALUSDT');
+  const portalHtml = _binanceDetailLinksHtml(portalBoth);
+  assert.match(portalHtml, /BINANCE FUTURES → PORTALUSDT/);
+  assert.doesNotMatch(portalHtml, /\/trade\/PORTAL_USDT/);
+  assert.doesNotMatch(portalHtml, /BINANCE SPOT/);
+
   // 2) Spot-sourced RIF with denylisted route -> no active spot link at all.
   const spotOnly = { symbol: 'RIFUSDT', binance_available: true, binance_market: 'spot', spot_pair: 'RIFUSDT' };
   const link = getBinanceLink(spotOnly);
@@ -268,6 +278,11 @@ test('RIF: spot web route is unsafe — futures stays, spot link suppressed even
   assert.equal(link.url, null);
   const spotHtml = _binanceDetailLinksHtml(spotOnly);
   assert.doesNotMatch(spotHtml, /\/trade\/RIF_USDT/);
+  
+  const portalSpotOnly = { symbol: 'PORTALUSDT', binance_available: true, binance_market: 'spot', spot_pair: 'PORTALUSDT' };
+  const portalSpotLink = getBinanceLink(portalSpotOnly);
+  assert.equal(portalSpotLink.available, false);
+  assert.equal(portalSpotLink.url, null);
 
   // 3) The presence of a denylisted spot route never suppresses the futures link.
   assert.match(_binanceDetailLinksHtml(both), /\/en\/futures\/RIFUSDT/);

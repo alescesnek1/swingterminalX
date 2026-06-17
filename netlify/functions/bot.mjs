@@ -2097,8 +2097,30 @@ async function refreshTradingRadarFromFleet(fleet, nowMs = Date.now()) {
   const markets = snapshot ? radarMarketsFromSnapshot(snapshot) : [];
   const radarMicro = fleet.radarMicrostructureSnapshot && fleet.radarMicrostructureSnapshot.data ? fleet.radarMicrostructureSnapshot.data : {};
   const radarContext = fleet && fleet.radarContext && Array.isArray(fleet.radarContext.scannerCandidates) ? fleet.radarContext.scannerCandidates.map(c => {
-    const sym = normalizeScannerSymbol(c);
-    const micro = sym ? radarMicro[sym] : null;
+    function getKeys(c) {
+      if (!c || typeof c !== 'object') return [];
+      const keys = new Set();
+      const add = (k) => {
+        if (typeof k !== 'string' || !k.trim()) return;
+        const s = k.trim().toUpperCase();
+        if (s.includes('ALPHA_') || s.includes('/')) return;
+        keys.add(s.replace(/[^A-Z0-9]/g, ''));
+      };
+      add(normalizeScannerSymbol(c));
+      add(c.futures_pair);
+      add(c.futuresPair);
+      add(c.spot_pair);
+      add(c.spotPair);
+      add(c.pair);
+      add(c.symbol);
+      if (c.base && c.quote) add(`${c.base}${c.quote}`);
+      return Array.from(keys);
+    }
+    let micro = null;
+    const keys = getKeys(c);
+    for (const k of keys) {
+      if (radarMicro[k]) { micro = radarMicro[k]; break; }
+    }
     return micro ? { ...c, ...micro } : c;
   }) : [];
   let alphaMapping = null;

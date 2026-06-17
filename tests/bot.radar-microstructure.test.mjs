@@ -98,3 +98,41 @@ test('radar-microstructure endpoint stores sanitized microstructure map', async 
   assert.ok(typeof jsonBody.metrics === 'number');
   assert.ok(typeof jsonBody.receivedAt === 'string');
 });
+
+test('radar microstructure lookup tries multiple safe candidate keys and ignores alpha alias', async () => {
+  if (!process.env.BOT_OWNER_KEY || !process.env.BOT_WORKER_TOKEN) return;
+
+  // 1) Push radar context with a BEATUSDT candidate shaped like production
+  const cReq = mockEvent('/api/bot/radar-context', 'POST', {
+    scannerCandidates: [
+      {
+        symbol: 'BEATUSDT',
+        base: 'BEAT',
+        pair: 'BEATUSDT',
+        futures_pair: null,
+        spot_pair: null,
+        alphaPair: 'ALPHA_451/USDT',
+        quote: 'USDT'
+      }
+    ]
+  }, { 'X-BOT-OWNER-KEY': process.env.BOT_OWNER_KEY });
+  await botHandler(cReq);
+
+  // 2) Post microstructure keyed under 'BEATUSDT'
+  const mReq = mockEvent('/api/bot/radar-microstructure', 'POST', {
+    workerId: 'worker1',
+    data: { BEATUSDT: { orderBookDepthWithin1Pct: 8888, spreadPct: 0.1 } }
+  }, { 'X-BOT-WORKER-TOKEN': process.env.BOT_WORKER_TOKEN });
+  await botHandler(mReq);
+
+  // 3) Fetch worker-session and verify merge
+  const wReq = mockEvent('/api/bot/worker-session?sessionId=sess1&workerId=worker1', 'GET', null, { 'X-BOT-WORKER-TOKEN': process.env.BOT_WORKER_TOKEN });
+  const wRes = await botHandler(wReq);
+  const wRaw = typeof wRes.json === 'function' ? await wRes.text() : wRes.body;
+  const wJson = JSON.parse(wRaw);
+  
+  const beat = wJson.radarCandidates.find(c => c.symbol === 'BEATUSDT');
+  assert.ok(beat, 'candidate exists');
+  assert.strictEqual(beat.orderBookDepthWithin1Pct, 8888, 'data was merged using BEATUSDT fallback key');
+  assert.ok(!wJson.radarCandidates.some(c => c.orderBookDepthWithin1Pct === 'ALPHA_451USDT'), 'alpha pair should not be used');
+});
