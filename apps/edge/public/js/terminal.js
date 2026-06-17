@@ -1429,16 +1429,50 @@ function isOnBinance(d) {
   return BINANCE_USDC_PAIRS.has(sym + 'USDC') || BINANCE_USDT_PAIRS.has(sym + 'USDT');
 }
 
+function _compactBinancePair(v) {
+  return String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+function _isBinanceAlphaRow(d) {
+  const hay = [
+    d && d.listingType,
+    d && d.listingSource,
+    d && d.exchange,
+    d && d.source,
+    d && d.safetyBasis,
+  ].map(x => String(x || '')).join(' ');
+  return !!(d && (d.binanceAlphaListed === true || d.alphaTokenId || d.alphaPair || /BINANCE_ALPHA|binance[-_\s]?alpha|ALPHA_LISTING/i.test(hay)));
+}
+function _binanceSearchLink(query) {
+  const q = String(query || '').trim();
+  if (!q) return null;
+  return `https://www.binance.com/en/search?query=${encodeURIComponent(q).replace(/%20/g, '+')}`;
+}
+function _alphaSearchQuery(d, sym) {
+  const parts = [];
+  if (sym) parts.push(sym);
+  if (d && d.alphaTokenId) parts.push(d.alphaTokenId);
+  if (d && d.alphaPair) parts.push(d.alphaPair);
+  return parts.filter(Boolean).join(' ');
+}
 function getBinanceLink(d) {
-  const sym = (d.symbol || '').toUpperCase();
+  d = d || {};
+  const sym = String(d.symbol || '').toUpperCase();
   // Honor the server-side hint first — for non-Binance/DEX coins this
   // short-circuits before we try to construct a fake Binance URL.
   if (d.binance_available === false) return { url: null, pair: null, available: false };
 
-  // ALPHA = futures-only listing → link to the Binance Futures trade
-  // page instead of spot, otherwise the user clicks through to a 404.
-  if (d.binance_market === 'futures' || d.exchange === 'ALPHA') {
-    const fpair = d.futures_pair || d.pair || (sym + 'USDT');
+  // Alpha rows are Binance discovery listings, not guaranteed spot or
+  // futures markets. Use search so we never fabricate a bad trade URL.
+  if (_isBinanceAlphaRow(d)) {
+    const url = _binanceSearchLink(_alphaSearchQuery(d, sym));
+    return url
+      ? { url, pair: d.alphaPair || d.alphaTokenId || sym || null, available: true, market: 'alpha-search' }
+      : { url: null, pair: null, available: false, market: 'alpha-search' };
+  }
+
+  if (d.binance_market === 'futures') {
+    const fpair = _compactBinancePair(d.futures_pair || d.pair || (sym + 'USDT'));
+    if (!fpair) return { url: null, pair: null, available: false, market: 'futures' };
     return {
       url: `https://www.binance.com/en/futures/${fpair}`,
       pair: fpair,
@@ -1448,7 +1482,8 @@ function getBinanceLink(d) {
   }
 
   if (d.pair && d.quote) {
-    return { url: `https://www.binance.com/en/trade/${sym}_${d.quote}?type=spot`, pair: `${sym}/${d.quote}`, available: true, market: 'spot' };
+    const quote = String(d.quote || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    return { url: `https://www.binance.com/en/trade/${sym}_${quote}?type=spot`, pair: `${sym}/${quote}`, available: true, market: 'spot' };
   }
   if (BINANCE_USDC_PAIRS.has(sym + 'USDC')) return { url: `https://www.binance.com/en/trade/${sym}_USDC?type=spot`, pair: sym + '/USDC', available: true, market: 'spot' };
   if (BINANCE_USDT_PAIRS.has(sym + 'USDT')) return { url: `https://www.binance.com/en/trade/${sym}_USDT?type=spot`, pair: sym + '/USDT', available: true, market: 'spot' };
@@ -1561,6 +1596,42 @@ function renderTopbar() {
 // V6.4: hard cap at 500 active coins in the scanner DOM.
 // Server ships up to 1000; scanner paginates; movers uses the full pool.
 const MAX_RENDERED = 500;
+let _scannerSort = { key: null, dir: null };
+
+function _parseScannerPercent(v) {
+  if (v == null || v === '') return null;
+  const raw = typeof v === 'string' ? v.replace(/[%\s,]/g, '') : v;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+function _scannerC24Value(d) {
+  if (!d) return null;
+  return _parseScannerPercent(d._c24 ?? d.price_change_percentage_24h ?? d.c24 ?? d.change24h);
+}
+function _scannerDefaultCompare(a, b) {
+  const sa = a._sig_score || 0, sb = b._sig_score || 0;
+  if (sa !== sb) return sb - sa;
+  return (b.market_cap || 0) - (a.market_cap || 0);
+}
+function _scannerCompare(a, b, sortState = _scannerSort) {
+  if (!sortState || sortState.key !== 'c24') return _scannerDefaultCompare(a, b);
+  const av = _scannerC24Value(a);
+  const bv = _scannerC24Value(b);
+  const aMissing = av == null;
+  const bMissing = bv == null;
+  if (aMissing && bMissing) return _scannerDefaultCompare(a, b);
+  if (aMissing) return 1;
+  if (bMissing) return -1;
+  const delta = sortState.dir === 'asc' ? av - bv : bv - av;
+  return delta || _scannerDefaultCompare(a, b);
+}
+function _toggleScannerSort(key) {
+  if (key !== 'c24') return false;
+  const nextDir = _scannerSort.key === key && _scannerSort.dir === 'desc' ? 'asc' : 'desc';
+  _scannerSort = { key, dir: nextDir };
+  currentPage = 0;
+  return true;
+}
 
 function getFilteredSorted() {
   let filtered = [...DATA];
@@ -1571,11 +1642,7 @@ function getFilteredSorted() {
 
   // V6.9 Sprint 2: sort reads the pre-computed native property —
   // no sig() math inside the comparator (N log N → trivial).
-  filtered.sort((a, b) => {
-    const sa = a._sig_score || 0, sb = b._sig_score || 0;
-    if (sa !== sb) return sb - sa;
-    return (b.market_cap || 0) - (a.market_cap || 0);
-  });
+  filtered.sort(_scannerCompare);
   if (filtered.length > MAX_RENDERED) filtered.length = MAX_RENDERED;
   return filtered;
 }
@@ -9022,12 +9089,15 @@ function renderHeader() {
     const tooltipAttr = def.tooltip ? ` data-tooltip="${_esc(def.tooltip)}"` : '';
     const panicAttr = k === 'panic' ? ' data-panic-help' : '';
     const hotTip = k === 'hot' ? ' data-hot-tip' : '';
+    const sortActive = _scannerSort && _scannerSort.key === k;
+    const sortAttr = sortActive ? ` data-sort-dir="${_scannerSort.dir}"` : '';
+    const label = def.label + (sortActive ? (_scannerSort.dir === 'desc' ? ' ↓' : ' ↑') : '');
     // The resize handle is appended INSIDE the cell; the cell is its own
     // positioning context (it is itself position:absolute) so the handle
     // anchors to the cell's right edge on every repaint.
     const handle = '<span class="col-resize-handle" data-resize aria-hidden="true"></span>';
-    return `<span data-col="${k}"${classAttr}${dragAttr} style="${_colStyle(k)}"${tipAttr}${tooltipAttr}${panicAttr}${hotTip}>`
-         + `${_esc(def.label)}${handle}`
+    return `<span data-col="${k}"${classAttr}${dragAttr}${sortAttr} style="${_colStyle(k)}"${tipAttr}${tooltipAttr}${panicAttr}${hotTip}>`
+         + `${_esc(label)}${handle}`
          + `</span>`;
   }).join('');
   hdr.innerHTML = cells
@@ -9123,6 +9193,14 @@ function _onColumnPointerUp(e) {
 
   st.source.classList.remove('col-dragging');
   document.body.classList.remove('col-sort-body');
+
+  const movedPx = Math.abs((st.lastX || st.startX) - st.startX);
+  if (movedPx <= 4 && _toggleScannerSort(st.key)) {
+    renderHeader();
+    try { renderList(); } catch {}
+    _columnDrag = null;
+    return;
+  }
 
   // Freeze the column at the released pixel coordinate, then run solid-body
   // anti-collision so it can never rest on top of another column — it keeps

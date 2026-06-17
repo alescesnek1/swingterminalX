@@ -543,9 +543,40 @@ function renderBriefingTopline(m) {
   return '<span class="ai-fresh-badge" title="Vygenerováno právě teď, 45 min cache">🟢 FRESH</span>';
 }
 
+export function classifyBriefingDegradation(m = {}, clientStage = '') {
+  const layer = m.cache_layer;
+  const reason = m.fallback_reason;
+  if (clientStage === 'network') return { title: 'Briefing network degraded', subtitle: 'Network request failed; retry when the connection or edge function recovers.' };
+  if (clientStage === 'parse') return { title: 'Briefing response parse degraded', subtitle: 'Server returned malformed or non-JSON data; showing any readable text we received.' };
+  if (clientStage === 'render') return { title: 'Briefing render degraded', subtitle: 'Briefing data had an unexpected shape; partial data is preserved when possible.' };
+  if (reason === 'source-fetch-failed') return { title: 'Market snapshot unavailable', subtitle: 'Top-100 market data source failed; showing stale or degraded fallback data.' };
+  if (reason === 'gemini-rate-limited') return { title: 'AI provider rate-limited', subtitle: 'Gemini is rate-limited; showing stale cached data or raw market snapshot fallback.' };
+  if (reason === 'gemini-failed') return { title: 'AI synthesis failed', subtitle: 'AI synthesis failed after retries; showing stale cached data or raw market snapshot fallback.' };
+  if (layer === 'degraded') return { title: 'Briefing degraded fallback', subtitle: `Degraded fallback is active: ${m.upstream_error || reason || 'fallback payload'}` };
+  if (layer === 'snapshot') return { title: 'Briefing generating', subtitle: 'AI commentary is unavailable; showing raw top gainers, losers, and volume leaders.' };
+  if (layer === 'redis-stale' || layer === 'memory-stale') {
+    const age = m.stale_age_seconds != null ? fmtAge(m.stale_age_seconds) : 'older';
+    return { title: 'Using cached briefing', subtitle: `Showing last successful briefing (${age}) while live generation is degraded.` };
+  }
+  return { title: 'Briefing degraded', subtitle: 'Briefing is degraded, but partial usable data may still be shown.' };
+}
+
 function renderBriefingBanner(m) {
   const layer = m.cache_layer;
   const reason = m.fallback_reason;
+
+  if (layer === 'degraded' || reason === 'source-fetch-failed' || reason === 'gemini-rate-limited' || reason === 'gemini-failed') {
+    const msg = classifyBriefingDegradation(m);
+    return `
+      <div class="briefing-notice briefing-notice--warn">
+        <span class="briefing-notice__icon">WARN</span>
+        <div class="briefing-notice__body">
+          <div class="briefing-notice__title">${escapeText(msg.title)}</div>
+          <div class="briefing-notice__sub">${escapeText(msg.subtitle)}</div>
+        </div>
+      </div>
+    `;
+  }
 
   // Synthetic raw-data snapshot — AI commentary unavailable.
   if (layer === 'snapshot') {
@@ -619,15 +650,23 @@ export async function requestMarketBriefing(opts = {}) {
   // Soft-degradation banner shown when JSON parse OR UI render fails.
   // Keeps the panel populated rather than letting the user stare at a
   // blank screen or a crashed console error.
-  const degradedBanner = (subtitle) => `
+  const degradedBanner = (detail, stage = '') => {
+    const msg = typeof detail === 'object' && detail
+      ? detail
+      : classifyBriefingDegradation({ upstream_error: detail }, stage);
+    if (detail && typeof detail === 'string' && stage && !msg.subtitle.includes(detail)) {
+      msg.subtitle = `${msg.subtitle} Detail: ${detail}`;
+    }
+    return `
     <div class="briefing-notice briefing-notice--warn">
       <span class="briefing-notice__icon">⚠️</span>
       <div class="briefing-notice__body">
-        <div class="briefing-notice__title">Market data degraded</div>
-        <div class="briefing-notice__sub">${escapeText(subtitle || 'Briefing response was malformed. Zkus to znovu za chvíli.')}</div>
+        <div class="briefing-notice__title">${escapeText(msg.title)}</div>
+        <div class="briefing-notice__sub">${escapeText(msg.subtitle)}</div>
       </div>
     </div>
   `;
+  };
 
   try {
     const res = await fetch(MKT_BRIEFING_URL, {
@@ -655,11 +694,11 @@ export async function requestMarketBriefing(opts = {}) {
       console.error('[MKT-BRIEFING] JSON parse failed:', parseErr);
       const rawText = String(rawBody || '').replace(/<[^>]*>/g, '').trim();
       if (rawText) {
-        contentEl.innerHTML = degradedBanner('Server returned text instead of JSON; rendering the response body.') + formatAnalysis(rawText);
+        contentEl.innerHTML = degradedBanner('Server returned text instead of JSON; rendering the response body.', 'parse') + formatAnalysis(rawText);
         if (toplineEl) toplineEl.innerHTML = '<span class="ai-stale-badge">DEGRADED</span>';
         return;
       }
-      contentEl.innerHTML = degradedBanner('Server vrátil neplatnou odpověď. Zkus to za chvíli.');
+      contentEl.innerHTML = degradedBanner('Server vrátil neplatnou odpověď. Zkus to za chvíli.', 'parse');
       if (toplineEl) toplineEl.innerHTML = '<span class="ai-stale-badge">⚠️ DEGRADED</span>';
       return;
     }
@@ -712,7 +751,7 @@ export async function requestMarketBriefing(opts = {}) {
       }
       if (subEl && text) {
         if (m.cache_layer === 'snapshot' || m.cache_layer === 'degraded') {
-          subEl.textContent = '⏳ Briefing se generuje — zobrazena degradovaná data';
+          subEl.textContent = classifyBriefingDegradation(m).title;
         } else if (m.cache_layer === 'redis-stale' || m.cache_layer === 'memory-stale') {
           const age = m.stale_age_seconds != null ? fmtAge(m.stale_age_seconds) : 'starší';
           subEl.textContent = `📦 Cached briefing (stáří ${age}) — Gemini momentálně přetížen`;
@@ -724,12 +763,12 @@ export async function requestMarketBriefing(opts = {}) {
       }
     } catch (renderErr) {
       console.error('[MKT-BRIEFING] render failed:', renderErr, 'payload:', payload);
-      contentEl.innerHTML = degradedBanner('Briefing data má neočekávaný formát. Zkus to za chvíli.');
+      contentEl.innerHTML = degradedBanner('Briefing data má neočekávaný formát. Zkus to za chvíli.', 'render');
       if (toplineEl) toplineEl.innerHTML = '<span class="ai-stale-badge">⚠️ DEGRADED</span>';
     }
   } catch (err) {
     console.error('[MKT-BRIEFING] fetch failed:', err);
-    contentEl.innerHTML = degradedBanner(err?.message || 'Síťová chyba — zkus to za chvíli.');
+    contentEl.innerHTML = degradedBanner(err?.message || 'Síťová chyba — zkus to za chvíli.', 'network');
     if (toplineEl) toplineEl.innerHTML = '<span class="ai-stale-badge">⚠️ DEGRADED</span>';
   }
 }

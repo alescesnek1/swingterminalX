@@ -28,6 +28,12 @@ import { getRedis } from './lib/redis.js';
 import { checkOrigin, pickAllowOrigin, verifyAuth } from './lib/security.js';
 import { logFatal } from './lib/log.js';
 import { isAdminUser } from './lib/tier.js';
+import {
+  briefingSourceState,
+  createBriefingDiagnostics,
+  sanitizeBriefingDiagnosticReason,
+  withBriefingDiagnostics,
+} from './lib/briefing-diagnostics.js';
 
 // ── Constants ──
 // 45 min — sits in the requested 30-60 min window. Long enough that
@@ -533,8 +539,19 @@ async function buildMarketContext() {
     fetchGeopoliticalHeadlines(),
   ]);
 
+  const diagnostics = createBriefingDiagnostics({
+    top100: briefingSourceState(topRes.status === 'fulfilled', topRes.reason?.message || topRes.reason),
+    news: briefingSourceState(newsRes.status === 'fulfilled', newsRes.reason?.message || newsRes.reason),
+    macro: briefingSourceState(macroRes.status === 'fulfilled', macroRes.reason?.message || macroRes.reason),
+    geopolitical: briefingSourceState(geopolRes.status === 'fulfilled', geopolRes.reason?.message || geopolRes.reason),
+    ai: briefingSourceState(false, 'AI not run yet', false),
+    cache: briefingSourceState(true, 'live generation'),
+  });
+
   if (topRes.status !== 'fulfilled') {
-    throw new Error(`Top-100 fetch failed: ${topRes.reason?.message || topRes.reason}`);
+    const err = new Error(`Top-100 fetch failed: ${sanitizeBriefingDiagnosticReason(topRes.reason?.message || topRes.reason) || 'unknown'}`);
+    err.diagnostics = diagnostics;
+    throw err;
   }
   const top100 = topRes.value;
   const news = newsRes.status === 'fulfilled' ? newsRes.value : [];
@@ -561,6 +578,7 @@ async function buildMarketContext() {
     geopolitical_headlines: geopolitical,
     geopolitical_headlines_count: geopolitical.length,
     deep_unlocks,
+    diagnostics,
   };
 }
 
@@ -665,12 +683,13 @@ function buildSnapshotMarkdown(marketContext, lang) {
 // keys (analysis, meta) and the same meta keys with sensible defaults.
 // Anything that diverges WILL crash the frontend renderer when the
 // successful path is replaced by this fallback during a Gemini 429.
-function buildSnapshotPayload(marketContext, lang, fallbackReason) {
+function buildSnapshotPayload(marketContext, lang, fallbackReason, upstreamError = null) {
   const newsCount = marketContext?.news_count ?? 0;
   const topCount = marketContext?.top_100?.length ?? 0;
+  const diagnostics = createBriefingDiagnostics(marketContext?.diagnostics || {});
   return {
     analysis: buildSnapshotMarkdown(marketContext, lang),
-    meta: {
+    meta: withBriefingDiagnostics({
       model: '<snapshot>',
       tried_models: [],
       latency_ms: 0,
@@ -685,14 +704,18 @@ function buildSnapshotPayload(marketContext, lang, fallbackReason) {
       news_count: newsCount,
       top_100_count: topCount,
       total_latency_ms: 0,
-    },
+      upstream_error: sanitizeBriefingDiagnosticReason(upstreamError),
+    }, diagnostics, {
+      ai: briefingSourceState(false, fallbackReason, true),
+      cache: briefingSourceState(false, 'no stale cache; showing raw snapshot fallback', true),
+    }),
   };
 }
 
 // Last-resort: source fetch failed AND no cache anywhere. We still
 // return a valid payload (HTTP 200) so the frontend never sees a hard
 // error — just a "degraded" banner. Same schema as success.
-function buildMinimalFallbackPayload(lang, fallbackReason, upstreamError) {
+function buildMinimalFallbackPayload(lang, fallbackReason, upstreamError, diagnosticsInput = {}) {
   const cs = lang === 'cs';
   const text = cs
     ? '## 🌍 MARKET BRIEFING\n\n*Tržní data jsou momentálně nedostupná. Zkus to prosím za chvíli.*'
@@ -733,9 +756,10 @@ function buildMinimalFallbackPayload(lang, fallbackReason, upstreamError) {
         '',
         `*Fallback reason: ${reason}*`,
       ].join('\n');
+  const diagnostics = createBriefingDiagnostics(diagnosticsInput || {});
   return {
     analysis: richText || text,
-    meta: {
+    meta: withBriefingDiagnostics({
       model: '<unavailable>',
       tried_models: [],
       latency_ms: 0,
@@ -750,8 +774,14 @@ function buildMinimalFallbackPayload(lang, fallbackReason, upstreamError) {
       news_count: 0,
       top_100_count: 0,
       total_latency_ms: 0,
-      upstream_error: upstreamError || null,
-    },
+      upstream_error: sanitizeBriefingDiagnosticReason(upstreamError),
+    }, diagnostics, {
+      top100: fallbackReason === 'source-fetch-failed'
+        ? briefingSourceState(false, upstreamError || fallbackReason, true)
+        : undefined,
+      ai: briefingSourceState(false, fallbackReason, true),
+      cache: briefingSourceState(false, 'no usable cache', true),
+    }),
   };
 }
 
@@ -888,11 +918,11 @@ async function _handleRequest(request) {
       marketContext = await buildMarketContext();
     } catch (e) {
       console.error('[GEMINI FAIL]', 'context build failed:', e.message);
-      const lastResort = await serveLastKnownGood(lang, 'source-fetch-failed', startedAt, e.message);
+      const lastResort = await serveLastKnownGood(lang, 'source-fetch-failed', startedAt, e.message, e.diagnostics);
       if (lastResort) return jsonResponse(request, lastResort);
       // 200 OK GUARANTEE: even when source AND cache are gone, the
       // frontend gets a well-shaped degraded payload rather than a 502.
-      const minimal = buildMinimalFallbackPayload(lang, 'source-fetch-failed', e.message);
+      const minimal = buildMinimalFallbackPayload(lang, 'source-fetch-failed', e.message, e.diagnostics);
       minimal.meta.total_latency_ms = Date.now() - startedAt;
       return jsonResponse(request, minimal);
     }
@@ -903,7 +933,7 @@ async function _handleRequest(request) {
     if (aiResult.ok) {
       const payload = {
         analysis: aiResult.result.analysis,
-        meta: {
+        meta: withBriefingDiagnostics({
           ...aiResult.result.meta,
           provider: 'Google Gemini',
           cached: false,
@@ -913,7 +943,10 @@ async function _handleRequest(request) {
           news_count: marketContext.news_count,
           top_100_count: marketContext.top_100.length,
           total_latency_ms: Date.now() - startedAt,
-        },
+        }, marketContext.diagnostics, {
+          ai: briefingSourceState(true),
+          cache: briefingSourceState(true, 'live response'),
+        }),
       };
       moduleCacheSet(lang, payload);
       await Promise.all([
@@ -936,13 +969,13 @@ async function _handleRequest(request) {
     });
     console.warn(`[MKT-BRIEFING] AI exhausted retries → fallback cascade (${reason})`);
 
-    const fallback = await serveLastKnownGood(lang, reason, startedAt, aiResult.error?.message);
+    const fallback = await serveLastKnownGood(lang, reason, startedAt, aiResult.error?.message, marketContext.diagnostics);
     if (fallback) return jsonResponse(request, fallback);
 
     // Truly nothing cached anywhere → render the synthetic snapshot
-    const snapshot = buildSnapshotPayload(marketContext, lang, reason);
+    const snapshot = buildSnapshotPayload(marketContext, lang, reason, aiResult.error?.message);
     snapshot.meta.total_latency_ms = Date.now() - startedAt;
-    snapshot.meta.upstream_error = aiResult.error?.message;
+    snapshot.meta.upstream_error = sanitizeBriefingDiagnosticReason(aiResult.error?.message);
     _moduleStableCache.set(lang, { at: Date.now(), payload: snapshot });
     return jsonResponse(request, snapshot);
   } catch (fatalErr) {
@@ -964,7 +997,7 @@ async function _handleRequest(request) {
 // Try every cache we have, oldest-acceptable-first. Used when Gemini
 // fails OR when the source fetch itself fails. Returns null if no
 // cached payload exists anywhere.
-async function serveLastKnownGood(lang, fallbackReason, startedAt, upstreamError) {
+async function serveLastKnownGood(lang, fallbackReason, startedAt, upstreamError, diagnosticsInput = {}) {
   // Redis "stale" copy first (cross-isolate, survives 30 days).
   const stableRedis = await redisStableGet(lang);
   if (stableRedis) {
@@ -973,16 +1006,19 @@ async function serveLastKnownGood(lang, fallbackReason, startedAt, upstreamError
     console.log(`[MKT-BRIEFING] serving stale-redis copy (age=${ageSec}s, reason=${fallbackReason})`);
     return {
       ...stableRedis,
-      meta: {
+      meta: withBriefingDiagnostics({
         ...(stableRedis.meta || {}),
         cached: true,
         cache_layer: 'redis-stale',
         stale: true,
         stale_age_seconds: ageSec,
         fallback_reason: fallbackReason,
-        upstream_error: upstreamError,
+        upstream_error: sanitizeBriefingDiagnosticReason(upstreamError),
         total_latency_ms: Date.now() - startedAt,
-      },
+      }, diagnosticsInput, {
+        ai: briefingSourceState(false, fallbackReason, true),
+        cache: briefingSourceState(true, fallbackReason, true),
+      }),
     };
   }
 
@@ -993,16 +1029,19 @@ async function serveLastKnownGood(lang, fallbackReason, startedAt, upstreamError
     console.log(`[MKT-BRIEFING] serving stale-memory copy (age=${ageSec}s, reason=${fallbackReason})`);
     return {
       ...stableMem.payload,
-      meta: {
+      meta: withBriefingDiagnostics({
         ...(stableMem.payload.meta || {}),
         cached: true,
         cache_layer: 'memory-stale',
         stale: true,
         stale_age_seconds: ageSec,
         fallback_reason: fallbackReason,
-        upstream_error: upstreamError,
+        upstream_error: sanitizeBriefingDiagnosticReason(upstreamError),
         total_latency_ms: Date.now() - startedAt,
-      },
+      }, diagnosticsInput, {
+        ai: briefingSourceState(false, fallbackReason, true),
+        cache: briefingSourceState(true, fallbackReason, true),
+      }),
     };
   }
 
