@@ -37,6 +37,12 @@ const BINANCE_EXCHANGEINFO_URL = 'https://api.binance.com/api/v3/exchangeInfo';
 // back to CoinGecko-only fundamentals.
 const BINANCE_FUTURES_TICKER_URL = 'https://fapi.binance.com/fapi/v1/ticker/24hr';
 const BINANCE_FUTURES_EXCHANGEINFO_URL = 'https://fapi.binance.com/fapi/v1/exchangeInfo';
+// Binance Alpha (early-token product) public token list. Supplies the
+// chain + contract address needed for direct /en/alpha/<chain>/<contract>
+// deep links. This is the EARLY-TOKEN product — distinct from the
+// exchange:'ALPHA' futures nickname used elsewhere in this file.
+const BINANCE_ALPHA_TOKEN_LIST_URL = 'https://www.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/cex/alpha/all/token/list';
+const EVM_CONTRACT_RE = /^0x[a-fA-F0-9]{40}$/;
 
 const CDN_MAX_AGE_SEC = 30;
 const CDN_SWR_SEC = 60;
@@ -72,7 +78,12 @@ const TOP_N = 1000;
 // is invalidated on first hit after deploy — clients now compute a
 // panic_score per row and the row shape MAY pick up additional fields
 // at a later sprint. No upstream/shape change in this bump.
-const MARKETS_SCHEMA_VERSION = 'v7_0_panic_stream';
+// V7.1: bumped to v7_1_alpha_meta — rows now carry optional Binance Alpha
+// early-token metadata (alphaTokenId / alphaPair / alphaChain /
+// alphaContractAddress / binanceAlphaListed) so the UI can build verified
+// /en/alpha/<chain>/<contract> deep links. Link-only fields; no change to
+// venue resolution, the exchange badge, or safety semantics.
+const MARKETS_SCHEMA_VERSION = 'v7_1_alpha_meta';
 
 // V6.8 Sprint 1 (FIX-6): _responseCache now carries the parsed array AND
 // two pre-sliced JSON strings (free / pro). Tier filter is computed once
@@ -83,6 +94,7 @@ let _quoteIndex = null;           // { at, v, byBase }
 let _futQuoteIndex = null;        // { at, v, byBase } (PERPETUAL only)
 let _spotUsdtIndex = null;        // { at, v, byBase } — USDT-quoted spot ONLY
 let _coingeckoCache = null;       // { at, v, list }
+let _alphaTokenMap = null;        // { at, v, bySymbol: Map } — Binance Alpha early-token meta
 
 // V6.8 Sprint 1 (FIX-2): in-flight singletons. Concurrent cold-start
 // requests collapse onto ONE upstream fetch instead of N. Each promise
@@ -92,6 +104,7 @@ let _cgInFlight = null;
 let _spotIdxInFlight = null;
 let _futIdxInFlight = null;
 let _spotUsdtIdxInFlight = null;
+let _alphaMapInFlight = null;
 
 // CORS headers — delegate to pickAllowOrigin so localhost dev gets
 // its Origin echoed back (browsers reject a wildcard "*" when credentials
@@ -175,6 +188,60 @@ async function fetchBinanceTickerMap() {
   const byPair = new Map();
   for (const t of tickers) byPair.set(t.symbol, t);
   return byPair;
+}
+
+// Binance Alpha early-token metadata, keyed by upper-case token symbol.
+// Conservative on purpose: a symbol is only retained when it maps to
+// EXACTLY ONE alpha token AND that token has a valid EVM contract — so we
+// never attach an ambiguous or unusable mapping that could deep-link to
+// the wrong token. Cached like exchangeInfo (1h) and fully non-fatal.
+async function getAlphaTokenMap() {
+  const now = Date.now();
+  if (_alphaTokenMap && _alphaTokenMap.v === MARKETS_SCHEMA_VERSION && now - _alphaTokenMap.at < EXCHANGEINFO_CACHE_TTL_MS) return _alphaTokenMap.bySymbol;
+  if (_alphaMapInFlight) return _alphaMapInFlight;
+  _alphaMapInFlight = (async () => {
+    const res = await fetch(BINANCE_ALPHA_TOKEN_LIST_URL, { headers: { 'Accept': 'application/json' } });
+    if (!res.ok) throw new Error(`alpha token list HTTP ${res.status}`);
+    const json = await res.json();
+    const rows = Array.isArray(json && json.data) ? json.data : (Array.isArray(json) ? json : []);
+    const seen = new Map();      // symbol -> meta (first valid)
+    const ambiguous = new Set(); // symbols seen more than once
+    for (const r of rows) {
+      if (!r || typeof r !== 'object') continue;
+      const sym = String(r.symbol || '').trim().toUpperCase();
+      const contract = String(r.contractAddress || '').trim();
+      if (!sym || !EVM_CONTRACT_RE.test(contract)) continue;
+      if (seen.has(sym)) { ambiguous.add(sym); continue; }
+      seen.set(sym, {
+        alphaTokenId: String(r.alphaId || r.tokenId || '').trim() || null,
+        alphaChain: String(r.chainName || r.chainId || '').trim() || null,
+        alphaContractAddress: contract,
+        alphaPair: (r.symbol && r.quote) ? `${sym}/${String(r.quote).toUpperCase()}` : null,
+        name: r.name ? String(r.name).trim() : null,
+      });
+    }
+    for (const sym of ambiguous) seen.delete(sym);
+    _alphaTokenMap = { at: Date.now(), v: MARKETS_SCHEMA_VERSION, bySymbol: seen };
+    return seen;
+  })();
+  try { return await _alphaMapInFlight; } finally { _alphaMapInFlight = null; }
+}
+
+// Attach link-only Binance Alpha early-token metadata to a row when its
+// symbol unambiguously matches an alpha token. Never overrides venue/
+// badge fields; purely additive so getBinanceLink can build a verified
+// /en/alpha/<chain>/<contract> deep link in the detail panel.
+function attachAlphaMeta(row, alphaBySymbol) {
+  if (!row || !alphaBySymbol || alphaBySymbol.size === 0) return row;
+  const sym = String(row.symbol || '').toUpperCase();
+  const meta = sym ? alphaBySymbol.get(sym) : null;
+  if (!meta) return row;
+  row.binanceAlphaListed = true;
+  row.alphaTokenId = meta.alphaTokenId;
+  row.alphaPair = meta.alphaPair;
+  row.alphaChain = meta.alphaChain;
+  row.alphaContractAddress = meta.alphaContractAddress;
+  return row;
 }
 
 // V4 Premium: futures (USDⓈ-M, perpetual only) variant. We index PERPETUAL
@@ -572,17 +639,19 @@ function _makeBinanceSpotRow(meta, ticker) {
 // V6.8 Sprint 1 (FIX-6): now returns the parsed ARRAY (not a JSON string)
 // so the caller can build pre-sliced tier views once.
 async function buildBinanceOnlyBody() {
-  const [spotIdxRes, spotTickerRes, futIdxRes, futTickerRes] = await Promise.allSettled([
+  const [spotIdxRes, spotTickerRes, futIdxRes, futTickerRes, alphaMapRes] = await Promise.allSettled([
     getQuoteIndex(),
     fetchBinanceTickerMap(),
     getFuturesQuoteIndex(),
     fetchBinanceFuturesTickerMap(),
+    getAlphaTokenMap(),
   ]);
 
   const spotIndex = spotIdxRes.status === 'fulfilled' ? spotIdxRes.value : {};
   const spotByPair = spotTickerRes.status === 'fulfilled' ? spotTickerRes.value : new Map();
   const futIndex = futIdxRes.status === 'fulfilled' ? futIdxRes.value : {};
   const futByPair = futTickerRes.status === 'fulfilled' ? futTickerRes.value : new Map();
+  const alphaBySymbol = alphaMapRes.status === 'fulfilled' ? alphaMapRes.value : new Map();
 
   // Live pair Sets from the ticker Maps — built ONCE before the loop.
   // shapeFromCoingecko uses these as the absolute, unbypassable "is
@@ -612,7 +681,7 @@ async function buildBinanceOnlyBody() {
       market_cap: 0,
       sparkline_in_7d: null,
     };
-    rows.push(shapeFromCoingecko(cgStub, spotT || null, spotMeta, futT || null, futMeta, liveFutPairs, liveSpotPairs));
+    rows.push(attachAlphaMeta(shapeFromCoingecko(cgStub, spotT || null, spotMeta, futT || null, futMeta, liveFutPairs, liveSpotPairs), alphaBySymbol));
   }
   rows.sort((a, b) => b.total_volume - a.total_volume);
   // V6.8 Sprint 1 (FIX-6): return ARRAY; caller stringifies once.
@@ -627,13 +696,14 @@ async function buildMarketsBody() {
   // exchangeInfo + ticker, Binance Futures exchangeInfo + ticker. Any
   // one that fails is recovered below. Futures sources failing is
   // non-fatal — the page just renders without ALPHA badges.
-  const [cgRes, spotIdxRes, spotTickerRes, futIdxRes, futTickerRes, usdtIdxRes] = await Promise.allSettled([
+  const [cgRes, spotIdxRes, spotTickerRes, futIdxRes, futTickerRes, usdtIdxRes, alphaMapRes] = await Promise.allSettled([
     fetchCoingeckoMarkets(),
     getQuoteIndex(),
     fetchBinanceTickerMap(),
     getFuturesQuoteIndex(),
     fetchBinanceFuturesTickerMap(),
     getSpotUsdtIndex(),
+    getAlphaTokenMap(),
   ]);
 
   // CoinGecko down → Binance-only fallback so the UI keeps working.
@@ -669,6 +739,13 @@ async function buildMarketsBody() {
     console.warn('[MARKETS] Futures exchangeInfo failed:', futIdxRes.reason?.message);
   }
 
+  // Binance Alpha early-token metadata is best-effort and link-only. A
+  // failure here just means rows ship without alpha deep-link fields.
+  const alphaBySymbol = alphaMapRes.status === 'fulfilled' ? alphaMapRes.value : new Map();
+  if (alphaMapRes.status !== 'fulfilled') {
+    console.warn('[MARKETS] Alpha token list failed:', alphaMapRes.reason?.message);
+  }
+
   // Live pair Sets from the ticker Maps — the ONLY source of truth for
   // "this pair is currently listed on Binance Futures / Spot." Built
   // directly from /fapi/v1/ticker/24hr and /api/v3/ticker/24hr response
@@ -701,6 +778,7 @@ async function buildMarketsBody() {
     const spotTicker = spotMeta ? (spotByPair.get(spotMeta.pair) || null) : null;
     const futTicker = futMeta ? (futByPair.get(futMeta.pair) || null) : null;
     const row = shapeFromCoingecko(cg, spotTicker, spotMeta, futTicker, futMeta, liveFutPairs, liveSpotPairs);
+    attachAlphaMeta(row, alphaBySymbol);
     if (row.exchange === 'DEX') dexCount++;
     else if (row.exchange === 'ALPHA') alphaCount++;
     else if (row.exchange === 'BIN') binCount++;
@@ -732,7 +810,7 @@ async function buildMarketsBody() {
     if (!t) continue;
     const qv = parseFloat(t.quoteVolume);
     if (!Number.isFinite(qv) || qv <= 0) continue; // skip dead/stale pairs
-    cgSliced.push(_makeBinanceSpotRow(meta, t));
+    cgSliced.push(attachAlphaMeta(_makeBinanceSpotRow(meta, t), alphaBySymbol));
     seenSyms.add(base);
     binAppended++;
   }

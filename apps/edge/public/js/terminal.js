@@ -1434,36 +1434,34 @@ function _compactBinancePair(v) {
 }
 function _isBinanceAlphaRow(d) {
   if (!d) return false;
-  // Direct boolean / presence flags — the most reliable signals.
+  // STRICT detection. `exchange: "ALPHA"` is intentionally NOT accepted:
+  // in the /api/markets feed that badge means "Binance USDⓈ-M Futures"
+  // (an internal nickname), NOT the Binance Alpha early-token product.
+  // Misreading it as Alpha previously suppressed valid futures links and
+  // routed coins to misleading Alpha fallbacks. Only strong, unambiguous
+  // Binance-Alpha signals qualify.
   if (d.binanceAlphaListed === true) return true;
   if (d.alphaTokenId || d.alphaPair) return true;
 
-  // Exact enum-style fields (case-insensitive, trimmed).
   const eq = (v, t) => String(v == null ? '' : v).trim().toUpperCase() === t;
-  if (eq(d.exchange, 'ALPHA') || eq(d.exchange, 'BINANCE_ALPHA')) return true;
+  if (eq(d.exchange, 'BINANCE_ALPHA')) return true;        // explicit, not bare "ALPHA"
   if (eq(d.listingType, 'BINANCE_ALPHA')) return true;
-  if (eq(d.binance_market, 'ALPHA') || eq(d.market, 'ALPHA')) return true;
 
   const lc = (v) => String(v == null ? '' : v).trim().toLowerCase();
   if (lc(d.listingSource) === 'binance alpha') return true;
   if (lc(d.source) === 'binance-alpha') return true;
 
-  // tags: ["ALPHA", ...] — only when the row actually carries tags.
-  if (Array.isArray(d.tags) && d.tags.some(t => eq(t, 'ALPHA'))) return true;
-
-  // Any safety/listing reason string mentioning BINANCE_ALPHA.
+  // Any safety/listing reason string explicitly mentioning BINANCE_ALPHA.
   const hay = [
     d.listingType,
     d.listingSource,
-    d.exchange,
-    d.source,
     d.safetyBasis,
     d.safetyReason,
     d.safety_reason,
     Array.isArray(d.safetyReasons) ? d.safetyReasons.join(' ') : d.safetyReasons,
     Array.isArray(d.listingReasons) ? d.listingReasons.join(' ') : d.listingReasons,
   ].map(x => String(x || '')).join(' ');
-  return /BINANCE_ALPHA|binance[-_\s]?alpha|ALPHA_LISTING/i.test(hay);
+  return /BINANCE_ALPHA/i.test(hay);
 }
 function _binanceSearchLink(input) {
   let q = '';
@@ -1509,21 +1507,20 @@ function _isEvmContract(addr) {
   return /^0x[a-fA-F0-9]{40}$/.test(String(addr == null ? '' : addr).trim());
 }
 function _alphaContractAddress(d) {
-  return (d && (d.contractAddress || d.contract_address || d.tokenAddress || d.token_address || d.address)) || null;
+  return (d && (d.alphaContractAddress || d.contractAddress || d.contract_address || d.tokenAddress || d.token_address || d.address)) || null;
 }
-// Resolve the best Binance Alpha link without ever fabricating a direct
-// trade URL. Priority:
-//   1. validated chain + EVM contract  -> /en/alpha/<chain>/<contract>   (market: alpha)
-//   2. a specific identifier exists     -> search query                  (market: alpha-search)
-//   3. otherwise                        -> /en/alpha landing page        (market: alpha)
+// Resolve a Binance Alpha link. A clickable, coin-specific URL is allowed
+// ONLY when we can build a verified direct page from a validated chain and
+// an EVM contract: /en/alpha/<chain>/<contract>. Without that metadata we
+// return unavailable — the /en/alpha landing page and symbol searches are
+// NOT coin-specific (they can open an unrelated Alpha token), so they are
+// never used as a fallback.
 function _binanceAlphaLink(d, sym) {
   d = d || {};
-  const normChain = _normalizeAlphaChain(d.chain || d.network || d.contract_chain);
+  const normChain = _normalizeAlphaChain(d.alphaChain || d.chain || d.network || d.contract_chain || d.chainName);
   const contract = _alphaContractAddress(d);
-  const evm = _isEvmContract(contract);
 
-  // Tier 1 — explicit, validated chain + contract -> direct Alpha page.
-  if (normChain && evm) {
+  if (normChain && _isEvmContract(contract)) {
     return {
       url: `https://www.binance.com/en/alpha/${normChain}/${String(contract).trim().toLowerCase()}`,
       pair: sym || null,
@@ -1532,23 +1529,7 @@ function _binanceAlphaLink(d, sym) {
     };
   }
 
-  // Tier 2 — search only when we have something more specific than the
-  // bare display symbol: an alpha pair/token id, or a valid contract we
-  // could not direct-link (unsupported chain).
-  const parts = [];
-  if (sym) parts.push(sym);
-  if (d.alphaTokenId) parts.push(d.alphaTokenId);
-  if (d.alphaPair) parts.push(d.alphaPair);
-  const contractIsSpecific = evm && !normChain; // valid contract, unsupported chain
-  if (contractIsSpecific) parts.push(String(contract).trim());
-  const hasSpecific = !!(d.alphaTokenId || d.alphaPair || contractIsSpecific);
-  if (hasSpecific) {
-    const url = _binanceSearchLink(parts.filter(Boolean).join(' '));
-    if (url) return { url, pair: d.alphaPair || d.alphaTokenId || sym || null, available: true, market: 'alpha-search' };
-  }
-
-  // Tier 3 — general Alpha landing page beats a weak symbol-only search.
-  return { url: 'https://www.binance.com/en/alpha', pair: sym || null, available: true, market: 'alpha' };
+  return { url: null, pair: sym || null, available: false, market: 'alpha-unavailable' };
 }
 function getBinanceLink(d) {
   d = d || {};
@@ -1557,13 +1538,10 @@ function getBinanceLink(d) {
   // short-circuits before we try to construct a fake Binance URL.
   if (d.binance_available === false) return { url: null, pair: null, available: false };
 
-  // Alpha rows are Binance discovery listings, not guaranteed spot or
-  // futures markets. Never fabricate a trade URL — resolve to a direct
-  // Alpha contract page, a specific search, or the Alpha landing page.
-  if (_isBinanceAlphaRow(d)) {
-    return _binanceAlphaLink(d, sym);
-  }
-
+  // Futures is the PRIMARY trading link when the row is futures-listed —
+  // including rows the /api/markets feed badges exchange:'ALPHA' (its
+  // nickname for Binance USDⓈ-M Futures). The optional Binance Alpha
+  // deep link is rendered separately by the detail panel.
   if (d.binance_market === 'futures') {
     const fpair = _compactBinancePair(d.futures_pair || d.pair || (sym + 'USDT'));
     if (!fpair) return { url: null, pair: null, available: false, market: 'futures' };
@@ -1573,6 +1551,12 @@ function getBinanceLink(d) {
       available: true,
       market: 'futures',
     };
+  }
+
+  // True Binance Alpha rows (strong metadata only) resolve to a verified
+  // /en/alpha/<chain>/<contract> deep link, or unavailable.
+  if (_isBinanceAlphaRow(d)) {
+    return _binanceAlphaLink(d, sym);
   }
 
   if (d.pair && d.quote) {
@@ -1599,6 +1583,11 @@ function _binanceDetailButtonHtml(binance) {
   binance = binance || {};
   const href = binance.available ? _safeUrl(binance.url) : '';
   if (!binance.available || !href) {
+    // Alpha rows without verified chain+contract get an explicit, honest
+    // disabled chip — never an href that could open an unrelated token.
+    if (binance.market === 'alpha-unavailable') {
+      return '<div class="binance-btn unavail" title="Missing chain/contract metadata for direct Binance Alpha link.">BINANCE ALPHA LINK N/A</div>';
+    }
     return '<div class="binance-btn unavail">Binance nedostupne</div>';
   }
   const cls = (binance.market === 'alpha' || binance.market === 'alpha-search') ? 'alpha'
@@ -1606,6 +1595,23 @@ function _binanceDetailButtonHtml(binance) {
   const label = _binanceDetailButtonLabel(binance.market);
   const pair = binance.pair ? ` → ${_esc(binance.pair)}` : '';
   return `<a class="binance-btn ${cls}" href="${href}" target="_blank" rel="noopener noreferrer">${label}${pair}</a>`;
+}
+
+// Detail-panel Binance links: the PRIMARY link from getBinanceLink (spot /
+// futures / alpha), plus — for true Binance Alpha rows whose primary link
+// is NOT already the Alpha link (e.g. a futures-listed Alpha token) — an
+// optional SECONDARY Binance Alpha deep link (or an honest disabled chip
+// when chain/contract metadata is missing).
+function _binanceDetailLinksHtml(d) {
+  d = d || {};
+  const primary = getBinanceLink(d);
+  let html = _binanceDetailButtonHtml(primary);
+  const primaryIsAlpha = primary.market === 'alpha' || primary.market === 'alpha-unavailable';
+  if (_isBinanceAlphaRow(d) && !primaryIsAlpha) {
+    const sym = String(d.symbol || '').toUpperCase();
+    html += _binanceDetailButtonHtml(_binanceAlphaLink(d, sym));
+  }
+  return html;
 }
 
 // V5: forward Supabase access token so /api/markets can resolve tier.
@@ -2017,7 +2023,6 @@ function pickCoin(id) {
   const s = _sigOf(d), f = getFunding(d), ls = getLsRatio(d), op = getOiPct(d);
   const sym = (d.symbol || '').toUpperCase();
   const validity = getSetupValidity(d);
-  const binance = getBinanceLink(d);
   const detailSafety = (() => {
     const _ALLOW = new Set(['BTC','ETH','BNB','SOL','ADA','AVAX','DOT','TRX','XRP','LTC','ATOM','NEAR','APT','SUI','INJ','DOGE','BCH','ETC','XLM','XMR','XTZ','ALGO','HBAR','ICP','FIL','EGLD','FLOW','KAS','TON','RUNE','STX','KAVA','MINA','ROSE','ZIL','CELO','EOS','NEO','VET','QTUM','WAVES','OSMO','KSM','SEI','TIA','DASH','ZEC','RVN','ONE','USDC','USDT','LINK','UNI','AAVE','MKR','LDO','CRV','COMP','SNX','ARB']);
     const _AMBIG = new Set(['BTCB','WETH','WBTC','MULTI','BRIDGE','O3','BIT','GAS','CAT','GMT','AGI','KEY','FT']);
@@ -2063,7 +2068,7 @@ function pickCoin(id) {
       🧠 AI ANALÝZA
     </button>
 
-    ${_binanceDetailButtonHtml(binance)}
+    ${_binanceDetailLinksHtml(d)}
 
     <div class="validity-box" style="border-color:${validity.border}">
       <div class="validity-title" style="color:${validity.col};font-weight:600;font-size:10px">${_esc(validity.type)}</div>

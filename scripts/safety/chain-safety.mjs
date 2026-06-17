@@ -196,6 +196,11 @@ export function classifyMarketSafety(market = {}, opts = {}) {
     listingType: meta.listingType || null,
     alphaTokenId: meta.alphaTokenId || null,
     alphaPair: meta.alphaPair || null,
+    // Link-only Alpha chain/contract for direct Binance Alpha deep links.
+    // Deliberately NOT fed into the chain safety axis above, so the
+    // safety verdict/labels are unchanged.
+    alphaChain: meta.alphaChain || null,
+    alphaContractAddress: meta.alphaContractAddress || null,
     humanSymbol: meta.humanSymbol || null,
     alphaCandidates: meta.alphaCandidates || [],
     listingSource: meta.exchange === 'binance-alpha' ? 'Binance Alpha' : (meta.exchange === 'binance' ? 'Binance' : null),

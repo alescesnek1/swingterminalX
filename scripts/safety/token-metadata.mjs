@@ -272,6 +272,11 @@ function resolveAlphaMappedListing(market = {}, opts = {}) {
     alphaTokenId: match.token.alphaTokenId,
     humanSymbol: match.token.symbol,
     tokenName: match.token.name,
+    // Carry the Alpha token-list chain/contract through for direct Binance
+    // Alpha deep links. These are link-only fields and never feed the
+    // safety chain axis, so the safety verdict is unchanged.
+    alphaChain: match.token.chainName || match.token.chainId || null,
+    alphaContractAddress: match.token.contractAddress || null,
     pair: listing.pair,
     listingStatus: 'TRADING',
     listingSafetyStatus: LISTING_STATUS.LISTING_SAFE,
@@ -309,6 +314,9 @@ export function resolveBinanceAlphaListing(market = {}, opts = {}) {
     humanSymbol: row.humanSymbol || market.humanSymbol || null,
     tokenName: row.tokenName || market.tokenName || market.name || null,
     alphaPair: row.pair || null,
+    // Link-only Alpha chain/contract (see resolveAlphaMappedListing).
+    alphaChain: row.alphaChain || market.alphaChain || null,
+    alphaContractAddress: row.alphaContractAddress || market.alphaContractAddress || null,
     alphaCandidates: row.alphaCandidates || [],
     raw: row.raw || null,
   };
@@ -333,6 +341,8 @@ function result(base, fields) {
     listingType: fields.listingType || null,
     alphaTokenId: fields.alphaTokenId || null,
     alphaPair: fields.alphaPair || fields.pair || null,
+    alphaChain: fields.alphaChain || null,
+    alphaContractAddress: fields.alphaContractAddress || null,
     humanSymbol: fields.humanSymbol || null,
     alphaCandidates: Array.isArray(fields.alphaCandidates) ? fields.alphaCandidates : [],
     chain: fields.chain || null,
@@ -367,6 +377,7 @@ export function resolveTokenMetadata(input = {}, opts = {}) {
     quoteAsset: quote, exchange: listing.exchange, listed: listing.listed,
     listingStatus: listing.listingStatus, listingSafetyStatus: listing.listingSafetyStatus, listingSafetyReason: listing.listingSafetyReason,
     listingType: listing.listingType, alphaTokenId: listing.alphaTokenId, alphaPair: listing.alphaPair || listing.pair, humanSymbol: listing.humanSymbol, alphaCandidates: listing.alphaCandidates,
+    alphaChain: listing.alphaChain || null, alphaContractAddress: listing.alphaContractAddress || null,
   };
   if (listing.listingSafetyStatus === LISTING_STATUS.LISTING_SAFE) cr.push(listing.exchange === 'binance-alpha' ? 'binance_alpha_active_listing' : 'binance_active_listing');
 

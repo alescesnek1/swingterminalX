@@ -103,6 +103,34 @@ test('Binance Alpha active listing -> final SAFE label and no chain SAFE', () =>
   assert.equal(fmt('SAFE', s.safetyReason, s.safetySource, s.chain, s.contractAddress, s.safetyBasis).labelShort, `SAFE ${MID} Binance Alpha listed`);
 });
 
+test('Alpha mapping propagates chain+contract as link-only fields without changing the safety verdict', () => {
+  // Real BEAT/Audiera (ALPHA_451) shape from the public alpha token list.
+  const tokens = parseBinanceAlphaTokenList({ data: [
+    { alphaId: 'ALPHA_451', symbol: 'BEAT', name: 'Audiera', chainId: '56', chainName: 'BSC', contractAddress: '0xcf3232b85b43bca90e51d38cc06cc8bb8c8a3e36' },
+  ] });
+  assert.equal(tokens[0].chainName, 'BSC');
+  assert.equal(tokens[0].contractAddress, '0xcf3232b85b43bca90e51d38cc06cc8bb8c8a3e36');
+
+  const listings = parseBinanceAlphaExchangeInfo({ data: { symbols: [
+    { symbol: 'ALPHA_451USDT', status: 'TRADING', baseAsset: 'ALPHA_451', quoteAsset: 'USDT' },
+  ] } });
+  const mapping = buildBinanceAlphaSymbolMap({ tokens, listings });
+
+  const s = classifyMarketSafety({ symbol: 'BEAT', isScannerContext: true }, { binanceAlphaSymbolMap: mapping.byLookup });
+  // Link-only Alpha chain/contract now flow through for direct deep links.
+  assert.equal(s.alphaChain, 'BSC');
+  assert.equal(s.alphaContractAddress, '0xcf3232b85b43bca90e51d38cc06cc8bb8c8a3e36');
+  assert.equal(s.alphaTokenId, 'ALPHA_451');
+  // Safety verdict is UNCHANGED — alpha chain/contract must NOT enter the
+  // chain safety axis.
+  assert.equal(s.finalSafetyStatus, 'SAFE');
+  assert.equal(s.safetyBasis, SAFETY_BASIS.ALPHA_LISTING);
+  assert.equal(s.safetyReason, 'BINANCE_ALPHA_LISTED_ACTIVE');
+  assert.equal(s.chainSafetyStatus, 'UNKNOWN');
+  assert.equal(s.chain, null);
+  assert.equal(s.contractAddress, null);
+});
+
 test('scanner row OPG/TST resolve through Alpha token-id mapping', () => {
   const mapping = alphaFixture();
   for (const symbol of ['OPG', 'TST']) {
