@@ -2175,7 +2175,15 @@ function pickCoin(id) {
     </div>
   `;
 
-  loadOrderbook(d, binance);
+  // V7.4.9 — pass the resolved Binance link object (same resolver the
+  // detail-panel links use) into the order-book loader. A prior refactor
+  // swapped the inline link object for _binanceDetailLinksHtml(d) but left
+  // this call referencing a bare `binance` identifier that no longer exists
+  // in scope — every pickCoin() threw "binance is not defined" at the end,
+  // which surfaced through the aggressive-poll catch as
+  // "[STREAM] aggressive poll failed". getBinanceLink() does NOT alter any
+  // link behavior; loadOrderbook only issues a public depth fetch.
+  loadOrderbook(d, getBinanceLink(d));
   renderList();
 }
 
@@ -2195,6 +2203,10 @@ function pickCoin(id) {
 //      already toast errors, and stacking an order-book toast on every
 //      coin click is the noisiest UX failure mode we have.
 async function loadOrderbook(d, binance) {
+  // Capability guard: never assume the caller handed us a valid link
+  // object. A missing/undefined arg must degrade to "unavailable", not
+  // throw a ReferenceError/TypeError that bubbles into a poll catch.
+  binance = binance || {};
   const slot = document.getElementById('orderbook-' + d.id);
   const status = document.getElementById('ob-status');
   if (!slot) return;
@@ -8615,6 +8627,11 @@ async function _fallbackPollTick() {
 // ─────────────────────────────────────────────────────────────
 const STREAM_AGGRESSIVE_POLL_MS = 10 * 1000;
 let _aggressivePollTimer = null;
+// V7.4.9 — cooldown so a sustained refresh outage doesn't log the same
+// aggressive-poll warning on every 10s tick (console-spam guard). We
+// still surface the FIRST failure immediately, then throttle.
+const STREAM_AGGRESSIVE_WARN_COOLDOWN_MS = 60 * 1000;
+let _aggressivePollWarnAt = 0;
 // Last-seen detail-panel snapshot so the poll path can compute the
 // directional flash for price / panic on every refresh.
 let _lastDetailSnapshot = null;
@@ -8641,7 +8658,16 @@ async function _aggressivePollTick() {
   // even though ticks ARE arriving in real time underneath.
   if (_streamSocket && _streamSocket.readyState === 1 /* OPEN */) return;
   try { await doRefresh(); _rebuildSymbolIndex(); _syncDetailFromPoll(); }
-  catch (e) { console.warn('[STREAM] aggressive poll failed:', e && e.message); }
+  catch (e) {
+    // Sanitized, cooldown-throttled warning: log the first failure right
+    // away, then at most once per cooldown window so a persistent outage
+    // can't flood the console on every aggressive tick.
+    const now = Date.now();
+    if (now - _aggressivePollWarnAt >= STREAM_AGGRESSIVE_WARN_COOLDOWN_MS) {
+      _aggressivePollWarnAt = now;
+      console.warn('[STREAM] aggressive poll failed:', e && e.message);
+    }
+  }
 }
 
 function _enableAggressivePoll() {

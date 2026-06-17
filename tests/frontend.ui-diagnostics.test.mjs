@@ -37,6 +37,23 @@ function loadScannerSortHelpers() {
   return Function(`${block}; return { _scannerCompare, _scannerC24Value };`)();
 }
 
+// Extract loadOrderbook() in isolation. It depends on _esc (for the error
+// path) plus a tiny DOM/fetch surface that the caller injects, so we slice
+// just the function and hand it controllable globals.
+function loadOrderbookFn({ getEl, fetchImpl, sel } = {}) {
+  const block = sliceBetween(terminalJs, 'async function loadOrderbook(d, binance)', 'function resolveTvSymbol');
+  const prelude = `
+    function _esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+  `;
+  const document = { getElementById: getEl || (() => null) };
+  const fetch = fetchImpl || (() => { throw new Error('fetch must not be called'); });
+  const AbortController = function () { this.signal = {}; this.abort = () => {}; };
+  return Function(
+    'document', 'fetch', 'AbortController', 'SEL', 'setTimeout', 'clearTimeout',
+    `${prelude}${block}; return loadOrderbook;`,
+  )(document, fetch, AbortController, sel ?? null, () => 0, () => {});
+}
+
 test('Binance link helper routes spot, futures, Alpha, and unsupported rows safely', () => {
   const { getBinanceLink } = loadTerminalLinkHelpers();
 
@@ -180,6 +197,65 @@ test('scanner 24h sort is numeric, reversible, null-last, and default sort is un
   assert.deepEqual(rows.slice().sort((a, b) => _scannerCompare(a, b, { key: 'c24', dir: 'desc' })).map(r => r.symbol), ['HIGH', 'MID', 'LOW', 'MISS']);
   assert.deepEqual(rows.slice().sort((a, b) => _scannerCompare(a, b, { key: 'c24', dir: 'asc' })).map(r => r.symbol), ['LOW', 'MID', 'HIGH', 'MISS']);
   assert.deepEqual(rows.slice().sort((a, b) => _scannerCompare(a, b, { key: null, dir: null })).map(r => r.symbol), ['MISS', 'MID', 'HIGH', 'LOW']);
+});
+
+test('aggressive-poll path: pickCoin passes a resolved link object, never a bare `binance`', () => {
+  // Root-cause lock. A refactor once left `loadOrderbook(d, binance)` calling
+  // an undefined identifier, so every pickCoin() (and therefore every
+  // aggressive poll via doRefresh -> pickCoin(SEL)) threw
+  // "binance is not defined". The call site must hand loadOrderbook the
+  // resolver output, not a free variable.
+  // Match only the CALL site (trailing `;`), not the `function loadOrderbook(d, binance)` definition.
+  assert.doesNotMatch(terminalJs, /loadOrderbook\(\s*d\s*,\s*binance\s*\)\s*;/);
+  assert.match(terminalJs, /loadOrderbook\(\s*d\s*,\s*getBinanceLink\(d\)\s*\)\s*;/);
+});
+
+test('loadOrderbook degrades safely when handed no/invalid link object (no ReferenceError)', async () => {
+  // Simulates the aggressive-poll path firing with the order-book slot in
+  // the DOM but no usable Binance link. Must NOT throw and must NOT issue a
+  // network fetch — it renders an "unavailable" message and returns.
+  const statusEl = { textContent: '' };
+  const slotEl = { innerHTML: '' };
+  const getEl = (id) => (id === 'ob-status' ? statusEl : (String(id).startsWith('orderbook-') ? slotEl : null));
+
+  const loadOrderbook = loadOrderbookFn({ getEl }); // fetch defaults to throw-if-called
+
+  // undefined link arg (the exact crash shape) — must fail closed.
+  await assert.doesNotReject(() => loadOrderbook({ id: 'beat' }, undefined));
+  assert.match(slotEl.innerHTML, /není dostupný|nedostupn/i);
+  assert.equal(statusEl.textContent, '–');
+
+  // explicit unavailable link — same safe, no-fetch outcome.
+  slotEl.innerHTML = '';
+  await assert.doesNotReject(() => loadOrderbook({ id: 'beat' }, { available: false, url: null, pair: null }));
+  assert.match(slotEl.innerHTML, /není dostupný|nedostupn/i);
+});
+
+test('loadOrderbook still fetches the public depth endpoint for an available spot pair', async () => {
+  // Guards that the safety hardening did not break the happy path.
+  const statusEl = { textContent: '' };
+  const slotEl = { innerHTML: '' };
+  const getEl = (id) => (id === 'ob-status' ? statusEl : slotEl);
+  let fetchedUrl = null;
+  const fetchImpl = async (url) => {
+    fetchedUrl = url;
+    return { ok: true, json: async () => ({ bids: [['10', '1']], asks: [['11', '2']] }) };
+  };
+  const loadOrderbook = loadOrderbookFn({ getEl, fetchImpl, sel: 'btc' });
+  await assert.doesNotReject(() =>
+    loadOrderbook({ id: 'btc' }, { available: true, market: 'spot', pair: 'BTC/USDT' }));
+  assert.match(String(fetchedUrl), /api\.binance\.com\/api\/v3\/depth\?symbol=BTCUSDT/);
+  assert.match(slotEl.innerHTML, /mid/);
+});
+
+test('aggressive-poll failure warning is cooldown-throttled (no per-tick console spam)', () => {
+  // The catch must not log on every 10s tick during a sustained outage:
+  // first failure logs, subsequent ones inside the cooldown window stay
+  // quiet. We assert the source wires a cooldown guard around the warn.
+  assert.match(terminalJs, /STREAM_AGGRESSIVE_WARN_COOLDOWN_MS/);
+  const tickBlock = sliceBetween(terminalJs, 'async function _aggressivePollTick', 'function _enableAggressivePoll');
+  // The warn is gated by a timestamp comparison, not logged unconditionally.
+  assert.match(tickBlock, /_aggressivePollWarnAt[\s\S]*STREAM_AGGRESSIVE_WARN_COOLDOWN_MS[\s\S]*console\.warn\('\[STREAM\] aggressive poll failed:'/);
 });
 
 test('market briefing diagnostics sanitize secrets and expose source states', () => {
