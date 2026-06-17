@@ -905,6 +905,7 @@ async function _handleRequest(request) {
         analysis: aiResult.result.analysis,
         meta: {
           ...aiResult.result.meta,
+          provider: 'Google Gemini',
           cached: false,
           cache_layer: 'live',
           stale: false,

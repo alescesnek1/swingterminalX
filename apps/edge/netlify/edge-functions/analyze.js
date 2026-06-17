@@ -31,7 +31,8 @@ import {
   generateAtomic,
   streamWithFallback,
   discoverFlashModel,
-  DEFAULT_MODEL_CHAIN,
+  buildModelChain,
+  classifyGeminiError,
   GeminiApiError,
 } from './lib/orchestrator.js';
 import { normalizeBinanceSymbol, fetchBinanceSnapshot } from './lib/binance.js';
@@ -389,10 +390,7 @@ async function atomicJsonResponse(request, { norm, lang, fetched, rate, startTim
   let lastErr = null;
   const triedModels = [];
 
-  const envOverride = Deno.env.get('GEMINI_MODEL');
-  const baseChain = envOverride
-    ? [envOverride, ...DEFAULT_MODEL_CHAIN.filter((m) => m !== envOverride)]
-    : [...DEFAULT_MODEL_CHAIN];
+  const baseChain = buildModelChain();
 
   for (const model of baseChain) {
     triedModels.push(model);
@@ -403,7 +401,9 @@ async function atomicJsonResponse(request, { norm, lang, fetched, rate, startTim
       lastErr = e;
       const status = e instanceof GeminiApiError ? e.status : 0;
       console.warn(`[ANALYZE] ${model} failed (status=${status}):`, e.message);
-      if (status === 404) continue;
+      // 404 (dead model) and 400 (grounding-recovery already failed
+      // inside orchestrate) → walk to the next model in the chain.
+      if (status === 404 || status === 400) continue;
       if (status === 429 || (status >= 500 && status < 600)) {
         await delay(500);
         try {
@@ -430,11 +430,18 @@ async function atomicJsonResponse(request, { norm, lang, fetched, rate, startTim
 
   if (!result) {
     const status = lastErr instanceof GeminiApiError ? lastErr.status : 0;
+    const { code, reason } = classifyGeminiError(lastErr);
     return jsonResponse(request, {
       error: 'AI analysis failed',
       detail: lastErr?.message || 'Gemini did not return a valid response after retries.',
+      provider: 'Google Gemini',
+      provider_error: lastErr instanceof GeminiApiError ? lastErr.body : undefined,
+      reason,
+      reason_code: code,
       upstream_status: status,
+      model: lastErr instanceof GeminiApiError ? lastErr.model : undefined,
       tried_models: triedModels,
+      fallback_used: triedModels.length > 1,
       symbol: norm.pair,
       stage: 'gemini',
     }, 502);
@@ -442,10 +449,12 @@ async function atomicJsonResponse(request, { norm, lang, fetched, rate, startTim
 
   const ttlSec = await aiCacheSet(cacheKeySymbol || norm.pair, lang, result);
   result.meta.cached = false;
+  result.meta.provider = 'Google Gemini';
   result.meta.cache_ttl_seconds = ttlSec || getAiCacheTtlSeconds();
   result.meta.binance_fetch_ms = fetched.fetch_ms;
   result.meta.partial_data = fetched.partial;
   result.meta.tried_models = triedModels;
+  result.meta.fallback_used = triedModels.length > 1 || !!result.meta.grounding_disabled;
   result.meta.rate_limit = { remaining: rate.remaining, reset_ms: rate.reset_ms };
   result.meta.total_latency_ms = Date.now() - startTime;
   return jsonResponse(request, result);
@@ -518,9 +527,15 @@ function streamLiveResponse(request, { norm, lang, fetched, rate, startTime, cac
           });
         } catch (e) {
         const status = e instanceof GeminiApiError ? e.status : 0;
+        const { code, reason } = classifyGeminiError(e);
         safeEnqueue(sseLine('error', {
           error: 'AI analysis failed',
           detail: e.message,
+          provider: 'Google Gemini',
+          provider_error: e instanceof GeminiApiError ? e.body : undefined,
+          reason,
+          reason_code: code,
+          model: e instanceof GeminiApiError ? e.model : undefined,
           upstream_status: status,
           stage: 'gemini',
         }));
@@ -528,10 +543,13 @@ function streamLiveResponse(request, { norm, lang, fetched, rate, startTime, cac
         return;
       }
 
-      const { iter, primed, model, triedModels } = opened;
+      const { iter, primed, model, triedModels, fallbackUsed, groundingDisabled } = opened;
       safeEnqueue(sseLine('meta', {
         model,
+        provider: 'Google Gemini',
         tried_models: triedModels,
+        fallback_used: !!fallbackUsed,
+        grounding_disabled: !!groundingDisabled,
         binance_fetch_ms: fetched.fetch_ms,
         partial_data: fetched.partial,
         rate_limit: { remaining: rate.remaining, reset_ms: rate.reset_ms },

@@ -191,6 +191,129 @@ export const DEFAULT_MODEL_CHAIN = [
   'gemini-2.5-pro',
 ];
 
+// ─────────────────────────────────────────────────────────────
+// Env-configurable model order (V6 AI hotfix).
+//
+// Operators set the chain explicitly via three knobs:
+//   GEMINI_MODEL_PRIMARY   — first model tried (e.g. gemini-2.5-flash)
+//   GEMINI_MODEL_FALLBACK  — tried if primary 400s/404s (e.g. gemini-2.5-flash-lite)
+//   GEMINI_MODEL_LIGHT     — cheapest last-resort (e.g. gemini-2.5-flash-lite)
+// The legacy single-model GEMINI_MODEL override is still honored and
+// prepended for back-compat. Anything left unset falls through to
+// DEFAULT_MODEL_CHAIN so a missing env never produces an empty chain.
+// ─────────────────────────────────────────────────────────────
+export function buildModelChain() {
+  const legacy = Deno.env.get('GEMINI_MODEL');
+  const primary = Deno.env.get('GEMINI_MODEL_PRIMARY');
+  const fallback = Deno.env.get('GEMINI_MODEL_FALLBACK');
+  const light = Deno.env.get('GEMINI_MODEL_LIGHT');
+  const chain = [];
+  for (const m of [legacy, primary, fallback, light, ...DEFAULT_MODEL_CHAIN]) {
+    const id = (m || '').trim();
+    if (id && !chain.includes(id)) chain.push(id);
+  }
+  return chain;
+}
+
+// Strip any API key (?key=… / "key": "…") from a provider body before
+// it ever reaches a log line or the UI. Caps length so a giant error
+// page can't blow up the payload. NEVER returns the raw key.
+export function sanitizeProviderBody(text) {
+  if (!text) return '';
+  return String(text)
+    .replace(/key=[A-Za-z0-9_\-]+/g, 'key=***')
+    .replace(/"key"\s*:\s*"[^"]*"/g, '"key":"***"')
+    .replace(/AIza[A-Za-z0-9_\-]{10,}/g, 'AIza***')
+    .slice(0, 400);
+}
+
+// Endpoint URL with the API key redacted — safe to log.
+function safeEndpoint(model, method) {
+  return `${GEMINI_API_BASE}/models/${model}:${method}`;
+}
+
+// Remove the grounding (googleSearch) tool from a payload. This is the
+// single most fragile field and the most common 400 trigger — Google
+// rotates grounding requirements by model / tier, and a bare
+// `tools:[{googleSearch:{}}]` is rejected with HTTP 400 on some
+// revisions of gemini-2.5-flash. Retrying without it keeps AI alive
+// (it just loses live web grounding for that one call).
+function stripGrounding(payload) {
+  if (!payload || !payload.tools) return payload;
+  const { tools: _drop, ...rest } = payload;
+  return rest;
+}
+
+/**
+ * Classify a GeminiApiError into a stable, UI-friendly reason code so
+ * the modal can show "provider quota/billing" instead of a raw body.
+ * Returns { code, reason } — reason is a short human string.
+ */
+export function classifyGeminiError(err) {
+  const status = err instanceof GeminiApiError ? err.status : 0;
+  const body = (err instanceof GeminiApiError ? err.body : '') || '';
+  const lc = body.toLowerCase();
+  if (status === 400) {
+    if (lc.includes('exceeds') || lc.includes('too large') || lc.includes('token')) {
+      return { code: 'REQUEST_TOO_LARGE', reason: 'request too large for the model' };
+    }
+    if (lc.includes('api key') || lc.includes('api_key') || lc.includes('invalid key')) {
+      return { code: 'AUTH_CONFIG', reason: 'auth/config: API key rejected' };
+    }
+    return { code: 'PROVIDER_400', reason: 'provider rejected the request (400)' };
+  }
+  if (status === 401 || status === 403) return { code: 'AUTH_CONFIG', reason: 'auth/config missing or rejected' };
+  if (status === 404) return { code: 'INVALID_MODEL', reason: 'invalid / unavailable model' };
+  if (status === 429) return { code: 'QUOTA_BILLING', reason: 'provider quota / billing limit' };
+  if (status >= 500 && status < 600) return { code: 'PROVIDER_5XX', reason: 'provider temporary outage' };
+  if (status === 0) return { code: 'NETWORK', reason: 'network error reaching provider' };
+  return { code: 'UNKNOWN', reason: `provider error (HTTP ${status})` };
+}
+
+// Low-level non-streaming generateContent with 400 grounding-recovery.
+// On a 400 whose payload carried the grounding tool, retries the SAME
+// model once without it before surfacing the error. Returns
+// { data, groundingDisabled }. Throws GeminiApiError (sanitized body).
+async function generateContentOnce(model, payload, apiKey, signal = null) {
+  const url = `${GEMINI_API_BASE}/models/${model}:generateContent?key=${apiKey}`;
+  const promptChars = payload?.contents?.[0]?.parts?.[0]?.text?.length ?? 0;
+  const doFetch = (body) => fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: signal || undefined,
+  });
+
+  let res = await doFetch(payload);
+  let text = await res.text();
+  let groundingDisabled = false;
+
+  if (res.status === 400 && payload.tools) {
+    console.warn(
+      `[GEMINI] 400 from ${model} at ${safeEndpoint(model, 'generateContent')} ` +
+      `(prompt_chars=${promptChars}, grounding=on) — retrying without googleSearch. ` +
+      `body=${sanitizeProviderBody(text)}`,
+    );
+    res = await doFetch(stripGrounding(payload));
+    text = await res.text();
+    groundingDisabled = true;
+  }
+
+  if (!res.ok) {
+    console.warn(
+      `[GEMINI] HTTP ${res.status} from ${model} at ${safeEndpoint(model, 'generateContent')} ` +
+      `(prompt_chars=${promptChars}, grounding=${groundingDisabled ? 'off' : 'on'}) ` +
+      `body=${sanitizeProviderBody(text)}`,
+    );
+    throw new GeminiApiError(`Google API HTTP ${res.status} for ${model}`, {
+      status: res.status,
+      model,
+      body: sanitizeProviderBody(text),
+    });
+  }
+  return { data: JSON.parse(text), groundingDisabled };
+}
+
 // Per-isolate discovery cache — a single successful list call is
 // reused for the rest of this isolate's lifetime.
 let _discoveredFlashModel = null;
@@ -302,24 +425,6 @@ export async function orchestrate(symbol, snapshot, userLang = 'cs', overrideMod
   const venueLabel = binanceAvailable ? 'Binance' : 'agregovaných tržních dat (CoinGecko)';
   const userPrompt = `Analyzuj aktuální tržní podmínky pro ${symbol} podle ${venueLabel}, dle dat přiložených níže.${langHint}${partialHint}${spotOnlyHint}${nonBinanceHint}`;
 
-  async function callGemini(model, payload) {
-    const url = `${GEMINI_API_BASE}/models/${model}:generateContent?key=${apiKey}`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const text = await res.text();
-    if (!res.ok) {
-      throw new GeminiApiError(`Google API HTTP ${res.status} for ${model}`, {
-        status: res.status,
-        model,
-        body: text.slice(0, 240),
-      });
-    }
-    return JSON.parse(text);
-  }
-
   const dataString = JSON.stringify(snapshot, null, 2);
   const dataLabel = binanceAvailable ? 'Binance live snapshot' : 'CoinGecko market snapshot (non-Binance / DEX coin)';
   const combinedContent = `=== SYSTÉMOVÉ INSTRUKCE ===
@@ -332,12 +437,12 @@ ${dataString}
 ${userPrompt}
 `;
   const payload = {
-    contents: [{ parts: [{ text: combinedContent }] }],
+    contents: [{ role: 'user', parts: [{ text: combinedContent }] }],
     tools: [{ googleSearch: {} }],
     generationConfig: { temperature: 0.7 },
   };
 
-  const data = await callGemini(modelName, payload);
+  const { data, groundingDisabled } = await generateContentOnce(modelName, payload, apiKey);
   const candidate = data.candidates?.[0]?.content;
   if (!candidate) {
     throw new GeminiApiError('No candidate returned from Gemini API', { status: 200, model: modelName });
@@ -352,6 +457,7 @@ ${userPrompt}
       latency_ms: Date.now() - startTime,
       timestamp: new Date().toISOString(),
       partial,
+      grounding_disabled: groundingDisabled,
     },
   };
 }
@@ -369,36 +475,20 @@ export async function runMarketBriefing(marketContext, userLang = 'cs') {
   const apiKey = Deno.env.get('GEMINI_API_KEY');
   if (!apiKey) throw new GeminiApiError('GEMINI_API_KEY is not configured');
 
-  const envOverride = Deno.env.get('GEMINI_MODEL');
-  const baseChain = envOverride
-    ? [envOverride, ...DEFAULT_MODEL_CHAIN.filter((m) => m !== envOverride)]
-    : [...DEFAULT_MODEL_CHAIN];
+  const baseChain = buildModelChain();
 
   const payload = buildMarketBriefingPayload(marketContext, userLang);
   const triedModels = [];
   let lastErr = null;
+  let groundingDisabled = false;
   const startTime = Date.now();
 
   for (const model of baseChain) {
     triedModels.push(model);
     try {
-      const url = `${GEMINI_API_BASE}/models/${model}:generateContent?key=${apiKey}`;
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const text = await res.text();
-      if (!res.ok) {
-        lastErr = new GeminiApiError(`Google API HTTP ${res.status} for ${model}`, {
-          status: res.status, model, body: text.slice(0, 240),
-        });
-        if (res.status === 404) continue;
-        if (res.status === 429 || (res.status >= 500 && res.status < 600)) continue;
-        break;
-      }
-      const data = JSON.parse(text);
-      const analysisText = extractTextFromFrame(data);
+      const out = await generateContentOnce(model, payload, apiKey);
+      groundingDisabled = out.groundingDisabled;
+      const analysisText = extractTextFromFrame(out.data);
       if (!analysisText) {
         lastErr = new GeminiApiError(`Empty response from ${model}`, { status: 200, model });
         continue;
@@ -411,11 +501,19 @@ export async function runMarketBriefing(marketContext, userLang = 'cs') {
           latency_ms: Date.now() - startTime,
           timestamp: new Date().toISOString(),
           kind: 'market-briefing',
+          grounding_disabled: groundingDisabled,
+          fallback_used: triedModels.length > 1 || groundingDisabled,
         },
       };
     } catch (e) {
       lastErr = e;
       console.warn(`[MARKET-BRIEFING] ${model} failed:`, e.message);
+      const status = e instanceof GeminiApiError ? e.status : 0;
+      // 404 (dead model), 400 (already grounding-recovered inside the
+      // helper), 429 / 5xx / network → walk to the next model. Any other
+      // hard error means the chain won't help, so stop.
+      if (status === 404 || status === 400 || status === 429 || status === 0 || (status >= 500 && status < 600)) continue;
+      break;
     }
   }
 
@@ -424,26 +522,19 @@ export async function runMarketBriefing(marketContext, userLang = 'cs') {
       const discovered = await discoverFlashModel(apiKey);
       if (discovered && !triedModels.includes(discovered)) {
         triedModels.push(discovered);
-        const url = `${GEMINI_API_BASE}/models/${discovered}:generateContent?key=${apiKey}`;
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-        const text = await res.text();
-        if (res.ok) {
-          const data = JSON.parse(text);
-          const analysisText = extractTextFromFrame(data);
-          if (analysisText) {
-            return {
-              analysis: analysisText,
-              meta: {
-                model: discovered, tried_models: triedModels,
-                latency_ms: Date.now() - startTime,
-                timestamp: new Date().toISOString(), kind: 'market-briefing',
-              },
-            };
-          }
+        const out = await generateContentOnce(discovered, payload, apiKey);
+        const analysisText = extractTextFromFrame(out.data);
+        if (analysisText) {
+          return {
+            analysis: analysisText,
+            meta: {
+              model: discovered, tried_models: triedModels,
+              latency_ms: Date.now() - startTime,
+              timestamp: new Date().toISOString(), kind: 'market-briefing',
+              grounding_disabled: out.groundingDisabled,
+              fallback_used: true,
+            },
+          };
         }
       }
     } catch (e) { lastErr = e; }
@@ -467,21 +558,7 @@ export async function generateAtomic({ kind, symbol, snapshot, snapshots, userLa
     ? buildBriefingPayload(snapshots, userLang)
     : buildAnalysisPayload(symbol, snapshot, userLang, partial);
 
-  const url = `${GEMINI_API_BASE}/models/${modelName}:generateContent?key=${apiKey}`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  const text = await res.text();
-  if (!res.ok) {
-    throw new GeminiApiError(`Google API HTTP ${res.status} for ${modelName}`, {
-      status: res.status,
-      model: modelName,
-      body: text.slice(0, 240),
-    });
-  }
-  const data = JSON.parse(text);
+  const { data, groundingDisabled } = await generateContentOnce(modelName, payload, apiKey);
   const analysisText = extractTextFromFrame(data) || 'Analýza nebyla vygenerována.';
   return {
     analysis: analysisText,
@@ -490,6 +567,7 @@ export async function generateAtomic({ kind, symbol, snapshot, snapshots, userLa
       latency_ms: Date.now() - startTime,
       timestamp: new Date().toISOString(),
       kind: kind || 'analysis',
+      grounding_disabled: groundingDisabled,
     },
   };
 }
@@ -498,7 +576,7 @@ export async function generateAtomic({ kind, symbol, snapshot, snapshots, userLa
 // Streaming variant — yields text chunks as Gemini emits them
 // ─────────────────────────────────────────────────────────────
 
-function buildAnalysisPayload(symbol, snapshot, userLang, partial) {
+function buildAnalysisPayload(symbol, snapshot, userLang, partial, disableGrounding = false) {
   const langHint = userLang === 'cs' ? ' Odpověz v češtině.' : '';
   const futuresAvailable = !!snapshot?.futures?.available;
   const binanceAvailable = snapshot?.binance_available !== false;
@@ -525,11 +603,13 @@ ${dataString}
 === TVOJE ZADÁNÍ ===
 ${userPrompt}
 `;
-  return {
-    contents: [{ parts: [{ text: combinedContent }] }],
+  const payload = {
+    contents: [{ role: 'user', parts: [{ text: combinedContent }] }],
     tools: [{ googleSearch: {} }],
     generationConfig: { temperature: 0.7 },
   };
+  if (disableGrounding) delete payload.tools;
+  return payload;
 }
 
 // V4 Premium: payload for the global market briefing.
@@ -551,13 +631,13 @@ ${dataString}
 Vytvoř globální market briefing přesně podle požadovaného formátu (4 sekce: GLOBAL MACRO BACKDROP, TOP-10 CRYPTO IN MACRO CONTEXT, META DIRECTION & LIQUIDITY ROTATION, OPPORTUNITIES & CATALYSTS). Spoj crypto, traditional macro (SPX/DXY) a geopolitiku do jednoho propojeného příběhu, ne do oddělených bullet-pointů.${langHint}
 `;
   return {
-    contents: [{ parts: [{ text: combinedContent }] }],
+    contents: [{ role: 'user', parts: [{ text: combinedContent }] }],
     tools: [{ googleSearch: {} }],
     generationConfig: { temperature: 0.55 },
   };
 }
 
-function buildBriefingPayload(snapshots, userLang) {
+function buildBriefingPayload(snapshots, userLang, disableGrounding = false) {
   const langHint = userLang === 'cs' ? ' Odpověz v češtině.' : '';
   const dataString = JSON.stringify(snapshots, null, 2);
   const combinedContent = `=== SYSTÉMOVÉ INSTRUKCE ===
@@ -569,11 +649,13 @@ ${dataString}
 === TVOJE ZADÁNÍ ===
 Vytvoř ranní svodku.${langHint}
 `;
-  return {
-    contents: [{ parts: [{ text: combinedContent }] }],
+  const payload = {
+    contents: [{ role: 'user', parts: [{ text: combinedContent }] }],
     tools: [{ googleSearch: {} }],
     generationConfig: { temperature: 0.7 },
   };
+  if (disableGrounding) delete payload.tools;
+  return payload;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -696,14 +778,14 @@ function pullJsonObjects(state, buffer) {
  *   3. Frame parser is independent of wire format — it just hands
  *      us JSON objects and we pull text via extractTextFromFrame.
  */
-export async function* streamOrchestrate({ kind = 'analysis', symbol, snapshot, snapshots, userLang = 'cs', model, partial = false, signal = null }) {
+export async function* streamOrchestrate({ kind = 'analysis', symbol, snapshot, snapshots, userLang = 'cs', model, partial = false, signal = null, disableGrounding = false }) {
   const apiKey = Deno.env.get('GEMINI_API_KEY');
   if (!apiKey) throw new GeminiApiError('GEMINI_API_KEY is not configured');
 
   const modelName = model || Deno.env.get('GEMINI_MODEL') || DEFAULT_MODEL_CHAIN[0];
   const payload = kind === 'briefing'
-    ? buildBriefingPayload(snapshots, userLang)
-    : buildAnalysisPayload(symbol, snapshot, userLang, partial);
+    ? buildBriefingPayload(snapshots, userLang, disableGrounding)
+    : buildAnalysisPayload(symbol, snapshot, userLang, partial, disableGrounding);
 
   const url = `${GEMINI_API_BASE}/models/${modelName}:streamGenerateContent?alt=sse&key=${apiKey}`;
   // V5 (D-4): plumb AbortSignal so the SSE endpoint's cancel() handler
@@ -857,23 +939,46 @@ export async function* streamOrchestrate({ kind = 'analysis', symbol, snapshot, 
 export async function streamWithFallback({ kind, symbol, snapshot, snapshots, userLang, partial, signal = null }) {
   const triedModels = [];
   const apiKey = Deno.env.get('GEMINI_API_KEY');
-  const envOverride = Deno.env.get('GEMINI_MODEL');
-  const baseChain = envOverride
-    ? [envOverride, ...DEFAULT_MODEL_CHAIN.filter((m) => m !== envOverride)]
-    : [...DEFAULT_MODEL_CHAIN];
+  const baseChain = buildModelChain();
+
+  // Open a stream for one model. On a 400 (the bare googleSearch
+  // grounding tool is the usual culprit), retry the SAME model once
+  // with grounding stripped before bubbling up. Returns the primed
+  // iterator + whether grounding had to be disabled.
+  const openForModel = async (model) => {
+    try {
+      const it = streamOrchestrate({ kind, symbol, snapshot, snapshots, userLang, model, partial, signal });
+      const first = await it.next();
+      return { iter: it, primed: first, model, groundingDisabled: false };
+    } catch (e) {
+      if (e instanceof GeminiApiError && e.status === 400) {
+        console.warn(`[STREAM] ${model} 400 — retrying without grounding tool. body=${e.body || ''}`);
+        const it = streamOrchestrate({ kind, symbol, snapshot, snapshots, userLang, model, partial, signal, disableGrounding: true });
+        const first = await it.next();
+        return { iter: it, primed: first, model, groundingDisabled: true };
+      }
+      throw e;
+    }
+  };
 
   let lastErr = null;
   for (const model of baseChain) {
     triedModels.push(model);
     try {
-      const it = streamOrchestrate({ kind, symbol, snapshot, snapshots, userLang, model, partial, signal });
-      const first = await it.next();
-      return { iter: it, primed: first, model, triedModels };
+      const opened = await openForModel(model);
+      return {
+        ...opened,
+        triedModels,
+        fallbackUsed: triedModels.length > 1 || opened.groundingDisabled,
+      };
     } catch (e) {
       lastErr = e;
       const status = e instanceof GeminiApiError ? e.status : 0;
       console.warn(`[STREAM] ${model} probe failed (status=${status}):`, e.message);
-      if (status !== 404 && status !== 0 && (status < 500 || status >= 600) && status !== 429) {
+      // Walk the chain on 400 (grounding-recovery already failed),
+      // 404 (dead model), 429, 5xx, and network errors. Stop only on a
+      // genuinely fatal status the next model can't fix.
+      if (status !== 400 && status !== 404 && status !== 0 && status !== 429 && (status < 500 || status >= 600)) {
         break;
       }
     }
@@ -884,9 +989,8 @@ export async function streamWithFallback({ kind, symbol, snapshot, snapshots, us
       const discovered = await discoverFlashModel(apiKey);
       if (discovered && !triedModels.includes(discovered)) {
         triedModels.push(discovered);
-        const it = streamOrchestrate({ kind, symbol, snapshot, snapshots, userLang, model: discovered, partial, signal });
-        const first = await it.next();
-        return { iter: it, primed: first, model: discovered, triedModels };
+        const opened = await openForModel(discovered);
+        return { ...opened, triedModels, fallbackUsed: true };
       }
     } catch (e) {
       lastErr = e;

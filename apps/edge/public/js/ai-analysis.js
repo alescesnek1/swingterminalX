@@ -107,6 +107,10 @@ function renderMeta(metaEl, m, prefix = '') {
   const parts = [];
   if (prefix) parts.push(prefix);
   if (m.model) parts.push(`Model: ${m.model}`);
+  // Fallback diagnostics — make it obvious when we're NOT on the primary
+  // model or had to drop web grounding to keep AI alive.
+  if (m.fallback_used) parts.push('⚠ Using fallback model');
+  if (m.grounding_disabled) parts.push('web grounding off');
   if (m.binance_fetch_ms != null) parts.push(`Binance: ${m.binance_fetch_ms}ms`);
   if (m.total_latency_ms != null) parts.push(`Total: ${m.total_latency_ms}ms`);
   if (m.cache_ttl_seconds && !m.cached) parts.push(`TTL: ${Math.round(m.cache_ttl_seconds / 60)} min`);
@@ -142,8 +146,19 @@ function renderError(bodyEl, metaEl, error, status) {
     hint = error?.hint || error?.detail || 'Zkuste to prosím znovu za chvíli.';
   } else if (status === 502) {
     icon = '🤖'; title = 'AI selhala';
-    detail = error?.error || 'Gemini neodpověděl ani po retry.';
-    hint = error?.detail || (error?.tried_models ? `Tried: ${error.tried_models.join(' → ')}` : 'Zkuste to prosím znovu.');
+    detail = error?.reason
+      ? `${error.provider || 'Google Gemini'}: ${error.reason}`
+      : (error?.error || 'Gemini neodpověděl ani po retry.');
+    // Structured, sanitized diagnostics — model attempted, fallback
+    // attempted, the provider's own (key-stripped) error, and a next
+    // action. No raw JSON dump.
+    const lines = [];
+    if (error?.model) lines.push(`Model: ${error.model}`);
+    if (error?.tried_models?.length) lines.push(`Zkoušené modely: ${error.tried_models.join(' → ')}`);
+    lines.push(`Fallback: ${error?.fallback_used ? 'ano' : 'ne'}`);
+    if (error?.provider_error) lines.push(`Provider: ${String(error.provider_error).slice(0, 200)}`);
+    lines.push('Další krok: zkus to prosím znovu za chvíli — scanner a RADAR fungují dál.');
+    hint = lines.join('\n');
   } else if (status === 500) {
     icon = '💥'; title = 'Interní chyba serveru';
     detail = error?.detail || error?.error || 'Edge funkce hodila výjimku.';
@@ -160,7 +175,7 @@ function renderError(bodyEl, metaEl, error, status) {
       <div class="ai-error__icon">${icon}</div>
       <h4 class="ai-error__title">${escapeText(title)}</h4>
       <p class="ai-error__detail">${escapeText(detail)}</p>
-      ${hint ? `<p class="ai-error__hint">${escapeText(hint)}</p>` : ''}
+      ${hint ? `<p class="ai-error__hint">${escapeText(hint).replace(/\n/g, '<br>')}</p>` : ''}
     </div>
   `;
   if (metaEl) metaEl.textContent = `Status: ${status}${error?.stage ? ' · ' + error.stage : ''}`;

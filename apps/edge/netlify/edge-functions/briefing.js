@@ -19,7 +19,7 @@ import {
   getAiCacheTtlSeconds,
   checkRateLimit,
 } from './lib/redis.js';
-import { streamWithFallback, generateAtomic, GeminiApiError } from './lib/orchestrator.js';
+import { streamWithFallback, generateAtomic, classifyGeminiError, GeminiApiError } from './lib/orchestrator.js';
 import { normalizeBinanceSymbol, fetchBinanceSnapshot } from './lib/binance.js';
 import { checkOrigin, pickAllowOrigin, verifyAuth } from './lib/security.js';
 import { logFatal } from './lib/log.js';
@@ -248,9 +248,15 @@ function streamLiveBriefing(request, { cacheKey, lang, snapshots, rate, startTim
         });
       } catch (e) {
         const status = e instanceof GeminiApiError ? e.status : 0;
+        const { code, reason } = classifyGeminiError(e);
         safeEnqueue(sseLine('error', {
           error: 'Briefing AI failed',
           detail: e.message,
+          provider: 'Google Gemini',
+          provider_error: e instanceof GeminiApiError ? e.body : undefined,
+          reason,
+          reason_code: code,
+          model: e instanceof GeminiApiError ? e.model : undefined,
           upstream_status: status,
           stage: 'gemini',
         }));
@@ -258,10 +264,13 @@ function streamLiveBriefing(request, { cacheKey, lang, snapshots, rate, startTim
         return;
       }
 
-      const { iter, primed, model, triedModels } = opened;
+      const { iter, primed, model, triedModels, fallbackUsed, groundingDisabled } = opened;
       safeEnqueue(sseLine('meta', {
         model,
+        provider: 'Google Gemini',
         tried_models: triedModels,
+        fallback_used: !!fallbackUsed,
+        grounding_disabled: !!groundingDisabled,
         symbols: snapshots.map((s) => s.symbol),
         rate_limit: { remaining: rate.remaining, reset_ms: rate.reset_ms },
         cached: false,
