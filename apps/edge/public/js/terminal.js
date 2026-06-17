@@ -1495,12 +1495,60 @@ function _binanceSearchLink(input) {
   if (!q) return null;
   return `https://www.binance.com/en/search?query=${encodeURIComponent(q).replace(/%20/g, '+')}`;
 }
-function _alphaSearchQuery(d, sym) {
+// Explicit, conservative chain mapping for direct Binance Alpha contract
+// links. Only chains we can map deterministically are eligible; anything
+// unknown returns null so we never guess a path segment. Solana is
+// intentionally omitted — we have no safe address validation for it here.
+function _normalizeAlphaChain(chain) {
+  const c = String(chain == null ? '' : chain).trim().toLowerCase();
+  if (['bsc', 'bnb', 'bnb smart chain', 'binance smart chain', 'binance-smart-chain', 'bep20'].includes(c)) return 'bsc';
+  if (['ethereum', 'eth', 'erc20'].includes(c)) return 'ethereum';
+  return null;
+}
+function _isEvmContract(addr) {
+  return /^0x[a-fA-F0-9]{40}$/.test(String(addr == null ? '' : addr).trim());
+}
+function _alphaContractAddress(d) {
+  return (d && (d.contractAddress || d.contract_address || d.tokenAddress || d.token_address || d.address)) || null;
+}
+// Resolve the best Binance Alpha link without ever fabricating a direct
+// trade URL. Priority:
+//   1. validated chain + EVM contract  -> /en/alpha/<chain>/<contract>   (market: alpha)
+//   2. a specific identifier exists     -> search query                  (market: alpha-search)
+//   3. otherwise                        -> /en/alpha landing page        (market: alpha)
+function _binanceAlphaLink(d, sym) {
+  d = d || {};
+  const normChain = _normalizeAlphaChain(d.chain || d.network || d.contract_chain);
+  const contract = _alphaContractAddress(d);
+  const evm = _isEvmContract(contract);
+
+  // Tier 1 — explicit, validated chain + contract -> direct Alpha page.
+  if (normChain && evm) {
+    return {
+      url: `https://www.binance.com/en/alpha/${normChain}/${String(contract).trim().toLowerCase()}`,
+      pair: sym || null,
+      available: true,
+      market: 'alpha',
+    };
+  }
+
+  // Tier 2 — search only when we have something more specific than the
+  // bare display symbol: an alpha pair/token id, or a valid contract we
+  // could not direct-link (unsupported chain).
   const parts = [];
   if (sym) parts.push(sym);
-  if (d && d.alphaTokenId) parts.push(d.alphaTokenId);
-  if (d && d.alphaPair) parts.push(d.alphaPair);
-  return parts.filter(Boolean).join(' ');
+  if (d.alphaTokenId) parts.push(d.alphaTokenId);
+  if (d.alphaPair) parts.push(d.alphaPair);
+  const contractIsSpecific = evm && !normChain; // valid contract, unsupported chain
+  if (contractIsSpecific) parts.push(String(contract).trim());
+  const hasSpecific = !!(d.alphaTokenId || d.alphaPair || contractIsSpecific);
+  if (hasSpecific) {
+    const url = _binanceSearchLink(parts.filter(Boolean).join(' '));
+    if (url) return { url, pair: d.alphaPair || d.alphaTokenId || sym || null, available: true, market: 'alpha-search' };
+  }
+
+  // Tier 3 — general Alpha landing page beats a weak symbol-only search.
+  return { url: 'https://www.binance.com/en/alpha', pair: sym || null, available: true, market: 'alpha' };
 }
 function getBinanceLink(d) {
   d = d || {};
@@ -1510,12 +1558,10 @@ function getBinanceLink(d) {
   if (d.binance_available === false) return { url: null, pair: null, available: false };
 
   // Alpha rows are Binance discovery listings, not guaranteed spot or
-  // futures markets. Use search so we never fabricate a bad trade URL.
+  // futures markets. Never fabricate a trade URL — resolve to a direct
+  // Alpha contract page, a specific search, or the Alpha landing page.
   if (_isBinanceAlphaRow(d)) {
-    const url = _binanceSearchLink(_alphaSearchQuery(d, sym));
-    return url
-      ? { url, pair: d.alphaPair || d.alphaTokenId || sym || null, available: true, market: 'alpha-search' }
-      : { url: null, pair: null, available: false, market: 'alpha-search' };
+    return _binanceAlphaLink(d, sym);
   }
 
   if (d.binance_market === 'futures') {
@@ -1539,6 +1585,7 @@ function getBinanceLink(d) {
 }
 
 function _binanceDetailButtonLabel(market) {
+  if (market === 'alpha') return 'BINANCE ALPHA';
   if (market === 'alpha-search') return 'BINANCE ALPHA SEARCH';
   if (market === 'futures') return 'BINANCE FUTURES';
   if (market === 'spot') return 'BINANCE SPOT';
@@ -1554,7 +1601,7 @@ function _binanceDetailButtonHtml(binance) {
   if (!binance.available || !href) {
     return '<div class="binance-btn unavail">Binance nedostupne</div>';
   }
-  const cls = binance.market === 'alpha-search' ? 'alpha'
+  const cls = (binance.market === 'alpha' || binance.market === 'alpha-search') ? 'alpha'
     : (binance.market === 'futures' ? 'futures' : 'active');
   const label = _binanceDetailButtonLabel(binance.market);
   const pair = binance.pair ? ` → ${_esc(binance.pair)}` : '';

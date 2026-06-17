@@ -94,11 +94,12 @@ test('Binance Alpha link helpers handle alpha-only row shapes safely', () => {
   // String input still works.
   assert.match(_binanceSearchLink('BEATUSDT ALPHA_451/USDT'), /query=BEATUSDT\+ALPHA_451/);
 
-  // C — exchange-only Alpha row gets a safe alpha-search fallback.
+  // C — exchange-only Alpha row resolves to the general Alpha page (a
+  //     symbol-only search is too weak to be useful).
   const alphaExchange = getBinanceLink({ symbol: 'BEATUSDT', exchange: 'ALPHA' });
   assert.equal(alphaExchange.available, true);
-  assert.equal(alphaExchange.market, 'alpha-search');
-  assert.match(alphaExchange.url, /query=BEATUSDT/);
+  assert.equal(alphaExchange.market, 'alpha');
+  assert.equal(alphaExchange.url, 'https://www.binance.com/en/alpha');
   assert.doesNotMatch(alphaExchange.url, /\/futures\/BEATUSDT/);
 
   // D — alphaPair-only row keeps the existing good behaviour.
@@ -113,7 +114,7 @@ test('Binance Alpha link helpers handle alpha-only row shapes safely', () => {
   const alphaHtml = _binanceDetailButtonHtml(alphaExchange);
   assert.doesNotMatch(alphaHtml, /\/futures\/BEATUSDT/);
   assert.doesNotMatch(alphaHtml, /BINANCE FUTURES \(ALPHA\)/);
-  assert.match(alphaHtml, /BINANCE ALPHA SEARCH/);
+  assert.match(alphaHtml, /BINANCE ALPHA →/);
   assert.match(alphaHtml, /BEATUSDT/);
 
   // G — futures BTCUSDT still resolves to /futures/BTCUSDT.
@@ -130,6 +131,71 @@ test('Binance Alpha link helpers handle alpha-only row shapes safely', () => {
   const disabledHtml = _binanceDetailButtonHtml({ url: null, available: false });
   assert.match(disabledHtml, /binance-btn unavail/);
   assert.doesNotMatch(disabledHtml, /<a /);
+});
+
+test('Binance Alpha link prefers direct contract, then specific search, then the Alpha page', () => {
+  const { getBinanceLink, _binanceDetailButtonHtml } = loadTerminalLinkHelpers();
+
+  const noObject = (s) => {
+    assert.doesNotMatch(s, /\[object Object\]/);
+    assert.doesNotMatch(s, /%5[Bb]object/);
+  };
+
+  // 1 — valid BSC contract -> direct Alpha contract URL.
+  const direct = getBinanceLink({
+    symbol: 'BEATUSDT',
+    exchange: 'ALPHA',
+    chain: 'bsc',
+    contractAddress: '0x0a43fc31a73013089df59194872ecae4cae14444',
+  });
+  assert.equal(direct.market, 'alpha');
+  assert.equal(direct.url, 'https://www.binance.com/en/alpha/bsc/0x0a43fc31a73013089df59194872ecae4cae14444');
+  assert.doesNotMatch(direct.url, /\/futures\/BEATUSDT/);
+  const directHtml = _binanceDetailButtonHtml(direct);
+  assert.match(directHtml, /BINANCE ALPHA →/);
+  assert.doesNotMatch(directHtml, /ALPHA SEARCH/);
+  noObject(directHtml);
+
+  // Chain aliases normalize to bsc.
+  assert.match(getBinanceLink({ exchange: 'ALPHA', symbol: 'X', network: 'BNB Smart Chain', contractAddress: '0x0a43fc31a73013089df59194872ecae4cae14444' }).url, /\/alpha\/bsc\//);
+
+  // 2 — invalid contract -> no direct URL; falls back to the Alpha page
+  //     (no other specific identifier present).
+  const badContract = getBinanceLink({ symbol: 'BEATUSDT', exchange: 'ALPHA', chain: 'bsc', contractAddress: 'bad' });
+  assert.equal(badContract.market, 'alpha');
+  assert.equal(badContract.url, 'https://www.binance.com/en/alpha');
+  assert.doesNotMatch(badContract.url, /\/futures\/BEATUSDT/);
+  assert.doesNotMatch(badContract.url, /0x|contract|bad/i);
+
+  // 3 — symbol-only Alpha row -> general Alpha page, not a weak search.
+  const symOnly = getBinanceLink({ symbol: 'BEATUSDT', exchange: 'ALPHA' });
+  assert.equal(symOnly.available, true);
+  assert.equal(symOnly.market, 'alpha');
+  assert.equal(symOnly.url, 'https://www.binance.com/en/alpha');
+  assert.doesNotMatch(symOnly.url, /\/search\?query=/);
+  assert.doesNotMatch(symOnly.url, /\/futures\/BEATUSDT/);
+
+  // 4 — alphaPair present -> specific search fallback is acceptable.
+  const withPair = getBinanceLink({ symbol: 'BEATUSDT', exchange: 'ALPHA', alphaPair: 'ALPHA_451/USDT' });
+  assert.equal(withPair.market, 'alpha-search');
+  assert.match(withPair.url, /query=BEATUSDT\+ALPHA_451%2FUSDT/);
+  assert.doesNotMatch(withPair.url, /\/futures\/BEATUSDT/);
+  assert.match(_binanceDetailButtonHtml(withPair), /BINANCE ALPHA SEARCH →/);
+
+  // Valid contract on an unsupported chain -> search includes the contract.
+  const unsupportedChain = getBinanceLink({ symbol: 'FOO', exchange: 'ALPHA', chain: 'polygon', contractAddress: '0x0a43fc31a73013089df59194872ecae4cae14444' });
+  assert.equal(unsupportedChain.market, 'alpha-search');
+  assert.match(unsupportedChain.url, /query=FOO\+0x0a43fc/i);
+
+  // 5 — normal spot/futures unchanged.
+  assert.match(getBinanceLink({ symbol: 'BTC', pair: 'BTCUSDT', quote: 'USDT', binance_available: true, binance_market: 'spot' }).url, /\/trade\/BTC_USDT/);
+  assert.match(getBinanceLink({ symbol: 'BTC', binance_available: true, binance_market: 'futures', futures_pair: 'BTCUSDT' }).url, /\/futures\/BTCUSDT$/);
+
+  // 6 — no generated Alpha URL is ever broken.
+  for (const r of [direct, badContract, symOnly, withPair, unsupportedChain]) {
+    noObject(r.url);
+    assert.doesNotMatch(r.url, /\/futures\/BEATUSDT/);
+  }
 });
 
 test('scanner 24h sort is numeric, reversible, null-last, and default sort is unchanged', () => {
