@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 // because serverless egress to Binance public endpoints can be blocked (HTTP 451).
 import { fetchBinancePublicSnapshot, PUBLIC_SNAPSHOT_SOURCE } from './auto/binance-public.mjs';
 import { createAutoLoop } from './auto/auto-loop.mjs';
+// OFF-by-default public-data microstructure sidecar overlay (top-N only).
+import { enrichMarketsWithMicrostructure, microstructureConfigFromEnv } from './auto/microstructure-enrichment.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -482,6 +484,10 @@ let hydratedSinceStart = false;
 let lastBackendOkAt = 0;
 let marketSnapshotRunning = false;
 let marketSnapshotFailLogged = false;
+// Per-symbol microstructure TTL cache (OFF-by-default feature; only populated
+// when WORKER_MARKET_MICROSTRUCTURE_ENABLED=true). Lives for the worker's
+// lifetime and is bounded by the top-N selection upstream.
+const _microstructureCache = new Map();
 
 function finishWorker(code) {
   if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -730,11 +736,40 @@ async function fetchAndPostMarketSnapshot() {
       return { ok: false, error: err.message };
     }
     marketSnapshotFailLogged = false;
+    // Keep the auto-trader's snapshot view (latestMarketSnapshot) pointed at the
+    // ORIGINAL rows so order-routing data is never altered by the optional
+    // microstructure overlay. Enrichment only affects the POSTED copy.
     latestMarketSnapshot = snapshot;
+    // OFF-by-default microstructure sidecar overlay: enrich only the top-N rows
+    // with real, measured public-data fields (order-book depth, funding). Fully
+    // fail-closed — any failure omits fields and is reported as diagnostics; it
+    // never throws past here and never blocks the snapshot submit.
+    let postMarkets = snapshot.markets;
+    let microDiagnostics = null;
     try {
-      const res = await postAutoMarketSnapshot({ fetchedAt: snapshot.fetchedAt, markets: snapshot.markets, diagnostics: snapshot.diagnostics });
-      console.log(`[SNAPSHOT] Posted public market snapshot (${snapshot.markets.length} markets) ok=${res.ok}`);
-      return { ok: res.ok, count: snapshot.markets.length };
+      const microResult = await enrichMarketsWithMicrostructure(snapshot.markets, {
+        config: microstructureConfigFromEnv(process.env),
+        cache: _microstructureCache,
+      });
+      postMarkets = microResult.markets;
+      microDiagnostics = microResult.diagnostics;
+      if (microDiagnostics && microDiagnostics.microstructureEnabled) {
+        console.log(`[SNAPSHOT][MICRO] attempted=${microDiagnostics.microstructureAttempted} enriched=${microDiagnostics.microstructureEnriched} skipped=${microDiagnostics.microstructureSkipped} errors=${microDiagnostics.microstructureErrors.length}`);
+      }
+    } catch (err) {
+      // Defensive only — enrichMarketsWithMicrostructure is contractually
+      // non-throwing, but the snapshot submit must survive even if that breaks.
+      postMarkets = snapshot.markets;
+      microDiagnostics = { microstructureEnabled: true, microstructureError: String(err && err.message || err).slice(0, 160) };
+      console.log(`[SNAPSHOT][MICRO][WARN] enrichment failed, posting base rows: ${err && err.message}`);
+    }
+    const postDiagnostics = microDiagnostics
+      ? { ...snapshot.diagnostics, microstructure: microDiagnostics }
+      : snapshot.diagnostics;
+    try {
+      const res = await postAutoMarketSnapshot({ fetchedAt: snapshot.fetchedAt, markets: postMarkets, diagnostics: postDiagnostics });
+      console.log(`[SNAPSHOT] Posted public market snapshot (${postMarkets.length} markets) ok=${res.ok}`);
+      return { ok: res.ok, count: postMarkets.length };
     } catch (err) {
       console.log(`[SNAPSHOT][WARN] Snapshot post failed: ${err.message}`);
       return { ok: false, error: err.message };
