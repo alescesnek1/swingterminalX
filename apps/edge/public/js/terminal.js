@@ -1433,17 +1433,65 @@ function _compactBinancePair(v) {
   return String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 function _isBinanceAlphaRow(d) {
+  if (!d) return false;
+  // Direct boolean / presence flags — the most reliable signals.
+  if (d.binanceAlphaListed === true) return true;
+  if (d.alphaTokenId || d.alphaPair) return true;
+
+  // Exact enum-style fields (case-insensitive, trimmed).
+  const eq = (v, t) => String(v == null ? '' : v).trim().toUpperCase() === t;
+  if (eq(d.exchange, 'ALPHA') || eq(d.exchange, 'BINANCE_ALPHA')) return true;
+  if (eq(d.listingType, 'BINANCE_ALPHA')) return true;
+  if (eq(d.binance_market, 'ALPHA') || eq(d.market, 'ALPHA')) return true;
+
+  const lc = (v) => String(v == null ? '' : v).trim().toLowerCase();
+  if (lc(d.listingSource) === 'binance alpha') return true;
+  if (lc(d.source) === 'binance-alpha') return true;
+
+  // tags: ["ALPHA", ...] — only when the row actually carries tags.
+  if (Array.isArray(d.tags) && d.tags.some(t => eq(t, 'ALPHA'))) return true;
+
+  // Any safety/listing reason string mentioning BINANCE_ALPHA.
   const hay = [
-    d && d.listingType,
-    d && d.listingSource,
-    d && d.exchange,
-    d && d.source,
-    d && d.safetyBasis,
+    d.listingType,
+    d.listingSource,
+    d.exchange,
+    d.source,
+    d.safetyBasis,
+    d.safetyReason,
+    d.safety_reason,
+    Array.isArray(d.safetyReasons) ? d.safetyReasons.join(' ') : d.safetyReasons,
+    Array.isArray(d.listingReasons) ? d.listingReasons.join(' ') : d.listingReasons,
   ].map(x => String(x || '')).join(' ');
-  return !!(d && (d.binanceAlphaListed === true || d.alphaTokenId || d.alphaPair || /BINANCE_ALPHA|binance[-_\s]?alpha|ALPHA_LISTING/i.test(hay)));
+  return /BINANCE_ALPHA|binance[-_\s]?alpha|ALPHA_LISTING/i.test(hay);
 }
-function _binanceSearchLink(query) {
-  const q = String(query || '').trim();
+function _binanceSearchLink(input) {
+  let q = '';
+  if (input && typeof input === 'object') {
+    // Object input: build a dedup'd query from the useful identifier
+    // fields so we never stringify the object into `[object Object]`.
+    const tokens = [];
+    const push = (v) => {
+      const s = String(v == null ? '' : v).trim();
+      if (s) tokens.push(s);
+    };
+    push(input.symbol);
+    push(input.baseAsset);
+    push(input.pair);
+    push(input.alphaPair);
+    push(input.alphaTokenId);
+    push(input.displaySymbol);
+    push(input.name);
+    const seen = new Set();
+    q = tokens.filter(t => {
+      const k = t.toUpperCase();
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    }).join(' ');
+  } else {
+    q = String(input == null ? '' : input).trim();
+  }
   if (!q) return null;
   return `https://www.binance.com/en/search?query=${encodeURIComponent(q).replace(/%20/g, '+')}`;
 }
@@ -1488,6 +1536,29 @@ function getBinanceLink(d) {
   if (BINANCE_USDC_PAIRS.has(sym + 'USDC')) return { url: `https://www.binance.com/en/trade/${sym}_USDC?type=spot`, pair: sym + '/USDC', available: true, market: 'spot' };
   if (BINANCE_USDT_PAIRS.has(sym + 'USDT')) return { url: `https://www.binance.com/en/trade/${sym}_USDT?type=spot`, pair: sym + '/USDT', available: true, market: 'spot' };
   return { url: null, pair: null, available: false };
+}
+
+function _binanceDetailButtonLabel(market) {
+  if (market === 'alpha-search') return 'BINANCE ALPHA SEARCH';
+  if (market === 'futures') return 'BINANCE FUTURES';
+  if (market === 'spot') return 'BINANCE SPOT';
+  return 'BINANCE SEARCH';
+}
+// Render the right-detail-panel Binance button straight from the
+// getBinanceLink() result. Never fabricate a /futures/${symbol} URL for
+// Alpha rows — when the helper reports unavailable we render a disabled
+// chip instead of a broken href.
+function _binanceDetailButtonHtml(binance) {
+  binance = binance || {};
+  const href = binance.available ? _safeUrl(binance.url) : '';
+  if (!binance.available || !href) {
+    return '<div class="binance-btn unavail">Binance nedostupne</div>';
+  }
+  const cls = binance.market === 'alpha-search' ? 'alpha'
+    : (binance.market === 'futures' ? 'futures' : 'active');
+  const label = _binanceDetailButtonLabel(binance.market);
+  const pair = binance.pair ? ` → ${_esc(binance.pair)}` : '';
+  return `<a class="binance-btn ${cls}" href="${href}" target="_blank" rel="noopener noreferrer">${label}${pair}</a>`;
 }
 
 // V5: forward Supabase access token so /api/markets can resolve tier.
@@ -1932,7 +2003,6 @@ function pickCoin(id) {
   document.getElementById('dlbl').textContent = sym;
   const symAttr = JSON.stringify(String(sym || ''));
   const idAttr  = JSON.stringify(String(d.id || ''));
-  const binanceHref = binance.available ? _safeUrl(binance.url) : '';
   document.getElementById('dcon').innerHTML = `
     <div class="dhead">
       <div><div class="dsym">${_esc(sym)}</div><div class="dname">${_esc(d.name)} · ${_esc(getSector(d.id))}</div></div>
@@ -1946,9 +2016,7 @@ function pickCoin(id) {
       🧠 AI ANALÝZA
     </button>
 
-    ${binance.available && binanceHref
-      ? `<a class="binance-btn ${binance.market === 'futures' ? 'alpha' : 'active'}" href="${binanceHref}" target="_blank" rel="noopener noreferrer">${binance.market === 'futures' ? 'BINANCE FUTURES (ALPHA)' : 'BINANCE SPOT'} → ${_esc(binance.pair)}</a>`
-      : `<div class="binance-btn unavail">Binance nedostupne</div>`}
+    ${_binanceDetailButtonHtml(binance)}
 
     <div class="validity-box" style="border-color:${validity.border}">
       <div class="validity-title" style="color:${validity.col};font-weight:600;font-size:10px">${_esc(validity.type)}</div>

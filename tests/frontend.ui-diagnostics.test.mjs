@@ -22,7 +22,14 @@ function loadTerminalLinkHelpers() {
   const block = sliceBetween(terminalJs, 'function _compactBinancePair', '// V5: forward Supabase');
   const BINANCE_USDC_PAIRS = new Set(['BTCUSDC']);
   const BINANCE_USDT_PAIRS = new Set(['BTCUSDT']);
-  return Function('BINANCE_USDC_PAIRS', 'BINANCE_USDT_PAIRS', `${block}; return { getBinanceLink };`)(BINANCE_USDC_PAIRS, BINANCE_USDT_PAIRS);
+  // The detail-button helper depends on _esc / _safeUrl, which live far
+  // above the extracted block. Provide equivalent definitions so the
+  // helpers can be exercised in isolation.
+  const prelude = `
+    function _esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+    function _safeUrl(u){const s=String(u||'').trim();if(!s)return '';if(s.startsWith('https://')||s.startsWith('http://')||s.startsWith('/'))return _esc(s);return '';}
+  `;
+  return Function('BINANCE_USDC_PAIRS', 'BINANCE_USDT_PAIRS', `${prelude}${block}; return { getBinanceLink, _isBinanceAlphaRow, _binanceSearchLink, _binanceDetailButtonHtml };`)(BINANCE_USDC_PAIRS, BINANCE_USDT_PAIRS);
 }
 
 function loadScannerSortHelpers() {
@@ -56,6 +63,73 @@ test('Binance link helper routes spot, futures, Alpha, and unsupported rows safe
   const unsupported = getBinanceLink({ symbol: 'NOPE', binance_available: false });
   assert.equal(unsupported.available, false);
   assert.equal(unsupported.url, null);
+});
+
+test('Binance Alpha link helpers handle alpha-only row shapes safely', () => {
+  const { getBinanceLink, _isBinanceAlphaRow, _binanceSearchLink, _binanceDetailButtonHtml } = loadTerminalLinkHelpers();
+
+  // A — exchange: "ALPHA" is recognised as an Alpha row.
+  assert.equal(_isBinanceAlphaRow({ symbol: 'BEATUSDT', exchange: 'ALPHA' }), true);
+  // Other reliable indicators also detect.
+  assert.equal(_isBinanceAlphaRow({ exchange: 'BINANCE_ALPHA' }), true);
+  assert.equal(_isBinanceAlphaRow({ listingType: 'BINANCE_ALPHA' }), true);
+  assert.equal(_isBinanceAlphaRow({ listingSource: 'Binance Alpha' }), true);
+  assert.equal(_isBinanceAlphaRow({ binanceAlphaListed: true }), true);
+  assert.equal(_isBinanceAlphaRow({ alphaPair: 'ALPHA_451/USDT' }), true);
+  assert.equal(_isBinanceAlphaRow({ alphaTokenId: 'ALPHA_451' }), true);
+  assert.equal(_isBinanceAlphaRow({ binance_market: 'alpha' }), true);
+  assert.equal(_isBinanceAlphaRow({ market: 'alpha' }), true);
+  assert.equal(_isBinanceAlphaRow({ source: 'binance-alpha' }), true);
+  assert.equal(_isBinanceAlphaRow({ safetyReason: 'LISTED_VIA_BINANCE_ALPHA' }), true);
+  assert.equal(_isBinanceAlphaRow({ tags: ['ALPHA', 'NEW'] }), true);
+  // Non-Alpha rows stay false.
+  assert.equal(_isBinanceAlphaRow({ symbol: 'BTC', exchange: 'BINANCE' }), false);
+  assert.equal(_isBinanceAlphaRow({ symbol: 'BTC' }), false);
+
+  // B — object input never collapses to [object Object] and keeps BEATUSDT.
+  const objLink = _binanceSearchLink({ symbol: 'BEATUSDT', exchange: 'ALPHA' });
+  assert.doesNotMatch(objLink, /\[object Object\]/);
+  assert.doesNotMatch(objLink, /%5[Bb]object/);
+  assert.match(objLink, /query=BEATUSDT/);
+  // String input still works.
+  assert.match(_binanceSearchLink('BEATUSDT ALPHA_451/USDT'), /query=BEATUSDT\+ALPHA_451/);
+
+  // C — exchange-only Alpha row gets a safe alpha-search fallback.
+  const alphaExchange = getBinanceLink({ symbol: 'BEATUSDT', exchange: 'ALPHA' });
+  assert.equal(alphaExchange.available, true);
+  assert.equal(alphaExchange.market, 'alpha-search');
+  assert.match(alphaExchange.url, /query=BEATUSDT/);
+  assert.doesNotMatch(alphaExchange.url, /\/futures\/BEATUSDT/);
+
+  // D — alphaPair-only row keeps the existing good behaviour.
+  const alphaPair = getBinanceLink({ symbol: 'BEATUSDT', alphaPair: 'ALPHA_451/USDT' });
+  assert.equal(alphaPair.available, true);
+  assert.equal(alphaPair.market, 'alpha-search');
+  assert.match(alphaPair.url, /query=BEATUSDT/);
+  assert.match(alphaPair.url, /ALPHA_451/);
+  assert.doesNotMatch(alphaPair.url, /\/futures\/BEATUSDT/);
+
+  // E + F — right detail panel HTML for an Alpha row.
+  const alphaHtml = _binanceDetailButtonHtml(alphaExchange);
+  assert.doesNotMatch(alphaHtml, /\/futures\/BEATUSDT/);
+  assert.doesNotMatch(alphaHtml, /BINANCE FUTURES \(ALPHA\)/);
+  assert.match(alphaHtml, /BINANCE ALPHA SEARCH/);
+  assert.match(alphaHtml, /BEATUSDT/);
+
+  // G — futures BTCUSDT still resolves to /futures/BTCUSDT.
+  const futures = getBinanceLink({ symbol: 'BTC', binance_available: true, binance_market: 'futures', futures_pair: 'BTCUSDT' });
+  assert.match(futures.url, /\/futures\/BTCUSDT$/);
+  assert.match(_binanceDetailButtonHtml(futures), /BINANCE FUTURES/);
+  assert.doesNotMatch(_binanceDetailButtonHtml(futures), /\(ALPHA\)/);
+
+  // H — spot BTCUSDT still resolves to /trade/BTC_USDT.
+  const spot = getBinanceLink({ symbol: 'BTC', pair: 'BTCUSDT', quote: 'USDT', binance_available: true, binance_market: 'spot' });
+  assert.match(spot.url, /\/trade\/BTC_USDT/);
+
+  // Unsupported non-Binance row renders a disabled chip, not a broken href.
+  const disabledHtml = _binanceDetailButtonHtml({ url: null, available: false });
+  assert.match(disabledHtml, /binance-btn unavail/);
+  assert.doesNotMatch(disabledHtml, /<a /);
 });
 
 test('scanner 24h sort is numeric, reversible, null-last, and default sort is unchanged', () => {
