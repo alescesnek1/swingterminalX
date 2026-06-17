@@ -86,5 +86,15 @@ test('radar-microstructure endpoint stores sanitized microstructure map', async 
     data: { BEAT: { orderBookDepthWithin1Pct: 50000, spreadPct: 0.1 } }
   }, { 'X-BOT-WORKER-TOKEN': process.env.BOT_WORKER_TOKEN });
   const res = await botHandler(req);
-  assert.strictEqual(res.statusCode, 200);
+  const status = res.statusCode || res.status;
+  assert.strictEqual(status, 200);
+  
+  // Parse response body depending on whether it's a native Response or Netlify callback object
+  const rawBody = typeof res.json === 'function' ? await res.text() : res.body;
+  const jsonBody = JSON.parse(rawBody);
+  
+  assert.strictEqual(jsonBody.ok, true);
+  assert.strictEqual(jsonBody.stored, true);
+  assert.ok(typeof jsonBody.metrics === 'number');
+  assert.ok(typeof jsonBody.receivedAt === 'string');
 });

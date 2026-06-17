@@ -2411,7 +2411,12 @@ async function handleFleetWorker(req, base, body) {
         data: typeof body.data === 'object' && body.data ? body.data : {},
       };
       await refreshTradingRadarFromFleet(fleet);
-      return { ok: true };
+      return json(req, {
+        ok: true,
+        stored: true,
+        metrics: Object.keys(fleet.radarMicrostructureSnapshot.data || {}).length,
+        receivedAt: fleet.radarMicrostructureSnapshot.receivedAt,
+      });
     });
   }
 
