@@ -1933,6 +1933,75 @@ const AUTO_MARKET_SNAPSHOT_MAX_ACCEPTED = 1000; // hard reject above this
 const AUTO_MARKET_SNAPSHOT_MAX_STORED = 400;    // stored markets cap
 const AUTO_MARKET_SNAPSHOT_FRESH_MS = 120000;   // snapshot usable for evaluation when younger than this
 
+// ── RADAR microstructure normalization contract ──────────────────────────────
+// Optional live-microstructure fields that let evaluateTradingRadar() compute
+// honest absorption / execution scores instead of staying UNKNOWN. They are a
+// pure pass-through and FAIL-CLOSED by construction:
+//   - numeric fields are kept ONLY when finite. An explicit 0 that the worker
+//     actually measured is real data and is preserved; a missing/blank/
+//     non-numeric value stays absent (never coerced to 0).
+//   - boolean fields are kept ONLY when a real boolean or an explicit
+//     'true'/'false' string.
+//   - absent or invalid inputs are OMITTED entirely so downstream `== null`
+//     checks (missingForMarket / absorption gates) keep them UNKNOWN.
+// Absorption is NEVER inferred here from scanner score, dump, panic, volume, or
+// safety status — only the worker's own measured fields flow through.
+const RADAR_MICRO_NUMERIC_FIELDS = Object.freeze([
+  'orderBookDepthWithin1Pct',
+  'depthUsdWithin1Pct',
+  'spreadPct',
+  'openInterestChangePct',
+  'fundingRate',
+  'longLiquidationSpike',
+  'shortLiquidationSpike',
+  'marketSellRatio',
+  'takerBuySellRatio',
+  'cumulativeDelta',
+  'deltaImprovementPct',
+  'bidDepthRebuildPct',
+  'absorptionScore',
+  'distanceToSupportPct',
+  'marketBuyVolumeDominance',
+  'buyVolumeDominance',
+]);
+const RADAR_MICRO_BOOLEAN_FIELDS = Object.freeze([
+  'bidAbsorption',
+  'aggressiveSellsFailed',
+  'supportRetested',
+  'liquidationLowRetested',
+]);
+
+function normalizeFiniteNumber(v) {
+  if (v == null || v === '') return null; // never let null/'' become Number 0
+  const x = Number(v);
+  return Number.isFinite(x) ? x : null;
+}
+function normalizeStrictBoolean(v) {
+  if (typeof v === 'boolean') return v;
+  if (typeof v === 'string') {
+    const s = v.trim().toLowerCase();
+    if (s === 'true') return true;
+    if (s === 'false') return false;
+  }
+  return null;
+}
+
+// Returns ONLY the present/valid microstructure fields from a raw source row.
+// Keys absent from the result are treated as UNKNOWN by the RADAR engine.
+function normalizeRadarMicrostructure(src) {
+  const out = {};
+  if (!src || typeof src !== 'object') return out;
+  for (const key of RADAR_MICRO_NUMERIC_FIELDS) {
+    const v = normalizeFiniteNumber(src[key]);
+    if (v != null) out[key] = v;
+  }
+  for (const key of RADAR_MICRO_BOOLEAN_FIELDS) {
+    const v = normalizeStrictBoolean(src[key]);
+    if (v != null) out[key] = v;
+  }
+  return out;
+}
+
 function sanitizeSnapshotMarket(m) {
   if (!m || typeof m !== 'object' || !m.symbol) return null;
   const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
@@ -1949,6 +2018,8 @@ function sanitizeSnapshotMarket(m) {
     spreadPct: num(m.spreadPct),
     priceChangePercent: num(m.priceChangePercent),
     source: AUTO_MARKET_SNAPSHOT_SOURCE,
+    // Optional microstructure pass-through (omitted keys stay UNKNOWN downstream).
+    ...normalizeRadarMicrostructure(m),
   };
 }
 
@@ -1978,10 +2049,28 @@ function radarPositionContexts(fleet) {
   return out.filter((p) => p.symbol);
 }
 
+// RADAR needs the optional microstructure fields that marketsFromSnapshot()
+// (shared with the auto-trader and intentionally left untouched) does not carry.
+// We re-overlay them from the stored snapshot rows so absorption/execution can be
+// computed honestly — without modifying any auto-trader / worker code path.
+function radarMarketsFromSnapshot(snapshot) {
+  const base = marketsFromSnapshot(snapshot);
+  if (!snapshot || !Array.isArray(snapshot.markets)) return base;
+  const microBySymbol = new Map();
+  for (const row of snapshot.markets) {
+    if (!row || !row.symbol) continue;
+    microBySymbol.set(String(row.symbol).toUpperCase(), normalizeRadarMicrostructure(row));
+  }
+  return base.map((m) => {
+    const micro = microBySymbol.get(String(m.symbol || '').toUpperCase());
+    return micro && Object.keys(micro).length ? { ...m, ...micro } : m;
+  });
+}
+
 async function refreshTradingRadarFromFleet(fleet, nowMs = Date.now()) {
   const snapshot = fleet && fleet.autoMarketSnapshot;
   const previousRadar = fleet && fleet.tradingRadar && typeof fleet.tradingRadar === 'object' ? fleet.tradingRadar : null;
-  const markets = snapshot ? marketsFromSnapshot(snapshot) : [];
+  const markets = snapshot ? radarMarketsFromSnapshot(snapshot) : [];
   const radarContext = fleet && fleet.radarContext && Array.isArray(fleet.radarContext.scannerCandidates) ? fleet.radarContext.scannerCandidates : [];
   let alphaMapping = null;
   try {
