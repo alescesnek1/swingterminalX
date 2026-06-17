@@ -225,7 +225,7 @@ test('Env hard-kill disables Telegram fail-closed', () => {
   assert.equal(isTelegramHardDisabled({ RADAR_TELEGRAM_ENABLED: 'true', CRON_ALERTS_ENABLED: 'false' }), true);
 });
 
-test('Repo guard: no api.telegram.org usage outside netlify/functions/cron-alerts.mjs', () => {
+test('Repo guard: api.telegram.org usage limited to the two authorized senders (cron-alerts RADAR + morning-briefing)', () => {
   const root = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
   const hits = [];
   const scan = (dir) => {
@@ -244,6 +244,11 @@ test('Repo guard: no api.telegram.org usage outside netlify/functions/cron-alert
     if (normalized.endsWith('tests/radar.telegram.test.mjs')) continue;
     if (normalized.endsWith('tests/telegram.confirmed-gate.test.mjs')) continue;
     if (normalized.endsWith('netlify/functions/cron-alerts.mjs')) continue;
+    // Morning Market Briefing is an explicitly-authorized, separately-gated
+    // informational sender (its own MORNING_BRIEFING_TELEGRAM_ENABLED gate,
+    // independent of the RADAR ENTRY_READY path). It is allowed to call the
+    // Telegram API from its own dedicated function.
+    if (normalized.endsWith('netlify/functions/morning-briefing.mjs')) continue;
     assert.fail(`Found illegal telegram api usage: ${hit}`);
   }
 });

@@ -80,6 +80,7 @@ function emptyFleet() {
     radarContext: { scannerCandidates: [], receivedAt: null }, // context pushed by the browser
     tradingRadar: emptyTradingRadar(), // read-only advisory panel state; no orders, no intents, no gates
     lastRegime: null,     // { regime, entriesAllowed, reason[], metrics, updatedAt }
+    morningBriefing: null, // { lastSentDate, lastSentAt, ... } — once-per-day Telegram briefing dedup; no orders, separate from RADAR alerts
     updatedAt: null,
   };
 }
