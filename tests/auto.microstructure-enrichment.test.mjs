@@ -128,6 +128,32 @@ test('disabled mode returns rows unchanged and performs ZERO fetches', async () 
   assert.equal(calls.all.length, 0);
 });
 
+// ── enrichment: observability diagnostics ────────────────────────────────────
+test('disabled mode leaves the new observability counters at their zero/null defaults', async () => {
+  const markets = [mkt('BTCUSDT', 9e8)];
+  const { fetchImpl } = makeFakeFetch();
+  const out = await enrichMarketsWithMicrostructure(markets, { config: microstructureConfigFromEnv({}), fetchImpl });
+  assert.equal(out.diagnostics.microstructureSupported, 0);
+  assert.equal(out.diagnostics.microstructureUnsupported, 0);
+  assert.equal(out.diagnostics.microstructureFieldsPresent, 0);
+  assert.equal(out.diagnostics.microstructureLastUpdatedAt, null);
+});
+
+test('enabled mode reports supported/unsupported counts, fields-present, and a last-updated timestamp', async () => {
+  const markets = [mkt('BTCUSDT', 9e8), { symbol: 'FOOBTC', baseAsset: 'FOO', quoteAsset: 'BTC', status: 'TRADING', quoteVolume: 8e8 }];
+  const { fetchImpl } = makeFakeFetch();
+  let t = 1_700_000_000_000;
+  const out = await enrichMarketsWithMicrostructure(markets, {
+    config: microstructureConfigFromEnv({ WORKER_MARKET_MICROSTRUCTURE_ENABLED: 'true', WORKER_MICROSTRUCTURE_TOP_N: '20' }),
+    fetchImpl,
+    now: () => t,
+  });
+  assert.equal(out.diagnostics.microstructureSupported, 1); // only BTCUSDT measurable
+  assert.equal(out.diagnostics.microstructureUnsupported, 1); // FOOBTC is BTC-quoted
+  assert.ok(out.diagnostics.microstructureFieldsPresent >= 3, 'depth+spread+funding counted');
+  assert.equal(out.diagnostics.microstructureLastUpdatedAt, new Date(t).toISOString());
+});
+
 // ── enrichment: top-N limit ──────────────────────────────────────────────────
 test('enabled mode fetches ONLY the top-N symbols', async () => {
   const markets = [mkt('AUSDT', 10), mkt('BUSDT', 100), mkt('CUSDT', 90), mkt('DUSDT', 80), mkt('EUSDT', 5)];

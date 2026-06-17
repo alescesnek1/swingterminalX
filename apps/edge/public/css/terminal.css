@@ -1955,6 +1955,13 @@ html,body{overflow-x:hidden;max-width:100vw}
 .radar-focus-blocked span,.radar-next-trigger span{font-size:9px;color:var(--txt3);text-transform:uppercase;font-weight:900;letter-spacing:.08em}
 .radar-focus-blocked b,.radar-next-trigger b{color:#ffd08a;font-size:12px;text-align:right}
 .radar-chip-row{display:flex;gap:6px;flex-wrap:wrap}
+.radar-microstructure{margin:0 0 12px;padding:10px;border:1px solid rgba(61,158,255,.2);border-radius:4px;background:rgba(61,158,255,.05)}
+.radar-microstructure__title{font-size:9px;color:var(--txt3);text-transform:uppercase;font-weight:900;letter-spacing:.08em;margin-bottom:8px}
+.radar-microstructure__row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 6px;font-size:11px}
+.radar-microstructure__row > span{font-size:9px;color:var(--txt3);text-transform:uppercase;font-weight:800;letter-spacing:.05em}
+.radar-microstructure__row b{font-size:11px;text-align:right;color:var(--txt2)}
+.radar-micro-yes{color:#a8ffd8}
+.radar-micro-no{color:#ffb0b0}
 .radar-status-chip{display:inline-flex;align-items:center;min-height:21px;padding:3px 7px;border-radius:4px;font-size:10px;font-weight:800;border:1px solid rgba(255,255,255,.1)}
 .radar-status-chip--pass{color:#a8ffd8;background:rgba(0,255,128,.1);border-color:rgba(0,255,128,.22)}
 .radar-status-chip--wait{color:#cfe2ff;background:rgba(61,158,255,.1);border-color:rgba(61,158,255,.22)}

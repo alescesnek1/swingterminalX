@@ -190,6 +190,14 @@ export async function enrichMarketsWithMicrostructure(markets, opts = {}) {
     microstructureAttempted: 0,
     microstructureEnriched: 0,
     microstructureSkipped: 0,
+    // Observability additions (do not affect any market field):
+    //   supported/unsupported — how many top-N rows were even measurable;
+    //   fieldsPresent — total real fields emitted across all enriched rows;
+    //   lastUpdatedAt — when the most recent real measurement landed.
+    microstructureSupported: 0,
+    microstructureUnsupported: 0,
+    microstructureFieldsPresent: 0,
+    microstructureLastUpdatedAt: null,
     microstructureErrors: [],
   };
 
@@ -216,9 +224,11 @@ export async function enrichMarketsWithMicrostructure(markets, opts = {}) {
     const support = classifyMicrostructureSupport(market);
     if (!support.supported) {
       diagnostics.microstructureSkipped += 1;
+      diagnostics.microstructureUnsupported += 1;
       continue;
     }
     diagnostics.microstructureAttempted += 1;
+    diagnostics.microstructureSupported += 1;
     const sym = support.depthSymbol;
 
     // Cache hit (within TTL) short-circuits any fetch for this symbol.
@@ -228,6 +238,8 @@ export async function enrichMarketsWithMicrostructure(markets, opts = {}) {
         if (hit.fields && Object.keys(hit.fields).length) {
           overlayBySymbol.set(sym, hit.fields);
           diagnostics.microstructureEnriched += 1;
+          diagnostics.microstructureFieldsPresent += Object.keys(hit.fields).length;
+          diagnostics.microstructureLastUpdatedAt = new Date(now()).toISOString();
         } else {
           diagnostics.microstructureSkipped += 1;
         }
@@ -267,6 +279,8 @@ export async function enrichMarketsWithMicrostructure(markets, opts = {}) {
     if (Object.keys(fields).length) {
       overlayBySymbol.set(sym, fields);
       diagnostics.microstructureEnriched += 1;
+      diagnostics.microstructureFieldsPresent += Object.keys(fields).length;
+      diagnostics.microstructureLastUpdatedAt = new Date(now()).toISOString();
     } else {
       diagnostics.microstructureSkipped += 1;
     }

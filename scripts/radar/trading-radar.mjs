@@ -1039,6 +1039,94 @@ function completeness(missingSignals) {
   return round((present / tracked.length) * 100, 0);
 }
 
+// ── Microstructure blocking diagnostics (READ-ONLY, gate-free) ───────────────
+// Pure observability: explains WHY Absorb./Reclaim cannot pass for a row by
+// distinguishing the static first-slice fields (order-book depth / spread /
+// funding) from the rolling-window + structural fields the absorption/reclaim
+// gates actually require. It NEVER changes a score, stage, gate, or Telegram
+// eligibility — every value here is descriptive only. Presence is detected
+// exactly the way signalBooleans()/classifyRadarStage() read each field, so the
+// reported "missing" list matches the real blocker rather than guessing.
+// Strict presence test: null/undefined/'' are ABSENT, but a genuinely measured
+// 0 counts as present. (The shared n() helper coerces null->0, so it must NOT be
+// used to decide presence here — that would report absent fields as present.)
+function microPresent(v) {
+  return v != null && v !== '' && Number.isFinite(Number(v));
+}
+// NOTE: predicates count only REAL measured order-flow / order-book fields. The
+// price-derived heuristic flags (sellAggressionFading, deltaImproves) are NOT
+// treated as microstructure here — they can be inferred from candles and would
+// otherwise mask a row that has no genuine rolling data.
+const ABSORPTION_FIELD_GROUPS = Object.freeze([
+  { key: 'absorptionScore', has: (m) => microPresent(m.absorptionScore) },
+  { key: 'supportRetest', has: (m) => m.supportRetested === true || m.liquidationLowRetested === true || microPresent(m.distanceToSupportPct) },
+  { key: 'aggressiveSellsFailed', has: (m) => m.aggressiveSellsFailed != null || microPresent(m.marketSellRatio) },
+  { key: 'bidAbsorption', has: (m) => m.bidAbsorption != null || microPresent(m.bidDepthRebuildPct) || microPresent(m.bidDepthChangePct) },
+  { key: 'deltaImprovement', has: (m) => microPresent(m.deltaImprovementPct) || microPresent(m.marketBuyVolumeDominance) || microPresent(m.buyVolumeDominance) || microPresent(m.cumulativeDelta) || microPresent(m.takerBuySellRatio) },
+]);
+const RECLAIM_FIELD_GROUPS = Object.freeze([
+  { key: 'structuralReclaim', has: (m) => m.reclaimConfirmed === true || m.vwapReclaimed === true || m.rangeHighReclaimed === true || m.retestHeld === true },
+  { key: 'higherLow', has: (m) => m.higherLowHeld === true || microPresent(m.higherLow ?? m.higherLowLevel ?? m.retestLow) },
+  { key: 'noNewLow', has: (m) => m.noNewLows === true || microPresent(m.noNewLowMinutes) },
+  { key: 'reclaimLevel', has: (m) => microPresent(m.reclaimLevel ?? m.vwap ?? m.anchoredVwap ?? m.rangeHigh ?? m.breakdownLevel) },
+  { key: 'squeezeTrigger', has: (m) => microPresent(m.shortLiquidationSpike) || microPresent(m.buyVolumeDominance) || microPresent(m.marketBuyVolumeDominance) },
+]);
+
+function radarMicrostructureDiagnostics(m, checklist = null) {
+  const hasDepth = microPresent(m.depthUsdWithin1Pct ?? m.orderBookDepthWithin1Pct ?? m.depthUsd ?? m.orderBookDepthUsd);
+  const hasSpread = microPresent(m.spreadPct);
+  const hasFunding = microPresent(m.fundingRate);
+  const hasStaticMicrostructure = hasDepth || hasSpread || hasFunding;
+
+  const missingAbsorptionFields = ABSORPTION_FIELD_GROUPS.filter((g) => !g.has(m)).map((g) => g.key);
+  const missingReclaimFields = RECLAIM_FIELD_GROUPS.filter((g) => !g.has(m)).map((g) => g.key);
+  // Rolling absorption data exists exactly when classifyRadarStage's
+  // realAbsorptionData would be true: at least one genuinely measured absorption
+  // order-flow / order-book field is present. Kept in lock-step so the UI never
+  // claims "rolling present" while the absorption gate still treats it as absent.
+  const hasRollingMicrostructure = m.absorptionScore != null
+    || microPresent(m.bidDepthRebuildPct)
+    || m.bidAbsorption != null
+    || m.aggressiveSellsFailed != null;
+
+  const absorptionStatus = checklist && checklist.absorption ? checklist.absorption.status : null;
+  const reclaimStatus = checklist && checklist.squeezeOrReclaim ? checklist.squeezeOrReclaim.status : null;
+
+  let absorptionBlockedReason = null;
+  if (absorptionStatus !== 'PASS') {
+    if (!hasRollingMicrostructure) {
+      absorptionBlockedReason = hasStaticMicrostructure
+        ? 'static order-book/funding only; no rolling absorption data (delta/bid-rebuild/aggressive-sell fields)'
+        : 'no microstructure data at all (price-only row)';
+    } else if (missingAbsorptionFields.length) {
+      absorptionBlockedReason = `incomplete absorption inputs: ${missingAbsorptionFields.join(', ')}`;
+    } else {
+      absorptionBlockedReason = 'absorption inputs present but threshold not met';
+    }
+  }
+
+  let reclaimBlockedReason = null;
+  if (reclaimStatus !== 'PASS') {
+    if (missingReclaimFields.includes('structuralReclaim')) {
+      reclaimBlockedReason = 'no structural reclaim evidence (needs reclaim/VWAP/range-high or held retest from kline structure)';
+    } else if (missingReclaimFields.length) {
+      reclaimBlockedReason = `incomplete reclaim structure: ${missingReclaimFields.join(', ')}`;
+    } else {
+      reclaimBlockedReason = 'reclaim structure present but squeeze/regime not confirmed';
+    }
+  }
+
+  return {
+    hasStaticMicrostructure,
+    hasRollingMicrostructure,
+    staticFieldsPresent: { depth: hasDepth, spread: hasSpread, funding: hasFunding },
+    missingAbsorptionFields,
+    missingReclaimFields,
+    absorptionBlockedReason,
+    reclaimBlockedReason,
+  };
+}
+
 function missingForMarket(m) {
   const miss = [];
   if (m.depthUsd == null) miss.push('orderBookDepthWithin1Pct');
@@ -1198,6 +1286,9 @@ export function evaluateTradingRadar({
       safety.symbol = m.symbol;
       safetyResults.push(safety);
       const v1 = buildRadarV1Output(m, regime, stageInfo, levels, safety);
+      // READ-ONLY observability: why Absorb./Reclaim are (not) passing for this
+      // row. Derived from the same fields the gates read; changes no gate.
+      const microDiag = radarMicrostructureDiagnostics(m, stageInfo.conditionChecklist);
       // SINGLE SOURCE OF TRUTH: a candidate is ENTRY_READY only when the V1/spec
       // gate in buildRadarV1Output passes. The heuristic stage machine
       // (classifyRadarStage) can suggest a stage but can NEVER, on its own,
@@ -1260,6 +1351,13 @@ export function evaluateTradingRadar({
           ...((v1.executionDataMissing || []).length ? [`missing execution data: ${(v1.executionDataMissing || []).join(', ')}`] : []),
         ], 8),
         conditionChecklist: stageInfo.conditionChecklist,
+        // Microstructure blocking diagnostics (additive, gate-free).
+        hasStaticMicrostructure: microDiag.hasStaticMicrostructure,
+        hasRollingMicrostructure: microDiag.hasRollingMicrostructure,
+        missingAbsorptionFields: microDiag.missingAbsorptionFields,
+        missingReclaimFields: microDiag.missingReclaimFields,
+        absorptionBlockedReason: microDiag.absorptionBlockedReason,
+        reclaimBlockedReason: microDiag.reclaimBlockedReason,
         missingSignals: missingForMarket(m).slice(0, 8),
         nextRequiredConfirmation: stageInfo.nextRequiredConfirmation,
         blockedBy: v1.STATUS === 'INVALIDATED' || v1.STATUS === 'RISK_OFF_BLOCKED' ? v1.INVALIDATION
@@ -1276,6 +1374,10 @@ export function evaluateTradingRadar({
           quoteVolume: round(m.quoteVolume, 0),
           depthUsd: round(m.depthUsd, 0),
           missingSignals: missingForMarket(m).slice(0, 8),
+          hasStaticMicrostructure: microDiag.hasStaticMicrostructure,
+          hasRollingMicrostructure: microDiag.hasRollingMicrostructure,
+          missingAbsorptionFields: microDiag.missingAbsorptionFields,
+          missingReclaimFields: microDiag.missingReclaimFields,
         },
       };
     }).sort((a, b) => {

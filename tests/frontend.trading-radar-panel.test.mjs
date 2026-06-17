@@ -60,6 +60,22 @@ test('Trading RADAR UI defaults to top 20 and exposes working filter chips', () 
   assert.match(terminalCss, /\.radar-limit-select/);
 });
 
+test('Trading RADAR focus panel surfaces microstructure blocking diagnostics', () => {
+  // Static vs rolling readiness + explicit blocked reasons in the focus card.
+  assert.match(terminalJs, /radar-microstructure/);
+  assert.match(terminalJs, /Microstructure readiness/);
+  assert.match(terminalJs, /Static \(depth\/spread\/funding\)/);
+  assert.match(terminalJs, /Rolling absorption data/);
+  assert.match(terminalJs, /selected\.absorptionBlockedReason/);
+  assert.match(terminalJs, /selected\.reclaimBlockedReason/);
+  assert.match(terminalJs, /selected\.missingAbsorptionFields/);
+  assert.match(terminalJs, /selected\.missingReclaimFields/);
+  // Worker-level sidecar state in the diagnostics list.
+  assert.match(terminalJs, /radar\.microstructureDiagnostics/);
+  assert.match(terminalJs, /Microstructure: /);
+  assert.match(terminalCss, /\.radar-microstructure/);
+});
+
 test('Trading RADAR diagnostics and matrix expose coverage counts and readable states', () => {
   assert.match(terminalJs, /Scanner Rows Available/);
   assert.match(terminalJs, /Scanner Rows Sent/);

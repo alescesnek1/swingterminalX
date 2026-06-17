@@ -105,6 +105,60 @@ test('B: absorption becomes PASS only because real fields exist, with no fake EN
   }
 });
 
+// First-slice static fields ONLY (order-book depth + spread + funding), with NO
+// rolling-window / structural fields — exactly what the OFF-by-default sidecar
+// can honestly produce today.
+const STATIC_ONLY = {
+  symbol: 'STAUSDT', baseAsset: 'STA', quoteAsset: 'USDT', status: 'TRADING',
+  quoteVolume24h: 250e6, bidPrice: 100, askPrice: 100.02, spreadPct: 0.02,
+  change24hPct: -9.5, volumeSpike: 2.4, atrPct: 4,
+  orderBookDepthWithin1Pct: 50000, depthUsdWithin1Pct: 1_800_000, depthUsd: 1_800_000,
+  fundingRate: -0.0001,
+};
+
+// ── E) Candidate diagnostics: no microstructure at all ───────────────────────
+test('E: a price-only row reports static+rolling missing and lists the blocking fields', () => {
+  const { c } = candidateFor('NOMUSDT', [NO_MICRO]);
+  assert.ok(c);
+  assert.equal(c.hasStaticMicrostructure, false);
+  assert.equal(c.hasRollingMicrostructure, false);
+  // Every rolling absorption group is missing.
+  for (const k of ['absorptionScore', 'supportRetest', 'aggressiveSellsFailed', 'bidAbsorption', 'deltaImprovement']) {
+    assert.ok(c.missingAbsorptionFields.includes(k), `missingAbsorptionFields should include ${k}`);
+  }
+  // Reclaim is blocked on structure.
+  assert.ok(c.missingReclaimFields.includes('structuralReclaim'));
+  assert.ok(c.absorptionBlockedReason && /no microstructure data/i.test(c.absorptionBlockedReason));
+  assert.ok(c.reclaimBlockedReason && /structural reclaim/i.test(c.reclaimBlockedReason));
+  assert.notEqual(c.actionability, 'ENTRY_READY');
+});
+
+// ── F) Candidate diagnostics: static first-slice only ────────────────────────
+test('F: static depth/spread/funding present but rolling absent — Absorb/Reclaim never PASS', () => {
+  const { c } = candidateFor('STAUSDT', [STATIC_ONLY]);
+  assert.ok(c);
+  assert.equal(c.hasStaticMicrostructure, true);
+  assert.equal(c.hasRollingMicrostructure, false);
+  // The static fields cannot satisfy the absorption gate.
+  assert.notEqual((c.conditionChecklist.absorption || {}).status, 'PASS');
+  assert.notEqual((c.conditionChecklist.squeezeOrReclaim || {}).status, 'PASS');
+  assert.ok(c.absorptionBlockedReason && /static order-book\/funding only|no rolling absorption/i.test(c.absorptionBlockedReason));
+  assert.equal(c.telegramEligible, false);
+});
+
+// ── G) Candidate diagnostics: full rolling data present ──────────────────────
+test('G: with real rolling absorption data, diagnostics report it present and not the blocker', () => {
+  const { c } = candidateFor('ABSUSDT', [WITH_MICRO]);
+  assert.ok(c);
+  assert.equal(c.hasStaticMicrostructure, true);
+  assert.equal(c.hasRollingMicrostructure, true);
+  assert.deepEqual(c.missingAbsorptionFields, []);
+  assert.equal(c.absorptionBlockedReason, null); // absorption checklist PASSes here
+  // Reclaim still needs structure (this fixture has none) and stays blocked.
+  assert.ok(c.missingReclaimFields.includes('structuralReclaim'));
+  assert.ok(c.reclaimBlockedReason);
+});
+
 // ── D) Telegram safety on non-ENTRY_READY ────────────────────────────────────
 test('D: WATCH / NEAR_ENTRY / blocked candidates are never Telegram-eligible', () => {
   const { state } = candidateFor('NOMUSDT', [NO_MICRO, WITH_MICRO]);

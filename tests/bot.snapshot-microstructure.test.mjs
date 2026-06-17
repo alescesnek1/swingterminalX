@@ -94,6 +94,43 @@ test('snapshot sanitizer preserves valid microstructure, normalizes string boole
   assert.equal(Object.prototype.hasOwnProperty.call(m, 'cumulativeDeltaBad'), false);
 });
 
+test('worker microstructure diagnostics are preserved (sanitized) and surfaced on the radar', async () => {
+  const payload = {
+    workerId: 'worker_micro', sessionId: 'session_micro', source: SOURCE,
+    fetchedAt: new Date().toISOString(),
+    markets: [{
+      symbol: 'DIAGUSDC', baseAsset: 'DIAG', quoteAsset: 'USDC', status: 'TRADING',
+      quoteVolume: 4e8, bidPrice: 10, askPrice: 10.01, lastPrice: 10, spreadPct: 0.1, priceChangePercent: -2,
+    }],
+    diagnostics: {
+      fetchedSymbols: 1, eligibleSymbols: 1, postedSymbols: 1,
+      microstructure: {
+        microstructureEnabled: true, microstructureTopN: 20,
+        microstructureAttempted: 5, microstructureEnriched: 4, microstructureSkipped: 1,
+        microstructureSupported: 5, microstructureUnsupported: 2,
+        microstructureFieldsPresent: 12, microstructureLastUpdatedAt: '2026-06-17T10:00:00.000Z',
+        microstructureErrors: ['BTCUSDT:depth:timeout', 'X:funding:HTTP 500'],
+        // A non-whitelisted field must NOT survive the sanitizer.
+        secretFanoutTargets: ['everything'],
+      },
+    },
+  };
+  assert.equal((await call(workerReq(payload))).status, 200);
+  const fleet = await fleetStore.loadFleet();
+  const md = fleet.autoMarketSnapshot.diagnostics.microstructure;
+  assert.ok(md, 'microstructure diagnostics preserved');
+  assert.equal(md.microstructureEnabled, true);
+  assert.equal(md.microstructureSupported, 5);
+  assert.equal(md.microstructureUnsupported, 2);
+  assert.equal(md.microstructureFieldsPresent, 12);
+  assert.equal(md.microstructureLastUpdatedAt, '2026-06-17T10:00:00.000Z');
+  assert.equal(md.microstructureErrorCount, 2); // array collapsed to a bounded count
+  assert.equal(Object.prototype.hasOwnProperty.call(md, 'secretFanoutTargets'), false);
+  // The radar view echoes it so the UI can explain the (dis)abled sidecar.
+  assert.ok(fleet.tradingRadar.microstructureDiagnostics);
+  assert.equal(fleet.tradingRadar.microstructureDiagnostics.microstructureEnabled, true);
+});
+
 test('missing microstructure fields are not invented on the stored snapshot', async () => {
   const payload = {
     workerId: 'worker_micro', sessionId: 'session_micro', source: SOURCE,

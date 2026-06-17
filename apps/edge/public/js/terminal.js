@@ -7324,6 +7324,15 @@ function _renderTradingRadar(radar, esc) {
         <div><span>Waiting</span><div class="radar-chip-row">${chipList(groups.waiting, 'radar-status-chip radar-status-chip--wait')}</div></div>
         <div><span>Missing data</span><div class="radar-chip-row">${chipList([...(groups.missing || []), ...((selected.missingSignals || []).slice(0, 6))], 'radar-status-chip radar-status-chip--missing')}</div></div>
       </div>
+      <div class="radar-microstructure">
+        <div class="radar-microstructure__title">Microstructure readiness</div>
+        <div class="radar-microstructure__row"><span>Static (depth/spread/funding)</span><b class="${selected.hasStaticMicrostructure ? 'radar-micro-yes' : 'radar-micro-no'}">${selected.hasStaticMicrostructure ? 'present' : 'missing'}</b></div>
+        <div class="radar-microstructure__row"><span>Rolling absorption data</span><b class="${selected.hasRollingMicrostructure ? 'radar-micro-yes' : 'radar-micro-no'}">${selected.hasRollingMicrostructure ? 'present' : 'missing'}</b></div>
+        <div class="radar-microstructure__row"><span>Absorption blocked by</span><b>${esc(selected.absorptionBlockedReason || 'not blocked')}</b></div>
+        <div class="radar-microstructure__row"><span>Reclaim blocked by</span><b>${esc(selected.reclaimBlockedReason || 'not blocked')}</b></div>
+        <div class="radar-microstructure__row"><span>Missing absorption fields</span><div class="radar-chip-row">${chipList(selected.missingAbsorptionFields, 'radar-status-chip radar-status-chip--missing')}</div></div>
+        <div class="radar-microstructure__row"><span>Missing reclaim fields</span><div class="radar-chip-row">${chipList(selected.missingReclaimFields, 'radar-status-chip radar-status-chip--missing')}</div></div>
+      </div>
       <div class="radar-next-trigger"><span>Next trigger</span><b>${esc(selected.nextRequiredConfirmation || 'none')}</b></div>
       <div class="radar-focus-levels">
         <div><span>Entry zone</span><b>${esc(zoneText(selected.entryZone))}</b></div>
@@ -7372,6 +7381,7 @@ function _renderTradingRadar(radar, esc) {
     + '<li>Scanner Rows Rejected: ' + esc(diag.scannerRowsRejected || 0) + '</li>'
     + '<li>Radar Rows Evaluated: ' + esc(diag.radarRowsEvaluated || 0) + '</li>'
     + '<li>Radar Rows Displayed: ' + esc(rowsToRender.length || 0) + '</li>'
+    + (() => { const md = radar.microstructureDiagnostics || {}; return '<li>Microstructure: ' + (md.microstructureEnabled ? 'ENABLED' : 'disabled') + (md.microstructureEnabled ? ', supported ' + esc(md.microstructureSupported || 0) + ', enriched ' + esc(md.microstructureEnriched || 0) + ', fields ' + esc(md.microstructureFieldsPresent || 0) + (md.microstructureLastUpdatedAt ? ', updated ' + esc(md.microstructureLastUpdatedAt) : '') : ' (rolling absorption/reclaim fields not produced)') + '</li>'; })()
     + '<li>Safety: checked ' + esc(diag.safetyRowsChecked || 0) + ', unknown ' + esc(diag.safetyRowsUnknown || 0) + ', caution ' + esc(diag.safetyRowsCaution || 0) + ', danger ' + esc(diag.safetyRowsDanger || 0) + '</li>'
     + '<li>Binance Alpha: calls ' + esc(diag.binanceAlphaProviderCalls || 0) + ', failures ' + esc(diag.binanceAlphaProviderFailures || 0) + ', resolved ' + esc(diag.binanceAlphaResolvedCount || 0) + ', safe ' + esc(diag.binanceAlphaListingSafeCount || 0) + ', unknown ' + esc(diag.alphaListingUnknownCount || 0) + '</li>'
     + '<li>Alpha mapping: calls ' + esc(diag.alphaMappingProviderCalls || 0) + ', failures ' + esc(diag.alphaMappingProviderFailures || 0) + ', mapped ' + esc(diag.alphaTokenIdMappedCount || 0) + ', missing ' + esc(diag.alphaSymbolMappingMissingCount || 0) + ', ambiguous ' + esc(diag.alphaSymbolAmbiguousCount || 0) + '</li>'

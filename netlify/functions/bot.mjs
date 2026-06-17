@@ -2023,6 +2023,30 @@ function sanitizeSnapshotMarket(m) {
   };
 }
 
+// Bounded, sanitized pass-through of the worker's microstructure diagnostics.
+// Pure observability — keeps a small whitelist of counters/flags so the control
+// plane can show whether the OFF-by-default sidecar is disabled, enabled with no
+// supported symbol, or actively measuring. Invents nothing; never touches markets.
+function sanitizeSnapshotMicroDiagnostics(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+  const out = {
+    microstructureEnabled: raw.microstructureEnabled === true,
+    microstructureTopN: num(raw.microstructureTopN),
+    microstructureAttempted: num(raw.microstructureAttempted),
+    microstructureEnriched: num(raw.microstructureEnriched),
+    microstructureSkipped: num(raw.microstructureSkipped),
+    microstructureSupported: num(raw.microstructureSupported),
+    microstructureUnsupported: num(raw.microstructureUnsupported),
+    microstructureFieldsPresent: num(raw.microstructureFieldsPresent),
+    microstructureLastUpdatedAt: typeof raw.microstructureLastUpdatedAt === 'string'
+      ? raw.microstructureLastUpdatedAt.slice(0, 40) : null,
+    microstructureErrorCount: Array.isArray(raw.microstructureErrors) ? raw.microstructureErrors.length : null,
+  };
+  if (typeof raw.microstructureError === 'string') out.microstructureError = raw.microstructureError.slice(0, 160);
+  return out;
+}
+
 // Age of the stored snapshot in ms (Infinity when missing/unparsable).
 function autoMarketSnapshotAgeMs(snapshot, nowMs = Date.now()) {
   if (!snapshot || !snapshot.fetchedAt) return Infinity;
@@ -2099,6 +2123,11 @@ async function refreshTradingRadarFromFleet(fleet, nowMs = Date.now()) {
     radar.dataCompleteness = Math.min(Number(radar.dataCompleteness) || 0, 20);
   }
   radar.sourceFetchedAt = snapshot && snapshot.fetchedAt ? snapshot.fetchedAt : null;
+  // Surface the worker's microstructure sidecar state (disabled / enabled-no-data
+  // / measuring) so the UI can explain why rolling absorption/reclaim is absent.
+  radar.microstructureDiagnostics = snapshot && snapshot.diagnostics && snapshot.diagnostics.microstructure
+    ? snapshot.diagnostics.microstructure
+    : { microstructureEnabled: false };
   radar.telegramAlertState = previousRadar && previousRadar.telegramAlertState
     ? previousRadar.telegramAlertState
     : (radar.telegramAlertState || defaultTradingRadarState(new Date(nowMs).toISOString()).telegramAlertState);
@@ -2318,6 +2347,9 @@ async function handleFleetWorker(req, base, body) {
       eligibleSymbols: Number.isFinite(Number(diagRaw.eligibleSymbols)) ? Number(diagRaw.eligibleSymbols) : null,
       postedSymbols: Number.isFinite(Number(diagRaw.postedSymbols)) ? Number(diagRaw.postedSymbols) : null,
       baseUrl: typeof diagRaw.baseUrl === 'string' ? diagRaw.baseUrl.slice(0, 120) : null,
+      // Pass-through observability for the OFF-by-default microstructure sidecar.
+      // Bounded + sanitized; never affects markets, scores, gates, or Telegram.
+      microstructure: sanitizeSnapshotMicroDiagnostics(diagRaw.microstructure),
     };
     return await mutateFleet(async (fleet) => {
       const prev = fleet.autoMarketSnapshot;
