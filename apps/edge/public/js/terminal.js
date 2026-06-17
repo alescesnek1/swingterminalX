@@ -1603,10 +1603,26 @@ function _clientVerifiedSpotPair(sym) {
   return null;
 }
 
+// Spot pairs whose Binance web route is NOT reliable: despite present spot
+// metadata (exchangeInfo byBase / spot_pair), the /en/trade/<base>_<quote>
+// page redirects to the default BTC/USDT, so an "active" link would mislead.
+// We keep the (valid) futures link and suppress the spot link for these.
+// Binance web route redirects this spot pair to default BTC/USDT despite
+// metadata; keep futures link only.
+const _BINANCE_SPOT_WEBROUTE_DENYLIST = new Set([
+  'RIFUSDT',
+]);
+function _isSpotWebRouteSafe(pairStr) {
+  return !_BINANCE_SPOT_WEBROUTE_DENYLIST.has(_compactBinancePair(pairStr));
+}
+
 function _verifiedSpotLink(d, sym) {
   let pairStr = _spotPairString(d, sym);
   if (!pairStr) pairStr = _clientVerifiedSpotPair(sym);
   if (!pairStr) return { url: null, pair: null, available: false, market: 'spot' };
+  // Verified metadata is necessary but NOT sufficient — the generated web
+  // route must also be safe, or we render no active spot link at all.
+  if (!_isSpotWebRouteSafe(pairStr)) return { url: null, pair: null, available: false, market: 'spot' };
   const parts = _splitBinancePair(pairStr, sym);
   if (!parts || !parts.base || !parts.quote) return { url: null, pair: null, available: false, market: 'spot' };
   return {

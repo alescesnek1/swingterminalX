@@ -218,19 +218,19 @@ test('verified futures / verified spot / both / CoinGecko-only link semantics', 
   assert.equal(fut.url, 'https://www.binance.com/en/futures/RIFUSDT');
   assert.equal(fut.market, 'futures');
 
-  // 3) Verified spot RIF (explicit spotPair) -> spot link with split base/quote.
-  const spot = getBinanceLink({ symbol: 'RIFUSDT', binance_market: 'spot', spotPair: 'RIFUSDT' });
-  assert.equal(spot.url, 'https://www.binance.com/en/trade/RIF_USDT?type=spot');
-  assert.equal(spot.pair, 'RIF/USDT');
+  // 3) Verified spot (web-route-safe symbol) -> spot link with split base/quote.
+  const spot = getBinanceLink({ symbol: 'SOLUSDT', binance_market: 'spot', spotPair: 'SOLUSDT' });
+  assert.equal(spot.url, 'https://www.binance.com/en/trade/SOL_USDT?type=spot');
+  assert.equal(spot.pair, 'SOL/USDT');
   assert.equal(spot.market, 'spot');
-  assert.match(_binanceDetailLinksHtml({ symbol: 'RIFUSDT', binance_market: 'spot', spotPair: 'RIFUSDT', binance_available: true }), /BINANCE SPOT → RIF\/USDT/);
+  assert.match(_binanceDetailLinksHtml({ symbol: 'SOLUSDT', binance_market: 'spot', spotPair: 'SOLUSDT', binance_available: true }), /BINANCE SPOT → SOL\/USDT/);
 
-  // 4) Both verified, futures-sourced -> futures primary + spot secondary.
-  const both = { symbol: 'RIF', binance_available: true, binance_market: 'futures', futures_pair: 'RIFUSDT', spot_pair: 'RIFUSDT' };
+  // 4) Both verified (safe spot), futures-sourced -> futures primary + spot secondary.
+  const both = { symbol: 'SOL', binance_available: true, binance_market: 'futures', futures_pair: 'SOLUSDT', spot_pair: 'SOLUSDT' };
   assert.equal(getBinanceLink(both).market, 'futures');
   const bothHtml = _binanceDetailLinksHtml(both);
-  const futIdx = bothHtml.indexOf('/futures/RIFUSDT');
-  const spotIdx = bothHtml.indexOf('/trade/RIF_USDT');
+  const futIdx = bothHtml.indexOf('/futures/SOLUSDT');
+  const spotIdx = bothHtml.indexOf('/trade/SOL_USDT');
   assert.ok(futIdx >= 0 && spotIdx >= 0, 'both links rendered');
   assert.ok(futIdx < spotIdx, 'futures rendered first for a futures-sourced row');
 
@@ -244,6 +244,33 @@ test('verified futures / verified spot / both / CoinGecko-only link semantics', 
   const cgOnly = getBinanceLink({ symbol: 'FOO', exchange: 'DEX', name: 'Foo Token' });
   assert.equal(cgOnly.available, false);
   assert.equal(cgOnly.url, null);
+});
+
+test('RIF: spot web route is unsafe — futures stays, spot link suppressed even with spot_pair', () => {
+  const { getBinanceLink, _binanceDetailLinksHtml } = loadTerminalLinkHelpers();
+
+  // 1) Both spot+futures verified, but RIFUSDT spot web route redirects to
+  //    BTC/USDT. Render futures only; never the active spot link.
+  const both = { symbol: 'RIFUSDT', binance_available: true, binance_market: 'futures', futures_pair: 'RIFUSDT', spot_pair: 'RIFUSDT' };
+  const primary = getBinanceLink(both);
+  assert.equal(primary.market, 'futures');
+  assert.equal(primary.url, 'https://www.binance.com/en/futures/RIFUSDT');
+  const html = _binanceDetailLinksHtml(both);
+  assert.match(html, /BINANCE FUTURES → RIFUSDT/);
+  assert.match(html, /\/en\/futures\/RIFUSDT/);
+  assert.doesNotMatch(html, /\/trade\/RIF_USDT/);
+  assert.doesNotMatch(html, /BINANCE SPOT/);
+
+  // 2) Spot-sourced RIF with denylisted route -> no active spot link at all.
+  const spotOnly = { symbol: 'RIFUSDT', binance_available: true, binance_market: 'spot', spot_pair: 'RIFUSDT' };
+  const link = getBinanceLink(spotOnly);
+  assert.equal(link.available, false);
+  assert.equal(link.url, null);
+  const spotHtml = _binanceDetailLinksHtml(spotOnly);
+  assert.doesNotMatch(spotHtml, /\/trade\/RIF_USDT/);
+
+  // 3) The presence of a denylisted spot route never suppresses the futures link.
+  assert.match(_binanceDetailLinksHtml(both), /\/en\/futures\/RIFUSDT/);
 });
 
 test('scanner 24h sort is numeric, reversible, null-last, and default sort is unchanged', () => {
