@@ -16,26 +16,40 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const producerPath = path.join(__dirname, '../scripts/radar/radar-microstructure-producer.mjs');
 
-test('disabled exits without fetch/post', () => {
-  const result = spawnSync('node', [producerPath], {
-    env: { ...process.env, WORKER_RADAR_MICROSTRUCTURE_ENABLED: 'false' },
-    encoding: 'utf8'
-  });
-  assert.ok(result.stdout.includes('WORKER_RADAR_MICROSTRUCTURE_ENABLED is not true. Exiting.'));
+// Default (no MARKET_DATA_PROVIDER) is the fail-closed "none" provider: it must
+// make ZERO external calls and report provider-unavailable, exiting 0.
+test('default provider is none: provider-unavailable, no fetch, exit 0', () => {
+  const env = { ...process.env };
+  delete env.MARKET_DATA_PROVIDER;
+  const result = spawnSync('node', [producerPath], { env, encoding: 'utf8' });
+  assert.strictEqual(result.status, 0, 'none provider exits 0');
+  assert.match(result.stdout, /provider=none reason=provider-unavailable measured=0 posted=false/);
 });
 
-test('missing token fails closed', () => {
+test('MARKET_DATA_PROVIDER=none: provider-unavailable, no fetch, exit 0', () => {
   const result = spawnSync('node', [producerPath], {
-    env: { ...process.env, WORKER_RADAR_MICROSTRUCTURE_ENABLED: 'true', BOT_WORKER_TOKEN: '' },
+    env: { ...process.env, MARKET_DATA_PROVIDER: 'none', WORKER_RADAR_MICROSTRUCTURE_ENABLED: 'true' },
+    encoding: 'utf8'
+  });
+  assert.strictEqual(result.status, 0);
+  assert.match(result.stdout, /"provider":"none"/);
+  assert.match(result.stdout, /provider=none reason=provider-unavailable/);
+});
+
+// Token/base-URL config only matters in the explicit binance-public diagnostic
+// mode (the only mode that performs external fetch + control-plane POST).
+test('binance-public + missing token fails closed', () => {
+  const result = spawnSync('node', [producerPath], {
+    env: { ...process.env, MARKET_DATA_PROVIDER: 'binance-public', BOT_WORKER_TOKEN: '' },
     encoding: 'utf8'
   });
   assert.ok(result.stderr.includes('Missing BOT_WORKER_TOKEN.'));
   assert.strictEqual(result.status, 1);
 });
 
-test('missing base URL fails closed', () => {
+test('binance-public + missing base URL fails closed', () => {
   const result = spawnSync('node', [producerPath], {
-    env: { ...process.env, WORKER_RADAR_MICROSTRUCTURE_ENABLED: 'true', BOT_WORKER_TOKEN: 'token', CONTROL_BASE_URL: '' },
+    env: { ...process.env, MARKET_DATA_PROVIDER: 'binance-public', BOT_WORKER_TOKEN: 'token', CONTROL_BASE_URL: '' },
     encoding: 'utf8'
   });
   assert.ok(result.stderr.includes('Missing CONTROL_BASE_URL or BOT_BASE_URL.'));
@@ -88,28 +102,31 @@ test('candidates -> BEATUSDT map posts static fields', async () => {
   };
 
   const oldEnv = { ...process.env };
-  process.env.WORKER_RADAR_MICROSTRUCTURE_ENABLED = 'true';
+  // Selecting binance-public IS the enable signal — no legacy ENABLED flag.
+  process.env.MARKET_DATA_PROVIDER = 'binance-public';
+  delete process.env.WORKER_RADAR_MICROSTRUCTURE_ENABLED;
   process.env.WORKER_RADAR_MICROSTRUCTURE_TOP_N = '5';
   process.env.BOT_WORKER_TOKEN = 'testtoken';
   process.env.CONTROL_BASE_URL = 'http://localhost';
 
   try {
     await main();
-    
+
     // Check that we fetched candidates
     assert.ok(calls.some(c => c.url.includes('/api/bot/radar-candidates')));
-    
+
     // Check that we posted microstructure
     const postCall = calls.find(c => c.url.includes('/api/bot/radar-microstructure'));
     assert.ok(postCall);
     assert.strictEqual(postCall.method, 'POST');
-    
+
     const body = JSON.parse(postCall.body);
+    assert.strictEqual(body.provider, 'binance-public', 'post body tags the diagnostic provider');
     assert.ok(body.data['BEATUSDT']);
     assert.strictEqual(body.data['BEATUSDT'].orderBookDepthWithin1Pct, 200);
     assert.strictEqual(body.data['BEATUSDT'].depthUsdWithin1Pct, 201);
     assert.strictEqual(body.data['BEATUSDT'].fundingRate, 0.0001);
-    
+
   } finally {
     globalThis.fetch = realFetch;
     process.env = oldEnv;
@@ -248,6 +265,7 @@ test('producer logs counts + skip reasons and never logs the worker token', asyn
   };
 
   const oldEnv = { ...process.env };
+  process.env.MARKET_DATA_PROVIDER = 'binance-public';
   process.env.WORKER_RADAR_MICROSTRUCTURE_ENABLED = 'true';
   process.env.WORKER_RADAR_MICROSTRUCTURE_TOP_N = '5';
   process.env.BOT_WORKER_TOKEN = TOKEN;

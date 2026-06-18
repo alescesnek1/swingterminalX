@@ -1,18 +1,24 @@
 name: RADAR Static Microstructure Refresh (manual diagnostic only)
 
-# MANUAL DIAGNOSTIC ONLY — there is intentionally NO scheduled cron here.
+# MANUAL DIAGNOSTIC ONLY — there is intentionally NO scheduled cron here, and
+# there is NO production scheduler anywhere.
+#
+# Static microstructure is a provider-backed OPTIONAL overlay, not an automatic
+# Binance scraping cron. The production default is MARKET_DATA_PROVIDER=none →
+# the producer makes ZERO external fetches and the UI shows "provider
+# unavailable" (fail-closed). See docs/radar-microstructure.md.
 #
 # GitHub-hosted runners are region-blocked by Binance public fapi: every
-# depth/premiumIndex call returns HTTP 451, so a scheduled run always measured
-# zero (skip=http-451-or-region-block). The PRODUCTION scheduler is therefore a
-# Netlify Scheduled Function — netlify/functions/radar-microstructure-refresh.mjs
-# — whose egress can reach Binance fapi. See docs/radar-microstructure.md.
+# depth/premiumIndex call returns HTTP 451 (skip=http-451-or-region-block), so a
+# scheduled run could never measure anything anyway. Binance public fapi is
+# reachable only from an operator's local PC.
 #
-# This workflow is kept only for on-demand diagnostics via workflow_dispatch
-# (e.g. to inspect the producer's structured logs). It is NOT a trading worker:
-# it does not start any local Binance worker, does not open a worker bot
-# session, does not run any live/testnet lifecycle, and never touches Binance
-# signed endpoints. It only:
+# This workflow is kept only for on-demand diagnostics via workflow_dispatch. It
+# sets MARKET_DATA_PROVIDER=binance-public explicitly (diagnostic, never default)
+# so a manual dispatch exercises the same public read-only path the operator runs
+# locally. It is NOT a trading worker: it does not start any local Binance worker,
+# does not open a worker bot session, does not run any live/testnet lifecycle, and
+# never touches Binance signed endpoints. It only:
 #   - GET  /api/bot/radar-candidates          (control plane, read-only)
 #   - GET  public Binance fapi depth/premiumIndex
 #   - POST /api/bot/radar-microstructure      (control plane, static overlay)
@@ -22,7 +28,8 @@ name: RADAR Static Microstructure Refresh (manual diagnostic only)
 
 on:
   # No `schedule:` — automatic cron is disabled on purpose (Binance fapi 451 on
-  # GitHub-hosted runners). Production cron lives in the Netlify function.
+  # GitHub-hosted runners). There is NO production cron anywhere; the production
+  # default is MARKET_DATA_PROVIDER=none (fail-closed). Manual dispatch only.
   workflow_dispatch: {}
 
 # Prevent overlapping runs; let an in-flight run finish rather than stacking.
@@ -53,6 +60,9 @@ jobs:
           BOT_WORKER_TOKEN: ${{ secrets.BOT_WORKER_TOKEN }}
           # Public control-plane base URL.
           CONTROL_BASE_URL: https://swingterminalx.netlify.app
+          # DIAGNOSTIC provider, explicitly opted in for this manual run only.
+          # Never the default; never set on an automatic schedule.
+          MARKET_DATA_PROVIDER: 'binance-public'
           # Producer config (read-only, public Binance only).
           WORKER_RADAR_MICROSTRUCTURE_ENABLED: 'true'
           WORKER_RADAR_MICROSTRUCTURE_TOP_N: '5'

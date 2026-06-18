@@ -7295,6 +7295,29 @@ function _renderTradingRadar(radar, esc) {
     const checklistHtml = Object.keys(cl).map(k => `<li>${pillStatus(cl[k].status)} <b>${k}</b>: ${esc(cl[k].reason)}</li>`).join('');
     const groups = _fleetRadarChecklistGroups(selected.conditionChecklist || {});
 
+    // Static microstructure is a provider-backed OPTIONAL overlay. Distinguish
+    // present / stale / provider-unavailable / missing so the operator never
+    // reads a misleading "missing/no-data error" when the provider is simply not
+    // configured (the production default = provider unavailable). Advisory only:
+    // this never makes Absorb pass, never changes ENTRY_READY or Telegram.
+    const microProv = (radar && radar.staticMicrostructure) || {};
+    const providerUnavailable = microProv.providerStatus === 'unavailable';
+    let staticLabel, staticCls;
+    if (selected.hasStaticMicrostructure) {
+      if (microProv.providerStatus === 'stale') { staticLabel = 'present (stale)'; staticCls = 'radar-micro-no'; }
+      else { staticLabel = 'present'; staticCls = 'radar-micro-yes'; }
+    } else if (providerUnavailable) {
+      staticLabel = 'provider unavailable'; staticCls = 'radar-micro-no';
+    } else {
+      staticLabel = 'missing'; staticCls = 'radar-micro-no';
+    }
+    const providerLabel = `${microProv.provider || 'none'} (${microProv.providerStatus || 'unavailable'})`;
+    // Absorb is fail-closed: it can never pass on provider-unavailable or
+    // static-only data. Show WHY it is blocked, preferring the provider state.
+    const absorbBlocked = providerUnavailable
+      ? 'provider unavailable (no trusted microstructure data)'
+      : (selected.absorptionBlockedReason || 'not blocked');
+
     focusHtml = `<div class="radar-focus-card">
       <div class="radar-focus-title"><b>${esc(selected.symbol || '--')}</b> <span class="${_fleetRadarBadgeClass(selected.actionability)}">${actLabel}</span></div>
       <div class="radar-focus-blocked"><span>Action</span><b>${esc(selected.ACTION || '--')}</b></div>
@@ -7327,9 +7350,10 @@ function _renderTradingRadar(radar, esc) {
       </div>
       <div class="radar-microstructure">
         <div class="radar-microstructure__title">Microstructure readiness</div>
-        <div class="radar-microstructure__row"><span>Static (depth/spread/funding)</span><b class="${selected.hasStaticMicrostructure ? 'radar-micro-yes' : 'radar-micro-no'}">${selected.hasStaticMicrostructure ? 'present' : 'missing'}</b></div>
+        <div class="radar-microstructure__row"><span>Data provider</span><b class="${providerUnavailable ? 'radar-micro-no' : 'radar-micro-yes'}">${esc(providerLabel)}</b></div>
+        <div class="radar-microstructure__row"><span>Static (depth/spread/funding)</span><b class="${staticCls}">${esc(staticLabel)}</b></div>
         <div class="radar-microstructure__row"><span>Rolling absorption data</span><b class="${selected.hasRollingMicrostructure ? 'radar-micro-yes' : 'radar-micro-no'}">${selected.hasRollingMicrostructure ? 'present' : 'missing'}</b></div>
-        <div class="radar-microstructure__row"><span>Absorption blocked by</span><b>${esc(selected.absorptionBlockedReason || 'not blocked')}</b></div>
+        <div class="radar-microstructure__row"><span>Absorption blocked by</span><b>${esc(absorbBlocked)}</b></div>
         <div class="radar-microstructure__row"><span>Reclaim blocked by</span><b>${esc(selected.reclaimBlockedReason || 'not blocked')}</b></div>
         <div class="radar-microstructure__row"><span>Missing absorption fields</span><div class="radar-chip-row">${chipList(selected.missingAbsorptionFields, 'radar-status-chip radar-status-chip--missing')}</div></div>
         <div class="radar-microstructure__row"><span>Missing reclaim fields</span><div class="radar-chip-row">${chipList(selected.missingReclaimFields, 'radar-status-chip radar-status-chip--missing')}</div></div>

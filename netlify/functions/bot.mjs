@@ -6,6 +6,7 @@ import { evaluateAutoTrader, evaluateAutoTraderWithFallback, marketsFromSnapshot
 import { fetchBinancePublicUniverse } from '../../scripts/auto/binance-public.mjs';
 import { evaluateTradingRadar, defaultTradingRadarState, normalizeScannerSymbol } from '../../scripts/radar/trading-radar.mjs';
 import { warmBinanceAlphaMapping } from '../../scripts/safety/token-metadata.mjs';
+import { microstructureSnapshotStatus } from '../../scripts/radar/market-data-provider.mjs';
 
 const DEFAULT_STATE = {
   status: 'safety',
@@ -2155,6 +2156,11 @@ async function refreshTradingRadarFromFleet(fleet, nowMs = Date.now()) {
   radar.microstructureDiagnostics = snapshot && snapshot.diagnostics && snapshot.diagnostics.microstructure
     ? snapshot.diagnostics.microstructure
     : { microstructureEnabled: false };
+  // Static microstructure is a provider-backed OPTIONAL overlay. Surface the
+  // provider/freshness so the UI can show "provider unavailable" (the production
+  // default) instead of a misleading "missing/no-data error". This is advisory
+  // only — it never affects Absorb, ENTRY_READY, Telegram, gates, or scores.
+  radar.staticMicrostructure = microstructureSnapshotStatus(fleet && fleet.radarMicrostructureSnapshot, nowMs);
   radar.telegramAlertState = previousRadar && previousRadar.telegramAlertState
     ? previousRadar.telegramAlertState
     : (radar.telegramAlertState || defaultTradingRadarState(new Date(nowMs).toISOString()).telegramAlertState);
@@ -2494,11 +2500,21 @@ async function handleFleetWorker(req, base, body) {
         const data = snap.data || {};
         const keys = Object.keys(data);
         const beat = data['BEATUSDT'];
+        // Provider/freshness classification so consumers can distinguish
+        // "provider unavailable" (no data because no provider is configured —
+        // the production default) from a transient error. Additive fields only;
+        // existing consumers keep reading metrics/keys/receivedAt unchanged.
+        const status = microstructureSnapshotStatus(snap, Date.now());
         return json(req, {
           ok: true,
           receivedAt: snap.receivedAt,
           metrics: keys.length,
           keys: keys.slice(0, 20),
+          provider: status.provider,
+          providerStatus: status.providerStatus,
+          unavailableReason: status.unavailableReason,
+          present: status.present,
+          stale: status.stale,
           hasBEATUSDT: !!beat,
           hasBeat: !!beat, // back-compat alias
           beat: beat ? {
@@ -2517,6 +2533,10 @@ async function handleFleetWorker(req, base, body) {
     return await mutateFleet(async (fleet) => {
       fleet.radarMicrostructureSnapshot = {
         source: 'local_worker_radar_micro',
+        // Which Market Data Provider produced this overlay (diagnostic context
+        // only). Defaults to 'binance-public' for back-compat with older
+        // producers that posted data without tagging a provider.
+        provider: typeof body.provider === 'string' && body.provider ? body.provider.slice(0, 32) : 'binance-public',
         fetchedAt: typeof body.fetchedAt === 'string' ? body.fetchedAt.slice(0, 40) : new Date().toISOString(),
         receivedAt: new Date().toISOString(),
         workerId: workerId.slice(0, 80),

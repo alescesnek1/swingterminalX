@@ -1,4 +1,5 @@
 import { enrichRadarCandidatesMicrostructure, radarMicrostructureConfigFromEnv } from '../auto/microstructure-enrichment.mjs';
+import { createMarketDataProvider, PROVIDER_UNAVAILABLE } from './market-data-provider.mjs';
 import crypto from 'node:crypto';
 
 export async function fetchRadarCandidates(controlUrl, token, fetchFn = globalThis.fetch) {
@@ -21,7 +22,7 @@ export async function fetchRadarCandidates(controlUrl, token, fetchFn = globalTh
   }
 }
 
-export async function postMicrostructure(controlUrl, token, workerId, data, fetchFn = globalThis.fetch) {
+export async function postMicrostructure(controlUrl, token, workerId, data, fetchFn = globalThis.fetch, provider = 'binance-public') {
   const url = `${controlUrl}/api/bot/radar-microstructure`;
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), 5000);
@@ -35,6 +36,7 @@ export async function postMicrostructure(controlUrl, token, workerId, data, fetc
       body: JSON.stringify({
         workerId,
         data,
+        provider,
         fetchedAt: new Date().toISOString(),
       }),
       signal: controller.signal,
@@ -63,10 +65,19 @@ function emptySummary() {
   };
 }
 
-// Reusable, side-effect-light runner shared by the CLI and the Netlify
-// scheduled function. Performs exactly ONE read-only cycle:
-//   GET /api/bot/radar-candidates  →  public Binance fapi depth/premiumIndex
-//   →  POST /api/bot/radar-microstructure
+// Reusable, side-effect-light runner shared by the CLI and the (manual,
+// token-protected) Netlify diagnostic function. The DATA SOURCE is chosen by the
+// MARKET_DATA_PROVIDER env (fail-closed default "none"):
+//
+//   • provider=none (default / unset): NO external fetch happens at all. Logs a
+//     clear provider-unavailable summary and returns ok (exit 0). This is the
+//     production default — static microstructure is an optional overlay, never an
+//     automatic Binance scraping cron.
+//   • provider=binance-public (DIAGNOSTIC / LOCAL-ONLY, must be set explicitly):
+//     performs exactly ONE read-only cycle:
+//       GET /api/bot/radar-candidates  →  public Binance fapi depth/premiumIndex
+//       →  POST /api/bot/radar-microstructure
+//
 // It NEVER calls process.exit and NEVER throws for runtime/network failures;
 // callers map the returned { ok, reason, summary } to their own exit/HTTP code.
 // Secrets (token, headers) and response bodies are never logged.
@@ -80,11 +91,25 @@ export async function runRadarMicrostructureProducer({
   const logError = (logger && typeof logger.error === 'function') ? (...a) => logger.error(...a) : log;
 
   const config = radarMicrostructureConfigFromEnv(env);
-  if (!config.enabled) {
-    log('WORKER_RADAR_MICROSTRUCTURE_ENABLED is not true. Exiting.');
-    return { ok: true, reason: 'disabled', posted: false, summary: emptySummary(), keys: [] };
+
+  // Provider gate (fail-closed). Only the explicitly opt-in binance-public
+  // diagnostic provider performs external fetches. Everything else (none /
+  // snapshot / unknown) makes ZERO external calls and posts nothing.
+  const provider = createMarketDataProvider(env, { fetchFn, cache: cache instanceof Map ? cache : undefined });
+  if (provider.name !== 'binance-public') {
+    const health = provider.health();
+    const reason = health.reason || PROVIDER_UNAVAILABLE;
+    log(`[PRODUCER] provider=${provider.name} reason=${reason} measured=0 posted=false`);
+    const summary = emptySummary();
+    log(JSON.stringify({ tag: 'radar-microstructure', provider: provider.name, providerStatus: health.status, reason, ...summary, posted: false }));
+    return { ok: true, reason, provider: provider.name, providerStatus: health.status, posted: false, summary, keys: [] };
   }
 
+  // ── binance-public diagnostic path (explicitly enabled) ──────────────────────
+  // Selecting MARKET_DATA_PROVIDER=binance-public IS the enable signal: the
+  // legacy WORKER_RADAR_MICROSTRUCTURE_ENABLED flag is no longer required (the
+  // enrichment helper gates on config.enabled, so force it on here).
+  const measureConfig = { ...config, enabled: true };
   const token = env.BOT_WORKER_TOKEN;
   if (!token) {
     logError('Missing BOT_WORKER_TOKEN.');
@@ -101,7 +126,7 @@ export async function runRadarMicrostructureProducer({
   const workerId = `radar_producer_${crypto.randomBytes(4).toString('hex')}`;
   const cacheMap = cache instanceof Map ? cache : new Map();
 
-  log(`[PRODUCER] Starting Radar Microstructure Producer (targetMeasured=${config.topN} scanLimit=${config.scanLimit})`);
+  log(`[PRODUCER] Starting Radar Microstructure Producer provider=binance-public (targetMeasured=${measureConfig.topN} scanLimit=${measureConfig.scanLimit})`);
 
   // 1. Fetch candidates (read-only). A failure here is non-fatal for the
   //    scheduler — log the reason and return a clean, zeroed summary.
@@ -118,7 +143,7 @@ export async function runRadarMicrostructureProducer({
   // 2. Enrich (fapi-first symbol resolution + public depth/premiumIndex).
   const diagnostics = { perCandidate: [] };
   const data = await enrichRadarCandidatesMicrostructure(candidates, {
-    config,
+    config: measureConfig,
     env,
     fetchImpl: fetchFn,
     cache: cacheMap,
@@ -143,7 +168,7 @@ export async function runRadarMicrostructureProducer({
   let posted = false;
   if (keys.length) {
     try {
-      posted = await postMicrostructure(controlUrl, token, workerId, data, fetchFn);
+      posted = await postMicrostructure(controlUrl, token, workerId, data, fetchFn, provider.name);
     } catch (err) {
       logError(`[PRODUCER][ERROR] post failed: ${err.message}`);
     }
@@ -162,7 +187,7 @@ export async function runRadarMicrostructureProducer({
   };
 
   // 4. Structured summary (counts only).
-  log(JSON.stringify({ tag: 'radar-microstructure', ...summary, posted }));
+  log(JSON.stringify({ tag: 'radar-microstructure', provider: provider.name, ...summary, posted }));
 
   if (!keys.length) {
     log('[PRODUCER] No microstructure data measured.');
@@ -170,7 +195,7 @@ export async function runRadarMicrostructureProducer({
     log(`[PRODUCER] Posted ${keys.length} metrics ok=${posted}`);
   }
 
-  return { ok: true, reason: keys.length ? 'measured' : 'no-data', posted, summary, keys };
+  return { ok: true, reason: keys.length ? 'measured' : 'no-data', provider: provider.name, posted, summary, keys };
 }
 
 // CLI entry point. Maps the runner result to a process exit code: only a

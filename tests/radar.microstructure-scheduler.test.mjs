@@ -84,9 +84,11 @@ test('netlify function reuses the shared producer runner', () => {
   assert.match(netlifyFn, /radar-microstructure-producer\.mjs/);
 });
 
-test('netlify function declares a scheduled cron', () => {
-  assert.match(netlifyFn, /export\s+const\s+config\s*=\s*\{[\s\S]*schedule/);
-  assert.match(netlifyFn, /cron|\*\/10/);
+// Production cron against Binance fapi is RETIRED everywhere (GitHub + Netlify
+// both 451-blocked). The function must be manual-only: NO scheduled cron config.
+test('netlify function has NO scheduled cron (manual diagnostic only)', () => {
+  assert.doesNotMatch(netlifyFn, /export\s+const\s+config\s*=\s*\{[\s\S]*schedule/, 'must not export a schedule config');
+  assert.doesNotMatch(netlifyFn, /^\s*schedule:/m, 'must not define a schedule');
 });
 
 test('netlify function protects manual invocation with the worker token', () => {
@@ -119,8 +121,17 @@ test('docs exist and document fail-closed / static-only does not pass Absorb', (
   assert.match(docs, /static-only/i);
 });
 
-test('docs explain the move to Netlify scheduled function due to 451', () => {
+test('docs explain the provider-backed model and the 451 region block', () => {
   const docs = fs.readFileSync(docsPath, 'utf8');
   assert.match(docs, /451/);
-  assert.match(docs, /Netlify/i);
+  assert.match(docs, /MARKET_DATA_PROVIDER/);
+  assert.match(docs, /provider.unavailable/i);
+});
+
+// The production default must be the fail-closed "none" provider — no automatic
+// Binance fapi scraping is configured anywhere.
+test('no automatic Binance microstructure schedule remains (workflow or function)', () => {
+  assert.doesNotMatch(workflow, /^\s*schedule:/m);
+  assert.doesNotMatch(workflow, /cron:/);
+  assert.doesNotMatch(netlifyFn, /export\s+const\s+config\s*=\s*\{[\s\S]*schedule/);
 });

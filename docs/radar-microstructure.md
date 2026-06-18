@@ -1,195 +1,182 @@
-# RADAR Static Microstructure Producer
+# RADAR Static Microstructure — Provider-Backed Optional Overlay
 
-Read-only refresh of the RADAR **static** microstructure overlay
-(order-book depth / spread / funding). In production it is driven by a **Netlify
-Scheduled Function**, not by a trading worker. (The earlier GitHub Actions cron
-is retired — see below.)
+Static microstructure (order-book depth / spread / funding) is an **optional,
+provider-backed overlay** for the RADAR detail view. It is **not** a hard
+dependency, **not** an automatic Binance scraping cron, and **never** a trading
+worker.
+
+The **production default is `MARKET_DATA_PROVIDER=none`** → the producer makes
+**zero external fetches**, posts nothing, and the UI shows **"provider
+unavailable"** (fail-closed). Binance-public fetching is a **diagnostic /
+local-only** path that must be opted into explicitly. There is **no production
+scheduler** anywhere.
 
 > [!WARNING]
 > This is **not** a trading worker. It must **not** be replaced by, or routed
 > through, `local-binance-worker` or a `worker-session`. It never starts a bot
 > session, never runs a live/testnet lifecycle, never imports execution/order
-> paths, and never touches Binance signed endpoints.
+> paths, and never touches Binance signed endpoints. No `BINANCE_API_KEY` /
+> `BINANCE_API_SECRET` is ever required (public market data only).
 
-## What it does
+## Why provider-backed (the 451 story)
 
-The producer (`scripts/radar/radar-microstructure-producer.mjs`) runs a single
-cycle per invocation:
+Binance public fapi (`depth` / `premiumIndex`) is reachable only from an
+operator's local PC. **Both GitHub Actions and Netlify serverless egress are
+region-blocked by Binance public fapi (HTTP 451)** — every call returned
+`skip=http-451-or-region-block`, so an automatic run always measured **zero**.
+We are **not** chasing servers/proxies/extra egress (no Render, no proxies) to
+work around this.
 
-1. `GET /api/bot/radar-candidates` — read the current RADAR candidate list from
-   the control plane (auth via `X-BOT-WORKER-TOKEN`).
-2. For the top N candidates, read **public** Binance futures market data only:
-   - `GET https://fapi.binance.com/fapi/v1/depth` (order-book depth/spread)
-   - `GET https://fapi.binance.com/fapi/v1/premiumIndex` (funding rate)
-3. `POST /api/bot/radar-microstructure` — push the measured **static** fields
-   back to the control plane so the RADAR UI can display them.
+So the microstructure layer was refactored into a **Market Data Provider**
+abstraction. The control plane and UI treat a missing/unconfigured provider as
+*"provider unavailable"*, not as an error — and absolutely not as a reason to
+relax any gate.
 
-No API key/secret is required because only public market data is read. No
-order, margin, leverage, withdraw, or otherwise signed endpoint is ever called.
+The Binance-public fetch was useful as a **proof-of-concept** that real
+order-book depth/spread/funding could be measured and surfaced. It is **not** a
+production data source.
 
-### What "static" means for downstream gating
+## Market Data Provider abstraction
 
-Static depth/spread/funding is necessary context, but it is **not sufficient**
-for entry. It does not carry rolling absorption data, so:
+File: [`scripts/radar/market-data-provider.mjs`](../scripts/radar/market-data-provider.mjs)
 
-- **STATIC (depth/spread/funding):** present
+```js
+const provider = createMarketDataProvider(env, opts);
+provider.name                       // 'none' | 'binance-public' | 'snapshot'
+await provider.getStaticMicrostructure(candidate); // { available, reason, symbol?, fields? }
+provider.health();                  // { name, status, reason }
+```
+
+Selected by the `MARKET_DATA_PROVIDER` env (fail-closed default):
+
+| `MARKET_DATA_PROVIDER` | Provider | Behaviour |
+| --- | --- | --- |
+| *(unset)* / `none` / unknown | **none** (default) | `unavailable`, reason `provider-unavailable`. **Zero external calls.** |
+| `binance-public` | **binance-public** | DIAGNOSTIC / LOCAL-ONLY. Uses the existing public fapi logic. Must be set explicitly; never the default; never scheduled. Public data only — no signed/keyed endpoint. |
+| `snapshot` | **snapshot** | Reads only a previously stored `fleet.radarMicrostructureSnapshot`. Never fetches an external API. |
+
+## What "static" means for downstream gating
+
+Static depth/spread/funding is context, but it is **not sufficient** for entry.
+It carries no rolling absorption data, and provider-unavailable carries no data
+at all. Either way it is **fail-closed**:
+
+- **STATIC (depth/spread/funding):** present / stale / **provider unavailable** / missing
 - **ROLLING ABSORPTION DATA:** missing
-- **Absorb:** does **not** pass on static-only data (fail-closed)
+- **Absorb:** does **not** pass on missing, untrusted, or static-only data
 - **ENTRY_READY:** no
 - **Telegram:** no
 
-This is intentional and correct. The static overlay informs the RADAR detail
-view; it never on its own promotes a candidate to ENTRY_READY or fires an alert.
-ENTRY_READY, Telegram, gates, thresholds, `EXECUTION_SCORE`, and `SETUP_SCORE`
-are unchanged by this producer.
+`ENTRY_READY`, Telegram eligibility, gates, thresholds, `EXECUTION_SCORE`, and
+`SETUP_SCORE` are **unchanged** by this overlay. The provider status is advisory
+display context only.
 
-## Scheduler (production): Netlify Scheduled Function
+## Expected production behaviour (default `none`)
 
-Function: [`netlify/functions/radar-microstructure-refresh.mjs`](../netlify/functions/radar-microstructure-refresh.mjs)
+With no provider configured, the RADAR focus card shows:
 
-- Runs every 10 minutes (`export const config = { schedule: '*/10 * * * *' }`).
-- Reuses the exact same producer logic via the shared
-  `runRadarMicrostructureProducer({ env, fetchFn, logger })` runner.
-- Returns HTTP `200` even when nothing was measured; only a missing-config
-  failure (no `BOT_WORKER_TOKEN`) returns a non-200 with a clear, non-secret
-  error.
-- Logs a safe summary only (counts + per-candidate skip reasons). Never logs
-  the token, request headers, or response bodies.
+- **STATIC provider unavailable**
+- **ROLLING missing**
+- **Absorb: not pass**
+- **ENTRY_READY: no**
+- **Telegram: no**
 
-### Why not GitHub Actions?
-
-> [!IMPORTANT]
-> The previous GitHub Actions cron is **disabled** for production. GitHub-hosted
-> runners are **region-blocked by Binance public fapi (HTTP 451)** — every
-> `depth`/`premiumIndex` call failed with `skip=http-451-or-region-block`, so a
-> scheduled run always measured **zero**. Netlify's egress can reach Binance
-> fapi, so the production schedule lives in the Netlify function above.
->
-> The GitHub workflow
-> [`.github/workflows/radar-microstructure.yml`](../.github/workflows/radar-microstructure.yml)
-> is kept **manual-only** (`workflow_dispatch`, no `schedule:`) as an on-demand
-> diagnostic for inspecting the producer's structured logs.
-
-### Environment used by the Netlify function
-
-Set these as **Netlify environment variables** (Site → Settings → Environment):
-
-| Variable | Value | Purpose |
-| --- | --- | --- |
-| `BOT_WORKER_TOKEN` | *(Netlify env secret)* | Control-plane worker auth header |
-| `CONTROL_BASE_URL` | defaults to `process.env.URL` or `https://swingterminalx.netlify.app` | Control-plane base URL |
-| `WORKER_RADAR_MICROSTRUCTURE_ENABLED` | `true` (defaulted) | Master enable for the producer |
-| `WORKER_RADAR_MICROSTRUCTURE_TOP_N` | `5` (defaulted) | Target number of measured symbols |
-| `WORKER_RADAR_MICROSTRUCTURE_SCAN_LIMIT` | `50` (defaulted) | How deep to scan for measurable symbols |
-| `WORKER_RADAR_MICROSTRUCTURE_CACHE_MS` | `10000` (defaulted) | Per-symbol measurement cache window |
-
-No `BINANCE_API_KEY` / `BINANCE_API_SECRET` is set or needed.
-
-### Manual invocation of the Netlify function
-
-The scheduled function is also reachable over HTTP for diagnostics, but a manual
-call **must** present the worker token (the scheduled trigger is recognised by
-its `next_run` body and needs no header):
+This is correct and intended — not an error state. The producer, if run, logs:
 
 ```
-POST https://swingterminalx.netlify.app/.netlify/functions/radar-microstructure-refresh
-Header: x-bot-worker-token: <your control-plane worker token>
+[PRODUCER] provider=none reason=provider-unavailable measured=0 posted=false
+{"tag":"radar-microstructure","provider":"none","providerStatus":"unavailable","reason":"provider-unavailable",...,"posted":false}
 ```
 
-There is no unauthenticated refresh endpoint.
+and exits `0` without contacting Binance or the control plane.
 
-## Configure the secret
+## Manual local diagnostic (binance-public, explicit opt-in)
 
-The only secret required is the control-plane worker token.
-
-- **Production (Netlify):** Site → Settings → Environment variables → add
-  `BOT_WORKER_TOKEN`.
-- **Manual GitHub diagnostic (optional):** Repository → Settings → Secrets and
-  variables → Actions → `BOT_WORKER_TOKEN`.
-
-Placeholder only — do not commit the real value:
-
-```
-BOT_WORKER_TOKEN=__REPLACE_WITH_CONTROL_PLANE_WORKER_TOKEN__
-```
-
-Secrets are never printed by the producer, the workflow, or the Netlify function.
-
-## Disable the scheduler
-
-Any one of the following disables it:
-
-- **Stop the Netlify cron:** remove/rename the `export const config.schedule`
-  in `netlify/functions/radar-microstructure-refresh.mjs`, or disable the
-  scheduled function from the Netlify dashboard.
-- **Hard-disable the producer:** set `WORKER_RADAR_MICROSTRUCTURE_ENABLED` to
-  anything other than `true`. The producer logs
-  `WORKER_RADAR_MICROSTRUCTURE_ENABLED is not true. Exiting.` and the function
-  returns `200` having done nothing.
-- **Remove the secret:** without `BOT_WORKER_TOKEN` the producer fails closed
-  (CLI exit `1`; Netlify function returns `500`) and posts nothing.
-
-## Run a manual smoke locally
+`binance-public` is **diagnostic / local-only** and must be set explicitly. Run
+the one-shot producer from an operator PC whose egress can reach `fapi.binance.com`:
 
 ```bash
-# Read-only. Requires only the control-plane token; no Binance keys.
+# Read-only. PUBLIC market data only; no Binance keys/secret.
+export MARKET_DATA_PROVIDER=binance-public
 export BOT_WORKER_TOKEN=__REPLACE_WITH_CONTROL_PLANE_WORKER_TOKEN__
 export CONTROL_BASE_URL=https://swingterminalx.netlify.app
-export WORKER_RADAR_MICROSTRUCTURE_ENABLED=true
 export WORKER_RADAR_MICROSTRUCTURE_TOP_N=5
 export WORKER_RADAR_MICROSTRUCTURE_CACHE_MS=10000
 
-node scripts/radar/radar-microstructure-producer.mjs
+MARKET_DATA_PROVIDER=binance-public node scripts/radar/radar-microstructure-producer.mjs
 ```
 
 On Windows PowerShell:
 
 ```powershell
+$env:MARKET_DATA_PROVIDER='binance-public'
 $env:BOT_WORKER_TOKEN='__REPLACE_WITH_CONTROL_PLANE_WORKER_TOKEN__'
 $env:CONTROL_BASE_URL='https://swingterminalx.netlify.app'
-$env:WORKER_RADAR_MICROSTRUCTURE_ENABLED='true'
 $env:WORKER_RADAR_MICROSTRUCTURE_TOP_N='5'
 $env:WORKER_RADAR_MICROSTRUCTURE_CACHE_MS='10000'
 node scripts/radar/radar-microstructure-producer.mjs
 ```
 
-Expected output is a single cycle log, e.g. `[PRODUCER] Posted N metrics ok=true`.
+In `binance-public` mode the producer performs exactly **one** read-only cycle:
 
-## Verify the backend updated
+1. `GET /api/bot/radar-candidates` (control plane, `X-BOT-WORKER-TOKEN`).
+2. For the top-N candidates, read **public** Binance market data only:
+   - `GET https://fapi.binance.com/fapi/v1/depth` (order-book depth/spread)
+   - `GET https://fapi.binance.com/fapi/v1/premiumIndex` (funding rate)
+3. `POST /api/bot/radar-microstructure` — push the measured **static** fields
+   (tagged `provider: "binance-public"`) so the RADAR UI can display them.
 
-After a scheduled (or manual) run where Binance fapi was reachable and at least
-one symbol measured, the control-plane snapshot should refresh:
+No order, margin, leverage, withdraw, or otherwise signed endpoint is ever
+called. Logs are a safe summary only (counts + per-candidate skip reasons) —
+never the token, request headers, or response bodies.
+
+## Non-production diagnostic endpoints (no automatic schedule)
+
+These exist for on-demand inspection only and run **nothing automatically**:
+
+- **GitHub workflow** [`.github/workflows/radar-microstructure.yml`](../.github/workflows/radar-microstructure.yml):
+  `workflow_dispatch` only, **no `schedule:`**. It sets
+  `MARKET_DATA_PROVIDER=binance-public` for the manual run; GitHub egress is
+  451-blocked, so it is for diagnostics only. Do **not** add a cron.
+- **Netlify function** [`netlify/functions/radar-microstructure-refresh.mjs`](../netlify/functions/radar-microstructure-refresh.mjs):
+  token-protected, **no `export const config.schedule`**. It does **not** default
+  `MARKET_DATA_PROVIDER`, so with the production default it returns a clean
+  `provider-unavailable` result and never fetches Binance.
+
+## Verify the stored snapshot / provider status
 
 ```
 GET https://swingterminalx.netlify.app/api/bot/radar-microstructure
 Header: x-bot-worker-token: <your control-plane worker token>
 ```
 
-Expect a **fresh `receivedAt`** and `metrics > 0` (e.g. `keys` including
-`BEATUSDT`). If `measured` is `0` with `failedFetch` high and every per-candidate
-line shows `skip=http-451-or-region-block`, the host running the producer cannot
-reach Binance fapi (the exact reason GitHub Actions was retired).
+The response includes `provider`, `providerStatus` (`present` / `stale` /
+`unavailable`), `unavailableReason`, `present`, and `stale` alongside the
+existing `metrics` / `keys` / `receivedAt`. With the default `none` provider and
+no stored data, `providerStatus` is `unavailable` and `unavailableReason` is
+`provider-unavailable`.
 
 ## Exit-code policy
 
-The producer is designed to be **scheduler-safe** — no unhandled exceptions.
-A single cycle wraps fetch → enrich → post in try/catch and logs, never throws.
+The producer is **scheduler-safe** — no unhandled exceptions. A single cycle
+wraps fetch → enrich → post in try/catch and logs, never throws.
 
 | Situation | Exit code | Why |
 | --- | --- | --- |
-| Producer disabled (`...ENABLED` ≠ `true`) | `0` | Clean no-op |
-| No radar candidates | `0` | Nothing to measure this cycle |
-| No microstructure measured | `0` | Nothing to post this cycle |
-| Temporary Binance failure | `0` | Transient; next cron tick retries |
-| Backend `POST` failure | `0` | **Decision:** treated as non-fatal so a transient control-plane blip does not red-mark the schedule; the next tick re-posts. Data is overlay-only and self-heals on the following cycle. |
-| Missing `BOT_WORKER_TOKEN` | `1` | Misconfiguration — fail closed, post nothing |
-| Missing `CONTROL_BASE_URL` | `1` | Misconfiguration — fail closed, post nothing |
+| Provider unavailable (`none` / `snapshot` / unknown — the default) | `0` | Fail-closed no-op; **zero external calls** |
+| (binance-public) No radar candidates | `0` | Nothing to measure this cycle |
+| (binance-public) No microstructure measured | `0` | Nothing to post this cycle |
+| (binance-public) Temporary Binance failure | `0` | Transient; never red-marks anything |
+| (binance-public) Backend `POST` failure | `0` | Non-fatal; overlay-only data self-heals next run |
+| (binance-public) Missing `BOT_WORKER_TOKEN` | `1` | Misconfiguration — fail closed, post nothing |
+| (binance-public) Missing `CONTROL_BASE_URL` | `1` | Misconfiguration — fail closed, post nothing |
 
-The only non-zero exits are **configuration** failures (missing token/base URL),
-which should never happen with the secret set. Runtime/network failures are
-non-fatal by design so the schedule stays green and self-heals on the next tick.
+The only non-zero exits are **configuration** failures in explicit
+`binance-public` mode (missing token/base URL). The default `none` provider can
+never fail this way because it never fetches or posts.
 
-The Netlify function maps the same outcomes to HTTP status: `200` for disabled /
-no-candidates / no-data / Binance-failure / post-failure, and `500` only for a
-missing-config failure (no `BOT_WORKER_TOKEN`). Manual HTTP calls without a valid
-`x-bot-worker-token` get `401`.
+The Netlify function maps the same outcomes to HTTP status: `200` for
+provider-unavailable / no-candidates / no-data / Binance-failure / post-failure,
+and `500` only for a missing-config failure (no `BOT_WORKER_TOKEN`) in
+`binance-public` mode. Manual HTTP calls without a valid `x-bot-worker-token`
+get `401`.

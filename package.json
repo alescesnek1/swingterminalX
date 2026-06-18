@@ -6,6 +6,7 @@
   "scripts": {
     "test": "node --test \"tests/**/*.test.mjs\"",
     "test:worker-subprocess": "node --test tests/run-worker-subprocess.mjs",
+    "radar:microstructure": "node scripts/radar/radar-microstructure-producer.mjs",
     "e2e": "node tests/e2e-close.mjs",
     "bot:worker": "node scripts/local-binance-worker.mjs",
     "bot:worker:live-preflight": "node scripts/local-binance-worker.mjs --live-preflight"
