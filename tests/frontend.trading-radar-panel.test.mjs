@@ -121,3 +121,9 @@ test('Matrix Status column correctly prioritizes v1Status over status (fallback 
   assert.equal(helper({ v1Status: 'DISLOCATION_CONFIRMED', status: 'WATCH' }), 'DISLOCATION_CONFIRMED');
   assert.equal(helper({}), 'WATCH');
 });
+
+test('Trading RADAR frontend uses hardBlockReason to avoid misleading score threshold displays', () => {
+  assert.match(terminalJs, /const scoreBlocked = score < diag\.hardBlockThreshold;/);
+  assert.match(terminalJs, /if \(scoreBlocked && diag\.hardBlockReason\) text \+= ` \/ score block below \$\{diag\.hardBlockThreshold\} \/ HARD: \$\{diag\.hardBlockReason\}`;/);
+  assert.match(terminalJs, /else if \(diag\.hardBlockReason\) text \+= ` \/ hard block: \$\{diag\.hardBlockReason\}`;/);
+});

@@ -288,3 +288,41 @@ test('L: candidates with same visual chips but different score components produc
   assert.notEqual(c1.SETUP_SCORE, c2.SETUP_SCORE);
   assert.notEqual(c1.DISLOCATION_SCORE, c2.DISLOCATION_SCORE);
 });
+
+test('M: regime score > 45 with no hard boolean does not become RISK_OFF_BLOCKED', () => {
+  const c = candidate([
+    { ...FULL_MICRO_ENTRY, symbol: 'M1USDT', change24hPct: 0 }
+  ], 'M1USDT', {
+    markets: [
+      { ...BTC, change24hPct: 1 },
+      { ...ETH, change24hPct: 1 },
+      { ...FULL_MICRO_ENTRY, symbol: 'M1USDT', change24hPct: 1 },
+      { symbol: 'M2USDT', status: 'TRADING', quoteAsset: 'USDT', quoteVolume24h: 1e6, change24hPct: 1 },
+      { symbol: 'M3USDT', status: 'TRADING', quoteAsset: 'USDT', quoteVolume24h: 1e6, change24hPct: -2 }
+    ]
+  });
+  assert.ok(c.MARKET_REGIME_SCORE >= 45);
+  assert.notEqual(c.STATUS, 'RISK_OFF_BLOCKED');
+});
+
+test('N: breadth collapse triggers RISK_OFF_BLOCKED despite score > 45 and diagnostics name it explicitly', () => {
+  const c = candidate([
+    { ...FULL_MICRO_ENTRY, symbol: 'N1USDT', change24hPct: -2 }
+  ], 'N1USDT', {
+    markets: [
+      { ...BTC, change24hPct: 2 },
+      { ...ETH, change24hPct: 2 },
+      { ...FULL_MICRO_ENTRY, symbol: 'N1USDT', change24hPct: -2 },
+      { symbol: 'N2USDT', status: 'TRADING', quoteAsset: 'USDT', quoteVolume24h: 1e6, change24hPct: -2 },
+      { symbol: 'N3USDT', status: 'TRADING', quoteAsset: 'USDT', quoteVolume24h: 1e6, change24hPct: -2 },
+      { symbol: 'N4USDT', status: 'TRADING', quoteAsset: 'USDT', quoteVolume24h: 1e6, change24hPct: -2 },
+      { symbol: 'N5USDT', status: 'TRADING', quoteAsset: 'USDT', quoteVolume24h: 1e6, change24hPct: -2 },
+      { symbol: 'N6USDT', status: 'TRADING', quoteAsset: 'USDT', quoteVolume24h: 1e6, change24hPct: -2 },
+      { symbol: 'N7USDT', status: 'TRADING', quoteAsset: 'USDT', quoteVolume24h: 1e6, change24hPct: -2 },
+      { symbol: 'N8USDT', status: 'TRADING', quoteAsset: 'USDT', quoteVolume24h: 1e6, change24hPct: -2 }
+    ]
+  });
+  assert.equal(c.STATUS, 'RISK_OFF_BLOCKED');
+  assert.equal(c.MARKET_REGIME_SCORE, 48);
+  assert.equal(c.marketRegimeDiagnostics.hardBlockReason, 'breadth collapse');
+});

@@ -279,7 +279,12 @@ export function evaluateMarketRegime(markets = []) {
   else if (breadthPct < 40) { score -= 10; reasons.push('weak breadth'); }
   else reasons.push('breadth supportive enough');
 
-  const blocks = score < 45 || btcChange <= -4 || ethChange <= -5 || breadthPct < 25;
+  let hardBlockReason = null;
+  if (btcChange <= -4) hardBlockReason = 'BTC active breakdown';
+  else if (ethChange <= -5) hardBlockReason = 'ETH active breakdown';
+  else if (breadthPct != null && breadthPct < 25) hardBlockReason = 'breadth collapse';
+
+  const blocks = score < 45 || hardBlockReason != null;
   return {
     status: blocks ? 'RISK_OFF_BREAKDOWN' : (score >= 70 ? 'SUPPORTIVE' : 'MIXED'),
     score: round(clamp(score), 0),
@@ -290,7 +295,8 @@ export function evaluateMarketRegime(markets = []) {
       ethChange: ethChange == null ? null : round(ethChange, 2),
       breadthPct: breadthPct == null ? null : round(breadthPct, 1),
       reasons: reasons,
-      hardBlockThreshold: 45
+      hardBlockThreshold: 45,
+      hardBlockReason
     },
     breadthPct: breadthPct == null ? null : round(breadthPct, 1),
     btc: btc ? { symbol: btc.symbol, change24hPct: round(btcChange, 2) } : null,

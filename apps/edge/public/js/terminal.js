@@ -7383,7 +7383,18 @@ function _renderTradingRadar(radar, esc) {
         <div><span>Setup</span><b>${esc(_fleetFmtRadarValue(selected.SETUP_SCORE, 0))}</b></div>
         <div><span>Execution</span><b>${esc(_fleetFmtRadarValue(selected.EXECUTION_SCORE, 0))}</b></div>
         <div><span>Risk/Reward</span><b>${esc(_fleetFmtRadarValue(selected.RISK_REWARD_SCORE, 0))}</b></div>
-        <div><span>Regime</span><b>${esc(_fleetFmtRadarValue(selected.MARKET_REGIME_SCORE, 0))} ${selected.marketRegimeDiagnostics ? `/ hard block below ${selected.marketRegimeDiagnostics.hardBlockThreshold}` : ''}</b></div>
+        <div><span>Regime</span><b>${esc((() => {
+          const score = selected.MARKET_REGIME_SCORE;
+          const diag = selected.marketRegimeDiagnostics;
+          let text = _fleetFmtRadarValue(score, 0);
+          if (diag) {
+            const scoreBlocked = score < diag.hardBlockThreshold;
+            if (scoreBlocked && diag.hardBlockReason) text += ` / score block below ${diag.hardBlockThreshold} / HARD: ${diag.hardBlockReason}`;
+            else if (scoreBlocked) text += ` / hard block below ${diag.hardBlockThreshold}`;
+            else if (diag.hardBlockReason) text += ` / hard block: ${diag.hardBlockReason}`;
+          }
+          return text;
+        })())}</b></div>
         ${selected.marketRegimeDiagnostics && selected.marketRegimeDiagnostics.reasons && selected.marketRegimeDiagnostics.reasons.length ? `<div style="grid-column: 1 / -1; margin-top: 4px; color: var(--txt2);"><span>Regime Reason</span><b style="color:var(--txt); font-weight:normal;">${esc(selected.marketRegimeDiagnostics.reasons.join(' / '))}</b></div>` : ''}
         <div><span>Confidence</span><b>${esc(_fleetFmtRadarValue(selected.CONFIDENCE ?? selected.FINAL_CONFIDENCE ?? selected.confidence, 0))}</b></div>
         <div><span>Final safety</span><b>${esc(selected.finalSafetyStatus || selected.safetyStatus || 'UNKNOWN')}</b></div>
