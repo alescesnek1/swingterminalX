@@ -7384,7 +7384,8 @@ function _renderTradingRadar(radar, esc) {
         <div><span>Execution</span><b>${esc(_fleetFmtRadarValue(selected.EXECUTION_SCORE, 0))}</b></div>
         <div><span>Risk/Reward</span><b>${esc(_fleetFmtRadarValue(selected.RISK_REWARD_SCORE, 0))}</b></div>
         <div><span>Regime</span><b>${esc((() => {
-          const score = selected.MARKET_REGIME_SCORE;
+          let score = selected.MARKET_REGIME_SCORE;
+          if (score != null && score <= 10) score = selected.regimeScore ?? (score * 10);
           const diag = selected.marketRegimeDiagnostics;
           let text = _fleetFmtRadarValue(score, 0);
           if (diag) {
