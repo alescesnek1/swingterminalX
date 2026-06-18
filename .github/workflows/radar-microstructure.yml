@@ -1,24 +1,28 @@
-name: RADAR Static Microstructure Refresh
+name: RADAR Static Microstructure Refresh (manual diagnostic only)
 
-# Read-only scheduler for the RADAR static microstructure overlay.
+# MANUAL DIAGNOSTIC ONLY — there is intentionally NO scheduled cron here.
 #
-# This workflow is NOT a trading worker. It does not start any local Binance
-# worker, does not open a worker bot session, does not run any live/testnet
-# lifecycle, and never touches Binance signed endpoints.
+# GitHub-hosted runners are region-blocked by Binance public fapi: every
+# depth/premiumIndex call returns HTTP 451, so a scheduled run always measured
+# zero (skip=http-451-or-region-block). The PRODUCTION scheduler is therefore a
+# Netlify Scheduled Function — netlify/functions/radar-microstructure-refresh.mjs
+# — whose egress can reach Binance fapi. See docs/radar-microstructure.md.
 #
-# It only:
+# This workflow is kept only for on-demand diagnostics via workflow_dispatch
+# (e.g. to inspect the producer's structured logs). It is NOT a trading worker:
+# it does not start any local Binance worker, does not open a worker bot
+# session, does not run any live/testnet lifecycle, and never touches Binance
+# signed endpoints. It only:
 #   - GET  /api/bot/radar-candidates          (control plane, read-only)
 #   - GET  public Binance fapi depth/premiumIndex
 #   - POST /api/bot/radar-microstructure      (control plane, static overlay)
 #
 # Static-only data does NOT pass Absorb and does NOT promote a candidate to
-# entry or fire alerts. Those downstream paths remain fail-closed and are
-# unchanged. See docs/radar-microstructure.md.
+# entry or fire alerts. Those downstream paths remain fail-closed and unchanged.
 
 on:
-  schedule:
-    # Every 10 minutes.
-    - cron: '*/10 * * * *'
+  # No `schedule:` — automatic cron is disabled on purpose (Binance fapi 451 on
+  # GitHub-hosted runners). Production cron lives in the Netlify function.
   workflow_dispatch: {}
 
 # Prevent overlapping runs; let an in-flight run finish rather than stacking.
