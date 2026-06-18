@@ -112,3 +112,12 @@ test('Trading RADAR diagnostics and matrix expose coverage counts and readable s
   assert.match(terminalJs, /_fleetRadarV1BlockedBy\(watchNowCandidates\[0\]\)/);
   assert.doesNotMatch(terminalJs, /watchNowCandidates\[0\]\.blockedBy/);
 });
+
+
+test('Matrix Status column correctly prioritizes v1Status over status (fallback WATCH)', () => {
+  const match = terminalJs.match(/function _fleetRadarV1Status\(c\) \{([\s\S]*?)\}/);
+  assert.ok(match, '_fleetRadarV1Status must be defined');
+  const helper = new Function('c', match[1]);
+  assert.equal(helper({ v1Status: 'DISLOCATION_CONFIRMED', status: 'WATCH' }), 'DISLOCATION_CONFIRMED');
+  assert.equal(helper({}), 'WATCH');
+});

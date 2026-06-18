@@ -7180,7 +7180,7 @@ function _fleetRadarMicroDiag(microProv, candidate) {
 }
 
 function _fleetRadarV1Status(c) {
-  return (c && (c.v1Status || c.STATUS || c.status || c.actionability)) || '--';
+  return (c && (c.v1Status || c.STATUS || c.status)) || 'WATCH';
 }
 
 function _fleetRadarV1Action(c) {
