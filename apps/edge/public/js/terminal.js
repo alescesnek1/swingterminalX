@@ -7179,6 +7179,22 @@ function _fleetRadarMicroDiag(microProv, candidate) {
   return { provider, providerStatus, trusted, untrusted, providerLabel, staticLabel, staticCls, absorbBlocked };
 }
 
+function _fleetRadarV1Status(c) {
+  return (c && (c.v1Status || c.STATUS || c.status || c.actionability)) || '--';
+}
+
+function _fleetRadarV1Action(c) {
+  return (c && (c.v1Action || c.ACTION || c.nextRequiredConfirmation)) || '--';
+}
+
+function _fleetRadarV1BlockedBy(c) {
+  if (!c) return '--';
+  const v1 = c.v1BlockedBy || c.BLOCKED_BY || c.blockedBy;
+  if (v1 && !/^requires structural reclaim$/i.test(String(v1))) return v1;
+  if (c.STATUS && c.ACTION) return c.ACTION;
+  return v1 || c.ACTION || c.nextRequiredConfirmation || '--';
+}
+
 function _renderTradingRadar(radar, esc) {
   radar = radar || {};
   const allCandidates = Array.isArray(radar.candidates) ? radar.candidates : [];
@@ -7252,9 +7268,11 @@ function _renderTradingRadar(radar, esc) {
 
   const matrixHtml = rowsToRender.length ? rowsToRender.map(c => {
     const cl = c.conditionChecklist || {};
+    const v1Status = _fleetRadarV1Status(c);
+    const v1BlockedBy = _fleetRadarV1BlockedBy(c);
     return `<tr class="radar-matrix-row ${c.actionability === 'ENTRY_READY' ? 'radar-matrix-row--ready' : ''}" onclick="window._radarSelect('${esc(c.symbol)}')">
       <td><b>${esc(c.symbol)}</b></td>
-      <td><span class="${_fleetRadarBadgeClass(c.STATUS || c.actionability)}">${esc(c.STATUS || c.actionability)}</span></td>
+      <td><span class="${_fleetRadarBadgeClass(v1Status)}">${esc(v1Status)}</span></td>
       <td>${(() => { const f = formatSafetyLabel(c.safetyStatus, c.safetyReason, c.safetySource, c.chain, c.contractAddress, c.safetyBasis); return `<span class="safety-pill ${f.cssClass}" title="${esc(f.tooltip)}">${esc(f.labelShort)}</span>`; })()}</td>
       <td>${esc(_fleetFmtRadarValue(c.distanceToEntryReadyScore, 0))}</td>
       <td><b class="${_fleetRadarScoreClass(c.SETUP_SCORE ?? c.setupQualityScore)}">${esc(_fleetFmtRadarValue(c.SETUP_SCORE ?? c.setupQualityScore, 0))}</b></td>
@@ -7267,9 +7285,9 @@ function _renderTradingRadar(radar, esc) {
       <td>${pillStatus((cl.squeezeOrReclaim || {}).status)}</td>
       <td>${pillStatus((cl.marketRegime || {}).status)}</td>
       <td>${esc((cl.entryVariant || {}).type || '--')}</td>
-      <td class="radar-zone-td">${esc(zoneText(c.entryZone))}</td>
-      <td class="radar-zone-td">${esc(_fleetFmtRadarPrice(c.suggestedStop))}</td>
-      <td class="radar-blocked-by">${esc(c.blockedBy || '--')}</td>
+      <td class="radar-zone-td">${esc(zoneText(c.ENTRY_ZONE || c.entryZone))}</td>
+      <td class="radar-zone-td">${esc(_fleetFmtRadarPrice(c.STOP_LOSS_LEVEL ?? c.suggestedStop))}</td>
+      <td class="radar-blocked-by">${esc(v1BlockedBy)}</td>
       <td class="radar-telegram-td">${c.telegramEligible ? '<span class="radar-telegram-ready">ready</span>' : '<span class="radar-telegram-no">no</span>'}</td>
     </tr>`;
   }).join('') : `<tr><td colspan="18" class="fleet-empty">No candidates match current filter.</td></tr>`;
@@ -7312,17 +7330,18 @@ function _renderTradingRadar(radar, esc) {
         .slice(0, 3) 
     : [];
   const commonBlocker = watchNowCandidates.length === 3
-    && watchNowCandidates.every(c => (c.blockedBy || '') === (watchNowCandidates[0].blockedBy || ''))
-    ? watchNowCandidates[0].blockedBy
+    && watchNowCandidates.every(c => _fleetRadarV1BlockedBy(c) === _fleetRadarV1BlockedBy(watchNowCandidates[0]))
+    ? _fleetRadarV1BlockedBy(watchNowCandidates[0])
     : null;
 
   const watchNowHtml = watchNowCandidates.length ? watchNowCandidates.map(c => {
-    const v1Status = c.STATUS || c.actionability || '--';
-    const v1Action = c.ACTION || c.nextRequiredConfirmation || '--';
+    const v1Status = _fleetRadarV1Status(c);
+    const v1Action = _fleetRadarV1Action(c);
+    const v1BlockedBy = _fleetRadarV1BlockedBy(c);
     return `<div class="radar-watch-card" onclick="window._radarSelect('${esc(c.symbol)}')">
       <div class="radar-watch-card__head"><b>${esc(c.symbol)}</b> <span class="${_fleetRadarBadgeClass(v1Status)}">${esc(v1Status)}</span></div>
       <div class="radar-watch-card__metrics"><span>dist ${esc(_fleetFmtRadarValue(c.distanceToEntryReadyScore, 0))}</span><span>score ${esc(_fleetFmtRadarValue(c.setupQualityScore, 0))}</span><span>conf ${esc(_fleetFmtRadarValue(c.confidence, 0))}</span></div>
-      <div class="radar-watch-card__blocker"><b>Blocked by:</b> ${esc(c.blockedBy || '--')}</div>
+      <div class="radar-watch-card__blocker"><b>Blocked by:</b> ${esc(v1BlockedBy)}</div>
       <div class="radar-watch-card__conf"><b>Action:</b> ${esc(v1Action)}</div>
       ${(c.ENTRY_ZONE || c.entryZone) ? `<div class="radar-watch-card__zone">Zone: ${esc(zoneText(c.ENTRY_ZONE || c.entryZone))}</div>` : ''}
     </div>`;
@@ -7331,7 +7350,9 @@ function _renderTradingRadar(radar, esc) {
   // Focus Candidate
   let focusHtml = '';
   if (selected) {
-    const actLabel = selected.STATUS || (selected.actionability === 'ENTRY_READY' ? 'ENTRY READY' : 
+    const selectedV1Status = _fleetRadarV1Status(selected);
+    const selectedV1BlockedBy = _fleetRadarV1BlockedBy(selected);
+    const actLabel = selectedV1Status !== '--' ? selectedV1Status : (selected.actionability === 'ENTRY_READY' ? 'ENTRY READY' : 
                      selected.actionability === 'NEAR_ENTRY' ? 'NEAR ENTRY - WAITING FOR CONFIRMATION' :
                      selected.actionability === 'INVALIDATED' ? 'INVALIDATED' : 'NOT ACTIONABLE YET');
     
@@ -7353,10 +7374,10 @@ function _renderTradingRadar(radar, esc) {
     const absorbBlocked = microDiag.absorbBlocked;
 
     focusHtml = `<div class="radar-focus-card">
-      <div class="radar-focus-title"><b>${esc(selected.symbol || '--')}</b> <span class="${_fleetRadarBadgeClass(selected.STATUS || selected.actionability)}">${actLabel}</span></div>
-      <div class="radar-focus-blocked"><span>Status</span><b>${esc(selected.STATUS || '--')}</b></div>
-      <div class="radar-focus-blocked"><span>Action</span><b>${esc(selected.ACTION || '--')}</b></div>
-      <div class="radar-focus-blocked"><span>Blocked by</span><b>${esc(selected.blockedBy || 'none')}</b></div>
+      <div class="radar-focus-title"><b>${esc(selected.symbol || '--')}</b> <span class="${_fleetRadarBadgeClass(selectedV1Status)}">${actLabel}</span></div>
+      <div class="radar-focus-blocked"><span>Status</span><b>${esc(selectedV1Status)}</b></div>
+      <div class="radar-focus-blocked"><span>Action</span><b>${esc(_fleetRadarV1Action(selected))}</b></div>
+      <div class="radar-focus-blocked"><span>Blocked by</span><b>${esc(selectedV1BlockedBy === '--' ? 'none' : selectedV1BlockedBy)}</b></div>
       <div class="radar-focus-levels">
         <div><span>Entry type</span><b>${esc(selected.ENTRY_TYPE || selected.entryType || 'NONE')}</b></div>
         <div><span>Setup</span><b>${esc(_fleetFmtRadarValue(selected.SETUP_SCORE, 0))}</b></div>

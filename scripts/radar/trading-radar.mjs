@@ -1539,6 +1539,10 @@ export function evaluateTradingRadar({
         contractAddress: safety.contractAddress,
         safetySource: safety.metadataSource || safety.source,
         ...v1,
+        v1Status: v1.STATUS,
+        v1Action: v1.ACTION,
+        v1BlockedBy: v1.BLOCKED_BY,
+        v1NextConfirmation: v1.NEXT_CONFIRMATION,
         reasons: stageInfo.reasons,
         riskFlags: compactReasons([
           ...(stageInfo.riskFlags || []),

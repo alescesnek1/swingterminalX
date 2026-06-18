@@ -37,6 +37,15 @@ const EARLY_REVERSAL = {
   ...SAFE_META,
 };
 
+const DISLOCATION_ONLY = {
+  symbol: 'DISCUSDT', baseAsset: 'DISC', quoteAsset: 'USDT', status: 'TRADING',
+  quoteVolume24h: 250e6, bidPrice: 100, askPrice: 100.04, spreadPct: 0.03,
+  change24hPct: -15, change12hPct: -6, change4hPct: -1, change1hPct: -0.5,
+  btcRelativeChangePct: -4, volumeSpike: 1.1, atrPct: 4, wickRecoveryPct: 10,
+  nearestSupply: 108, nextSupply: 114, meanReversionTarget: 120,
+  ...SAFE_META,
+};
+
 const FULL_MICRO_ENTRY = {
   ...EARLY_REVERSAL,
   symbol: 'FULLUSDT',
@@ -172,6 +181,15 @@ test('D2: candidate serialization exposes V1 STATUS instead of generic WATCH on 
   assert.equal(c.STATUS, 'RISK_OFF_BLOCKED');
   assert.notEqual(c.STATUS, 'WATCH');
   assert.match(c.blockedBy, /market regime/i);
+});
+
+test('D3: DISLOCATION_CONFIRMED serializes V1 matrix status and blocker, not legacy WATCH/reclaim text', () => {
+  const c = candidate([DISLOCATION_ONLY], 'DISCUSDT');
+  assert.equal(c.STATUS, 'DISLOCATION_CONFIRMED');
+  assert.equal(c.v1Status, 'DISLOCATION_CONFIRMED');
+  assert.notEqual(c.STATUS, 'WATCH');
+  assert.match(c.blockedBy, /waiting for long flush confirmation/i);
+  assert.doesNotMatch(c.blockedBy, /requires structural reclaim/i);
 });
 
 test('E: missing microstructure lowers confidence and blocks aggressive entry without collapsing setup states', () => {

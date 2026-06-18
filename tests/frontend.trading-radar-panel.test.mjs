@@ -82,11 +82,14 @@ test('Trading RADAR focus panel surfaces microstructure blocking diagnostics', (
 });
 
 test('Trading RADAR UI surfaces V1 status/action and structured output fields', () => {
-  assert.match(terminalJs, /const v1Status = c\.STATUS \|\| c\.actionability/);
-  assert.match(terminalJs, /const v1Action = c\.ACTION \|\| c\.nextRequiredConfirmation/);
+  assert.match(terminalJs, /function _fleetRadarV1Status\(c\)/);
+  assert.match(terminalJs, /function _fleetRadarV1BlockedBy\(c\)/);
+  assert.match(terminalJs, /const v1Status = _fleetRadarV1Status\(c\)/);
+  assert.match(terminalJs, /const v1Action = _fleetRadarV1Action\(c\)/);
   assert.match(terminalJs, /_fleetRadarBadgeClass\(v1Status\)/);
-  assert.match(terminalJs, /<span>Status<\/span><b>\$\{esc\(selected\.STATUS/);
-  assert.match(terminalJs, /<span>Action<\/span><b>\$\{esc\(selected\.ACTION/);
+  assert.match(terminalJs, /const selectedV1Status = _fleetRadarV1Status\(selected\)/);
+  assert.match(terminalJs, /<span>Status<\/span><b>\$\{esc\(selectedV1Status\)/);
+  assert.match(terminalJs, /<span>Action<\/span><b>\$\{esc\(_fleetRadarV1Action\(selected\)\)/);
   assert.match(terminalJs, /<span>Entry type<\/span><b>\$\{esc\(selected\.ENTRY_TYPE/);
   assert.match(terminalJs, /POSITION_SIZE_GUIDANCE/);
   assert.match(terminalJs, /<span>Hard invalidation<\/span>/);
@@ -106,4 +109,6 @@ test('Trading RADAR diagnostics and matrix expose coverage counts and readable s
   assert.match(terminalJs, /radar-telegram-ready/);
   assert.match(terminalJs, /radar-telegram-no/);
   assert.match(terminalJs, /Current market blocker/);
+  assert.match(terminalJs, /_fleetRadarV1BlockedBy\(watchNowCandidates\[0\]\)/);
+  assert.doesNotMatch(terminalJs, /watchNowCandidates\[0\]\.blockedBy/);
 });
