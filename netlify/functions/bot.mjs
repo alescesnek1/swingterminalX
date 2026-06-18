@@ -2915,6 +2915,7 @@ async function handleFleetWorker(req, base, body) {
           openPositions: [], openPositionsCount: 0,
           commandsForThisSession: [], ignoredCommandsForOtherSessionsCount: 0,
           sessionId, workerId: bodyWorkerId(req, body), commandSessionId: sessionId,
+          radarCandidates: (fleet.radarContext && Array.isArray(fleet.radarContext.scannerCandidates)) ? fleet.radarContext.scannerCandidates.slice(0, 50) : [],
         });
       }
     }
