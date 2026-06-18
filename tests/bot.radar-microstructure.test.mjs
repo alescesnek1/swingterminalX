@@ -53,12 +53,18 @@ test('enrichRadarCandidatesMicrostructure fetches and skips unsupported', async 
 
 import botHandler from '../netlify/functions/bot.mjs';
 
-const mockEvent = (path, method, body, headers = {}) => ({
-  path,
-  httpMethod: method,
-  headers,
-  body: typeof body === 'string' ? body : JSON.stringify(body),
-});
+const mockEvent = (path, method, body, headers = {}) => {
+  const lowerHeaders = Object.keys(headers).reduce((acc, k) => { acc[k.toLowerCase()] = headers[k]; return acc; }, {});
+  return {
+    path,
+    httpMethod: method,
+    headers: {
+      ...headers,
+      get: (k) => lowerHeaders[k.toLowerCase()] || null
+    },
+    body: typeof body === 'string' ? body : JSON.stringify(body),
+  };
+};
 
 test('radar-context preserves metadata and caps at 500', async () => {
   // requires BOT_OWNER_KEY
@@ -138,4 +144,21 @@ test('radar microstructure lookup tries multiple safe candidate keys and ignores
   assert.ok(beat, 'candidate exists');
   assert.strictEqual(beat.orderBookDepthWithin1Pct, 8888, 'data was merged using BEATUSDT fallback key');
   assert.ok(!wJson.radarCandidates.some(c => c.orderBookDepthWithin1Pct === 'ALPHA_451USDT'), 'alpha pair should not be used');
+});
+
+
+test('handler does not crash when req.url is missing', async () => {
+  const req = mockEvent('/api/bot/state', 'GET', null);
+  const res = await botHandler(req);
+  assert.ok(res.statusCode || res.status);
+});
+
+test('unauthorized access to radar-microstructure and radar-debug is blocked', async () => {
+  const reqMicro = mockEvent('/api/bot/radar-microstructure', 'POST', { workerId: 'worker1', data: {} });
+  const resMicro = await botHandler(reqMicro);
+  assert.strictEqual(resMicro.statusCode || resMicro.status, 403);
+
+  const reqDebug = mockEvent('/api/bot/radar-debug', 'GET', null);
+  const resDebug = await botHandler(reqDebug);
+  assert.strictEqual(resDebug.statusCode || resDebug.status, 403);
 });

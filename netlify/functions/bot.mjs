@@ -1010,8 +1010,15 @@ async function runDryRunScanFromMarkets(markets) {
 }
 
 function routeName(req) {
-  const url = new URL(req.url);
-  return url.pathname.replace(/^\/api\/bot\/?/, '') || 'state';
+  if (!req) return 'state';
+  const u = req.url || req.path || '';
+  try {
+    const url = new URL(u, 'http://localhost');
+    const route = url.pathname.replace(/^\/api\/bot\/?/, '').replace(/^\//, '');
+    return route || 'state';
+  } catch (err) {
+    return 'state';
+  }
 }
 
 function blockTestnetOrder(req, auth, reason, extra = {}) {
