@@ -33,17 +33,20 @@ test('enrichRadarCandidatesMicrostructure fetches and skips unsupported', async 
   });
 
   const candidates = [
-    { pair: 'BEAT', futures_pair: 'BEATUSDT' },
-    { pair: 'SOL', spot_pair: 'SOLUSDT' },
-    { pair: 'INVALID' }
+    { pair: 'BEAT', futures_pair: 'BEATUSDT' },      // futures_pair resolves
+    { pair: 'SOLUSDT', symbol: 'SOLUSDT' },           // pair already a valid fapi symbol
+    { pair: 'INVALID' }                               // no valid fapi symbol -> skipped safely
   ];
 
   const map = await enrichRadarCandidatesMicrostructure(candidates, { config: cfg, fetchImpl: mockFetch });
-  
+
+  // Valid symbols are measured; the invalid one is skipped (never coerced to
+  // a fabricated INVALIDUSDT) — strict /^[A-Z0-9]{2,30}(USDT|USDC)$/ resolution.
   assert.ok(map['BEATUSDT']);
   assert.ok(map['SOLUSDT']);
-  assert.ok(map['INVALIDUSDT']);
-  
+  assert.strictEqual(map['INVALIDUSDT'], undefined);
+  assert.strictEqual(map['INVALID'], undefined);
+
   assert.ok(typeof map['BEATUSDT'].orderBookDepthWithin1Pct === 'number');
   assert.ok(typeof map['BEATUSDT'].depthUsdWithin1Pct === 'number');
 });

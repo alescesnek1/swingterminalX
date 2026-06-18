@@ -317,6 +317,58 @@ export function radarMicrostructureConfigFromEnv(env = {}) {
   return { enabled, topN, cacheMs };
 }
 
+// A public-fapi perp symbol is 2..30 alphanumerics ending in a stablecoin
+// quote. Contract addresses (too long, no stable suffix), alpha pairs, and
+// slash/colon/spaced forms are all rejected here.
+const FAPI_SYMBOL_RE = /^[A-Z0-9]{2,30}(USDT|USDC)$/;
+
+// Normalize ONE raw candidate string into a safe fapi symbol, or null.
+//   • uppercase; strip only slash/underscore/hyphen separators
+//   • reject anything containing ALPHA, ':' or whitespace (never an fapi symbol)
+//   • must match FAPI_SYMBOL_RE after normalization
+// Never coerces — an unmatchable input returns null (caller skips).
+export function normalizeFapiSymbolCandidate(raw) {
+  if (typeof raw !== 'string') return null;
+  let s = raw.trim().toUpperCase();
+  if (!s) return null;
+  if (s.includes('ALPHA')) return null;            // never use an alpha pair
+  if (s.includes(':') || /\s/.test(s)) return null; // contract-address / spaced forms
+  s = s.replace(/[/_-]/g, '');                       // strip separators only
+  if (!FAPI_SYMBOL_RE.test(s)) return null;
+  return s;
+}
+
+// Resolve the best public-fapi symbol for a RADAR candidate, in strict priority
+// order. Pure / no network — the FINAL truth still comes from a successful
+// public fapi depth/premiumIndex call. Returns { fapiSymbol, source, skipReason }.
+//
+// Priority: futures_pair → futuresPair → pair → symbol → `${base}USDT`
+// (last resort only when base exists and quote is USDT or missing).
+// alphaPair, chain, and contractAddress are NEVER read.
+export function resolveFapiSymbolForCandidate(candidate) {
+  if (!candidate || typeof candidate !== 'object') {
+    return { fapiSymbol: null, source: null, skipReason: 'no-candidate' };
+  }
+  const ordered = [
+    ['futures_pair', candidate.futures_pair],
+    ['futuresPair', candidate.futuresPair],
+    ['pair', candidate.pair],
+    ['symbol', candidate.symbol],
+  ];
+  for (const [source, raw] of ordered) {
+    const sym = normalizeFapiSymbolCandidate(raw);
+    if (sym) return { fapiSymbol: sym, source, skipReason: null };
+  }
+  // Last resort: `${base}USDT`, only when base exists and quote is USDT or absent.
+  const base = typeof candidate.base === 'string' ? candidate.base.trim().toUpperCase() : '';
+  const quote = typeof candidate.quote === 'string' ? candidate.quote.trim().toUpperCase() : '';
+  if (base && (quote === 'USDT' || quote === '')) {
+    const sym = normalizeFapiSymbolCandidate(`${base}USDT`);
+    if (sym) return { fapiSymbol: sym, source: 'base+USDT', skipReason: null };
+  }
+  return { fapiSymbol: null, source: null, skipReason: 'no-valid-fapi-symbol' };
+}
+
 export async function enrichRadarCandidatesMicrostructure(candidates, opts = {}) {
   const config = opts.config || radarMicrostructureConfigFromEnv(opts.env || {});
   const fetchImpl = opts.fetchImpl || globalThis.fetch;
@@ -326,82 +378,112 @@ export async function enrichRadarCandidatesMicrostructure(candidates, opts = {})
   const now = typeof opts.now === 'function' ? opts.now : Date.now;
   const cache = opts.cache instanceof Map ? opts.cache : null;
 
+  // Optional structured diagnostics. When an object is supplied we populate
+  // counts + a per-candidate trail (symbol info, derived fapiSymbol, skip
+  // reason, measured y/n). Never contains tokens/headers/response bodies.
+  const diag = opts.diagnostics && typeof opts.diagnostics === 'object' ? opts.diagnostics : null;
+  if (diag) {
+    diag.candidatesReceived = Array.isArray(candidates) ? candidates.length : 0;
+    diag.candidatesSelected = 0;
+    diag.attempted = 0;
+    diag.measured = 0;
+    diag.skippedNoFapiSymbol = 0;
+    diag.failedFetch = 0;
+    if (!Array.isArray(diag.perCandidate)) diag.perCandidate = [];
+  }
+  const recordDiag = (rec) => { if (diag) diag.perCandidate.push(rec); };
+
   if (!config.enabled || !Array.isArray(candidates) || candidates.length === 0) {
     return {};
   }
 
   const targets = candidates.slice(0, config.topN);
+  if (diag) diag.candidatesSelected = targets.length;
   const microMap = {};
 
   for (const c of targets) {
     if (!c || typeof c !== 'object') continue;
-    const rawSymbol = String(c.pair || c.symbol || c.base || '').trim().toUpperCase();
-    if (!rawSymbol) continue;
-    const compact = rawSymbol.replace(/[^A-Z0-9]/g, '');
-    let normalized = compact;
-    if (!normalized.endsWith('USDT') && !normalized.endsWith('USDC')) {
-      const q = String(c.quote || '').toUpperCase();
-      normalized += (q === 'USDT' || q === 'USDC' ? q : 'USDT');
+    const { fapiSymbol, source, skipReason } = resolveFapiSymbolForCandidate(c);
+    const baseRec = {
+      symbol: c.symbol ?? null,
+      base: c.base ?? null,
+      pair: c.pair ?? null,
+      futures_pair: c.futures_pair ?? null,
+      quote: c.quote ?? null,
+      binance_market: c.binance_market ?? null,
+      fapiSymbol: fapiSymbol || null,
+      source: source || null,
+    };
+
+    if (!fapiSymbol) {
+      if (diag) diag.skippedNoFapiSymbol += 1;
+      recordDiag({ ...baseRec, measured: false, skipReason: skipReason || 'no-valid-fapi-symbol' });
+      continue;
     }
 
-    let isFutures = false;
-    let targetPair = null;
-    if (c.futures_pair || c.futuresPair || c.binance_market === 'futures') {
-       isFutures = true;
-       targetPair = c.futures_pair || c.futuresPair || c.pair || normalized;
-    } else if (c.spot_pair || c.spotPair || c.binance_market === 'spot') {
-       isFutures = false;
-       targetPair = c.spot_pair || c.spotPair || c.pair || normalized;
-    } else {
-       isFutures = false;
-       targetPair = c.pair || normalized;
-    }
-
+    // Cache hit (within TTL) short-circuits any fetch for this symbol.
     if (cache) {
-      const hit = cache.get(normalized);
+      const hit = cache.get(fapiSymbol);
       if (hit && now() - hit.at <= config.cacheMs) {
-        if (hit.fields && Object.keys(hit.fields).length) microMap[normalized] = hit.fields;
+        const cached = hit.fields && Object.keys(hit.fields).length ? hit.fields : null;
+        if (cached) { microMap[fapiSymbol] = cached; if (diag) diag.measured += 1; }
+        recordDiag({ ...baseRec, measured: !!cached, skipReason: cached ? null : 'no-data-cached', venue: 'cache' });
         continue;
       }
     }
 
+    if (diag) diag.attempted += 1;
     const fields = {};
-    if (isFutures) {
-       try {
-         const url = `${futBase}/fapi/v1/depth?symbol=${encodeURIComponent(targetPair)}&limit=${DEPTH_LIMIT}`;
-         const book = await getJson(url, { allowed: FUTURES_HOSTS, timeoutMs, fetchImpl });
-         const depth = computeDepthWithin1Pct(book);
-         if (depth) {
-           fields.orderBookDepthWithin1Pct = depth.orderBookDepthWithin1Pct;
-           fields.depthUsdWithin1Pct = depth.depthUsdWithin1Pct;
-           if (Number.isFinite(depth.spreadPct)) fields.spreadPct = depth.spreadPct;
-         }
-       } catch (err) {}
-       
-       if (targetPair.endsWith('USDT')) {
-         try {
-           const url = `${futBase}/fapi/v1/premiumIndex?symbol=${encodeURIComponent(targetPair)}`;
-           const prem = await getJson(url, { allowed: FUTURES_HOSTS, timeoutMs, fetchImpl });
-           const funding = fundingRateFromPremiumIndex(prem);
-           if (funding != null) fields.fundingRate = funding;
-         } catch (err) {}
-       }
-    } else {
-       try {
-         const url = `${spotBase}/api/v3/depth?symbol=${encodeURIComponent(targetPair)}&limit=${DEPTH_LIMIT}`;
-         const book = await getJson(url, { allowed: SPOT_HOSTS, timeoutMs, fetchImpl });
-         const depth = computeDepthWithin1Pct(book);
-         if (depth) {
-           fields.orderBookDepthWithin1Pct = depth.orderBookDepthWithin1Pct;
-           fields.depthUsdWithin1Pct = depth.depthUsdWithin1Pct;
-           if (Number.isFinite(depth.spreadPct)) fields.spreadPct = depth.spreadPct;
-         }
-       } catch (err) {}
+    let venue = null;
+
+    // 1) Futures order-book depth (public fapi). fapi is the source of truth.
+    try {
+      const url = `${futBase}/fapi/v1/depth?symbol=${encodeURIComponent(fapiSymbol)}&limit=${DEPTH_LIMIT}`;
+      const book = await getJson(url, { allowed: FUTURES_HOSTS, timeoutMs, fetchImpl });
+      const depth = computeDepthWithin1Pct(book);
+      if (depth) {
+        fields.orderBookDepthWithin1Pct = depth.orderBookDepthWithin1Pct;
+        fields.depthUsdWithin1Pct = depth.depthUsdWithin1Pct;
+        if (Number.isFinite(depth.spreadPct)) fields.spreadPct = depth.spreadPct;
+        venue = 'futures';
+      }
+    } catch (err) {}
+
+    // 2) Futures funding rate (public premiumIndex), USDT-perp only.
+    if (fapiSymbol.endsWith('USDT')) {
+      try {
+        const url = `${futBase}/fapi/v1/premiumIndex?symbol=${encodeURIComponent(fapiSymbol)}`;
+        const prem = await getJson(url, { allowed: FUTURES_HOSTS, timeoutMs, fetchImpl });
+        const funding = fundingRateFromPremiumIndex(prem);
+        if (funding != null) { fields.fundingRate = funding; if (!venue) venue = 'futures'; }
+      } catch (err) {}
     }
 
-    if (cache) cache.set(normalized, { at: now(), fields });
+    // 3) Spot depth fallback — ONLY when futures produced no order-book fields
+    //    (e.g. a spot-listed symbol that has no perp). Still public, read-only.
+    if (fields.orderBookDepthWithin1Pct == null) {
+      try {
+        const url = `${spotBase}/api/v3/depth?symbol=${encodeURIComponent(fapiSymbol)}&limit=${DEPTH_LIMIT}`;
+        const book = await getJson(url, { allowed: SPOT_HOSTS, timeoutMs, fetchImpl });
+        const depth = computeDepthWithin1Pct(book);
+        if (depth) {
+          fields.orderBookDepthWithin1Pct = depth.orderBookDepthWithin1Pct;
+          fields.depthUsdWithin1Pct = depth.depthUsdWithin1Pct;
+          if (Number.isFinite(depth.spreadPct)) fields.spreadPct = depth.spreadPct;
+          if (!venue) venue = 'spot';
+        }
+      } catch (err) {}
+    }
+
+    if (cache) cache.set(fapiSymbol, { at: now(), fields });
+
     if (Object.keys(fields).length) {
-      microMap[normalized] = fields;
+      microMap[fapiSymbol] = fields;
+      if (diag) diag.measured += 1;
+      recordDiag({ ...baseRec, measured: true, skipReason: null, venue: venue || 'futures' });
+    } else {
+      if (diag) diag.failedFetch += 1;
+      recordDiag({ ...baseRec, measured: false, skipReason: 'fapi-no-data', venue: null });
     }
   }
 

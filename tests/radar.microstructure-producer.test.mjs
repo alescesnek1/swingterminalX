@@ -5,6 +5,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { main } from '../scripts/radar/radar-microstructure-producer.mjs';
+import {
+  resolveFapiSymbolForCandidate,
+  normalizeFapiSymbolCandidate,
+  enrichRadarCandidatesMicrostructure,
+} from '../scripts/auto/microstructure-enrichment.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -106,6 +111,161 @@ test('candidates -> BEATUSDT map posts static fields', async () => {
     
   } finally {
     globalThis.fetch = realFetch;
+    process.env = oldEnv;
+  }
+});
+
+// ── fapi symbol resolver ─────────────────────────────────────────────────────
+
+test('resolver: BEATUSDT candidate with futures_pair:null still resolves to BEATUSDT', () => {
+  const c = { symbol: 'BEATUSDT', base: 'BEAT', pair: 'BEATUSDT', futures_pair: null, spot_pair: null, alphaPair: null, quote: 'USDT' };
+  const r = resolveFapiSymbolForCandidate(c);
+  assert.strictEqual(r.fapiSymbol, 'BEATUSDT');
+  assert.strictEqual(r.skipReason, null);
+  // pair is checked before symbol; either is the valid source here.
+  assert.ok(['pair', 'symbol'].includes(r.source));
+});
+
+test('resolver: futures_pair wins over pair/symbol when present', () => {
+  const r = resolveFapiSymbolForCandidate({ pair: 'BEAT', futures_pair: 'BEATUSDT', symbol: 'BEAT' });
+  assert.strictEqual(r.fapiSymbol, 'BEATUSDT');
+  assert.strictEqual(r.source, 'futures_pair');
+});
+
+test('resolver: alphaPair is NEVER used as an fapi symbol', () => {
+  const r = resolveFapiSymbolForCandidate({ base: null, pair: null, symbol: null, futures_pair: null, alphaPair: 'FOOUSDT' });
+  assert.strictEqual(r.fapiSymbol, null);
+  assert.strictEqual(r.skipReason, 'no-valid-fapi-symbol');
+});
+
+test('resolver: contractAddress / chain are never read; symbol still wins', () => {
+  const r = resolveFapiSymbolForCandidate({ symbol: 'BTCUSDT', contractAddress: '0xabcdef0123456789', chain: 'eth' });
+  assert.strictEqual(r.fapiSymbol, 'BTCUSDT');
+});
+
+test('resolver: `${base}USDT` last resort only when base set and quote USDT/missing', () => {
+  assert.strictEqual(resolveFapiSymbolForCandidate({ base: 'BEAT', quote: 'USDT' }).fapiSymbol, 'BEATUSDT');
+  assert.strictEqual(resolveFapiSymbolForCandidate({ base: 'BEAT' }).fapiSymbol, 'BEATUSDT'); // quote missing
+  assert.strictEqual(resolveFapiSymbolForCandidate({ base: 'BEAT', quote: 'BTC' }).fapiSymbol, null); // non-stable quote
+});
+
+test('resolver: invalid/spot-only shapes are skipped safely (no coercion)', () => {
+  for (const c of [
+    { pair: 'BTC-PERP' },              // strips '-' -> BTCPERP, no stable suffix
+    { symbol: '0xABCDEF0123456789ABCDEF0123456789ABCDEF01' }, // contract address
+    { pair: 'BTC:USDT' },              // colon form rejected
+    { pair: 'ALPHAUSDT' },             // contains ALPHA
+    { pair: 'BTC USDT' },              // whitespace rejected
+    { pair: 'X' },                     // too short / no quote
+    {},                                // nothing usable
+  ]) {
+    assert.strictEqual(resolveFapiSymbolForCandidate(c).fapiSymbol, null, JSON.stringify(c));
+  }
+});
+
+test('normalizeFapiSymbolCandidate: strips separators, enforces stable suffix', () => {
+  assert.strictEqual(normalizeFapiSymbolCandidate('beat/usdt'), 'BEATUSDT');
+  assert.strictEqual(normalizeFapiSymbolCandidate('BEAT_USDT'), 'BEATUSDT');
+  assert.strictEqual(normalizeFapiSymbolCandidate('BTCUSDC'), 'BTCUSDC');
+  assert.strictEqual(normalizeFapiSymbolCandidate('BTCETH'), null);
+  assert.strictEqual(normalizeFapiSymbolCandidate('ALPHAUSDT'), null);
+});
+
+// ── enrichment with the resolver + diagnostics ──────────────────────────────
+
+test('enrich: BEATUSDT (futures_pair:null) is measured on fapi, with diagnostics', async () => {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    calls.push(u);
+    if (u.includes('/fapi/v1/depth')) return jsonResponse({ bids: [['1.0', '100']], asks: [['1.01', '100']] });
+    if (u.includes('/fapi/v1/premiumIndex')) return jsonResponse({ lastFundingRate: '0.0001' });
+    if (u.includes('/api/v3/depth')) return jsonResponse({ bids: [], asks: [] }); // spot has none
+    return jsonResponse({}, 400);
+  };
+
+  const diagnostics = { perCandidate: [] };
+  const data = await enrichRadarCandidatesMicrostructure(
+    [{ symbol: 'BEATUSDT', base: 'BEAT', pair: 'BEATUSDT', futures_pair: null, spot_pair: null, quote: 'USDT' }],
+    { config: { enabled: true, topN: 5, cacheMs: 10000 }, fetchImpl, now: Date.now, diagnostics }
+  );
+
+  assert.ok(data['BEATUSDT'], 'BEATUSDT measured');
+  assert.strictEqual(data['BEATUSDT'].orderBookDepthWithin1Pct, 200);
+  assert.strictEqual(data['BEATUSDT'].fundingRate, 0.0001);
+  // It must hit fapi (not rely on spot) for the order book.
+  assert.ok(calls.some((u) => u.includes('/fapi/v1/depth')));
+
+  assert.strictEqual(diagnostics.candidatesReceived, 1);
+  assert.strictEqual(diagnostics.candidatesSelected, 1);
+  assert.strictEqual(diagnostics.attempted, 1);
+  assert.strictEqual(diagnostics.measured, 1);
+  assert.strictEqual(diagnostics.skippedNoFapiSymbol, 0);
+  const rec = diagnostics.perCandidate[0];
+  assert.strictEqual(rec.fapiSymbol, 'BEATUSDT');
+  assert.strictEqual(rec.measured, true);
+});
+
+test('enrich: alphaPair-only candidate is skipped, never fetched as fapi symbol', async () => {
+  const calls = [];
+  const fetchImpl = async (url) => { calls.push(String(url)); return jsonResponse({}, 400); };
+  const diagnostics = { perCandidate: [] };
+  const data = await enrichRadarCandidatesMicrostructure(
+    [{ symbol: null, base: null, pair: null, futures_pair: null, alphaPair: 'FOOUSDT' }],
+    { config: { enabled: true, topN: 5, cacheMs: 10000 }, fetchImpl, now: Date.now, diagnostics }
+  );
+  assert.deepStrictEqual(data, {});
+  assert.strictEqual(diagnostics.skippedNoFapiSymbol, 1);
+  assert.strictEqual(diagnostics.attempted, 0);
+  assert.ok(!calls.some((u) => u.includes('FOOUSDT')), 'alphaPair must never be fetched');
+});
+
+// ── producer structured logs (no secret leakage) ────────────────────────────
+
+test('producer logs counts + skip reasons and never logs the worker token', async () => {
+  const realFetch = globalThis.fetch;
+  const logs = [];
+  const realLog = console.log;
+  const realErr = console.error;
+  console.log = (...a) => logs.push(a.join(' '));
+  console.error = (...a) => logs.push(a.join(' '));
+
+  const TOKEN = 'super-secret-worker-token-DO-NOT-LOG';
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('/api/bot/radar-candidates')) {
+      return jsonResponse({ ok: true, radarCandidates: [
+        { symbol: 'BEATUSDT', base: 'BEAT', pair: 'BEATUSDT', futures_pair: null, spot_pair: null, quote: 'USDT' },
+        { symbol: null, base: null, pair: null, futures_pair: null, alphaPair: 'FOOUSDT' },
+      ] });
+    }
+    if (u.includes('/fapi/v1/depth')) return jsonResponse({ bids: [['1.0', '100']], asks: [['1.01', '100']] });
+    if (u.includes('/fapi/v1/premiumIndex')) return jsonResponse({ lastFundingRate: '0.0001' });
+    if (u.includes('/api/bot/radar-microstructure')) return jsonResponse({ ok: true });
+    return jsonResponse({}, 400);
+  };
+
+  const oldEnv = { ...process.env };
+  process.env.WORKER_RADAR_MICROSTRUCTURE_ENABLED = 'true';
+  process.env.WORKER_RADAR_MICROSTRUCTURE_TOP_N = '5';
+  process.env.BOT_WORKER_TOKEN = TOKEN;
+  process.env.CONTROL_BASE_URL = 'http://localhost';
+
+  try {
+    await main();
+    const text = logs.join('\n');
+    assert.match(text, /candidatesReceived/);
+    assert.match(text, /fapiSymbol=BEATUSDT/);
+    assert.match(text, /measured=yes/);
+    assert.match(text, /skip=no-valid-fapi-symbol/);
+    assert.match(text, /"measured":1/);
+    assert.match(text, /"posted":true/);
+    // Secret must never appear in any log line.
+    assert.ok(!text.includes(TOKEN), 'token must not be logged');
+  } finally {
+    globalThis.fetch = realFetch;
+    console.log = realLog;
+    console.error = realErr;
     process.env = oldEnv;
   }
 });

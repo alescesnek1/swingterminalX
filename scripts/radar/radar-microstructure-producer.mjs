@@ -84,36 +84,72 @@ export async function main() {
   
   async function runCycle() {
     try {
-      // 1. Fetch candidates
+      // 1. Fetch candidates (read-only). A failure here is non-fatal for the
+      //    scheduler — log the reason and exit the cycle cleanly.
       let candidates = [];
       try {
         candidates = await fetchRadarCandidates(controlUrl, token);
       } catch (err) {
-        throw new Error(`radar-candidates fetch failed: ${err.message}`);
-      }
-      
-      if (!candidates.length) {
-        console.log('[PRODUCER] No candidates received.');
+        console.error(`[PRODUCER][ERROR] radar-candidates fetch failed: ${err.message}`);
+        console.log(JSON.stringify({
+          tag: 'radar-microstructure', candidatesReceived: 0, candidatesSelected: 0,
+          attempted: 0, measured: 0, skippedNoFapiSymbol: 0, failedFetch: 0,
+          posted: false, reason: 'candidates-fetch-failed',
+        }));
         return;
       }
 
-      // 2. Enrich
+      // 2. Enrich (fapi-first symbol resolution + public depth/premiumIndex).
+      const diagnostics = { perCandidate: [] };
       const data = await enrichRadarCandidatesMicrostructure(candidates, {
         config,
         env: process.env,
         cache,
         now: Date.now,
+        diagnostics,
       });
-
       const keys = Object.keys(data);
-      if (keys.length === 0) {
-        console.log('[PRODUCER] No microstructure data measured.');
-        return;
+
+      // 2a. Per-candidate safe trail. NEVER logs the token, request headers, or
+      //     any Binance/backend response body — only derived symbol metadata.
+      for (const r of diagnostics.perCandidate) {
+        console.log(
+          `[PRODUCER] candidate symbol=${r.symbol} base=${r.base} pair=${r.pair} ` +
+          `futures_pair=${r.futures_pair} quote=${r.quote} binance_market=${r.binance_market} ` +
+          `-> fapiSymbol=${r.fapiSymbol || 'none'} source=${r.source || 'none'} ` +
+          `measured=${r.measured ? 'yes' : 'no'}${r.skipReason ? ` skip=${r.skipReason}` : ''}`
+        );
       }
 
-      // 3. Post
-      const ok = await postMicrostructure(controlUrl, token, workerId, data);
-      console.log(`[PRODUCER] Posted ${keys.length} metrics ok=${ok}`);
+      // 3. Post only when something was measured. Post failure is non-fatal
+      //    (next tick re-posts) — see docs/radar-microstructure.md exit policy.
+      let posted = false;
+      if (keys.length) {
+        try {
+          posted = await postMicrostructure(controlUrl, token, workerId, data);
+        } catch (err) {
+          console.error(`[PRODUCER][ERROR] post failed: ${err.message}`);
+        }
+      }
+
+      // 4. Structured summary (counts only).
+      console.log(JSON.stringify({
+        tag: 'radar-microstructure',
+        candidatesReceived: diagnostics.candidatesReceived,
+        candidatesSelected: diagnostics.candidatesSelected,
+        attempted: diagnostics.attempted,
+        measured: diagnostics.measured,
+        skippedNoFapiSymbol: diagnostics.skippedNoFapiSymbol,
+        failedFetch: diagnostics.failedFetch,
+        keys: keys.slice(0, 20),
+        posted,
+      }));
+
+      if (!keys.length) {
+        console.log('[PRODUCER] No microstructure data measured.');
+      } else {
+        console.log(`[PRODUCER] Posted ${keys.length} metrics ok=${posted}`);
+      }
     } catch (err) {
       console.error(`[PRODUCER][ERROR] ${err.message}`);
     }
