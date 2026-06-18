@@ -1,0 +1,56 @@
+name: RADAR Static Microstructure Refresh
+
+# Read-only scheduler for the RADAR static microstructure overlay.
+#
+# This workflow is NOT a trading worker. It does not start any local Binance
+# worker, does not open a worker bot session, does not run any live/testnet
+# lifecycle, and never touches Binance signed endpoints.
+#
+# It only:
+#   - GET  /api/bot/radar-candidates          (control plane, read-only)
+#   - GET  public Binance fapi depth/premiumIndex
+#   - POST /api/bot/radar-microstructure      (control plane, static overlay)
+#
+# Static-only data does NOT pass Absorb and does NOT promote a candidate to
+# entry or fire alerts. Those downstream paths remain fail-closed and are
+# unchanged. See docs/radar-microstructure.md.
+
+on:
+  schedule:
+    # Every 10 minutes.
+    - cron: '*/10 * * * *'
+  workflow_dispatch: {}
+
+# Prevent overlapping runs; let an in-flight run finish rather than stacking.
+concurrency:
+  group: radar-microstructure
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    name: Refresh static microstructure
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run read-only static microstructure producer
+        env:
+          # Control-plane auth (GitHub secret; never printed).
+          BOT_WORKER_TOKEN: ${{ secrets.BOT_WORKER_TOKEN }}
+          # Public control-plane base URL.
+          CONTROL_BASE_URL: https://swingterminalx.netlify.app
+          # Producer config (read-only, public Binance only).
+          WORKER_RADAR_MICROSTRUCTURE_ENABLED: 'true'
+          WORKER_RADAR_MICROSTRUCTURE_TOP_N: '5'
+          WORKER_RADAR_MICROSTRUCTURE_CACHE_MS: '10000'
+        run: node scripts/radar/radar-microstructure-producer.mjs
