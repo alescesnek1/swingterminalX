@@ -65,6 +65,7 @@ const mockEvent = (path, method, body, headers = {}) => {
       get: (k) => lowerHeaders[k.toLowerCase()] || null
     },
     body: typeof body === 'string' ? body : JSON.stringify(body),
+    text: async () => typeof body === 'string' ? body : JSON.stringify(body),
   };
 };
 
@@ -77,15 +78,16 @@ test('radar-context preserves metadata and caps at 500', async () => {
     ]
   }, { 'X-BOT-OWNER-KEY': process.env.BOT_OWNER_KEY });
   const res = await botHandler(req);
-  assert.strictEqual(res.statusCode, 200);
+  assert.strictEqual(res.statusCode ?? res.status, 200);
 });
 
 test('worker-session payload includes top radarCandidates safely capped', async () => {
   if (!process.env.BOT_WORKER_TOKEN) return;
   const req = mockEvent('/api/bot/worker-session?sessionId=sess1&workerId=worker1', 'GET', null, { 'X-BOT-WORKER-TOKEN': process.env.BOT_WORKER_TOKEN });
   const res = await botHandler(req);
-  assert.strictEqual(res.statusCode, 200);
-  const json = JSON.parse(res.body);
+  assert.strictEqual(res.statusCode ?? res.status, 200);
+  const rawBody = typeof res.json === 'function' ? await res.text() : res.body;
+  const json = JSON.parse(rawBody);
   assert.ok(Array.isArray(json.radarCandidates));
   assert.ok(json.radarCandidates.length <= 50);
 });
@@ -97,7 +99,7 @@ test('radar-microstructure endpoint stores sanitized microstructure map', async 
     data: { BEAT: { orderBookDepthWithin1Pct: 50000, spreadPct: 0.1 } }
   }, { 'X-BOT-WORKER-TOKEN': process.env.BOT_WORKER_TOKEN });
   const res = await botHandler(req);
-  const status = res.statusCode || res.status;
+  const status = res.statusCode ?? res.status;
   assert.strictEqual(status, 200);
   
   // Parse response body depending on whether it's a native Response or Netlify callback object
