@@ -3718,11 +3718,11 @@ async function doRefresh() {
 
   renderTopbar();
   renderList();
-  renderAlerts();
   renderSectors();
   renderHeatmap();
   renderTopCharts();
   renderMovers();
+  renderAlerts();
   renderCockpit();
 
   // LiveFeed: push refresh event

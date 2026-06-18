@@ -127,3 +127,11 @@ test('Trading RADAR frontend uses hardBlockReason to avoid misleading score thre
   assert.match(terminalJs, /if \(scoreBlocked && diag\.hardBlockReason\) text \+= ` \/ score block below \$\{diag\.hardBlockThreshold\} \/ HARD: \$\{diag\.hardBlockReason\}`;/);
   assert.match(terminalJs, /else if \(diag\.hardBlockReason\) text \+= ` \/ hard block: \$\{diag\.hardBlockReason\}`;/);
 });
+
+
+test('UI renders heatmap/data before Live Feed so operator sees market context earlier', () => {
+  assert.ok(indexHtml.indexOf("sv('heatmap'") < indexHtml.indexOf("sv('livefeed'"));
+  const refreshBody = terminalJs.slice(terminalJs.indexOf('async function doRefresh()'));
+  const htmlOrder = refreshBody.indexOf('renderHeatmap()') < refreshBody.indexOf('LiveFeed.push');
+  assert.ok(htmlOrder, 'renderHeatmap must occur before LiveFeed.push in doRefresh');
+});
