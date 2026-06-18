@@ -2499,7 +2499,8 @@ async function handleFleetWorker(req, base, body) {
           receivedAt: snap.receivedAt,
           metrics: keys.length,
           keys: keys.slice(0, 20),
-          hasBeat: !!beat,
+          hasBEATUSDT: !!beat,
+          hasBeat: !!beat, // back-compat alias
           beat: beat ? {
             orderBookDepthWithin1Pct: beat.orderBookDepthWithin1Pct,
             depthUsdWithin1Pct: beat.depthUsdWithin1Pct,
@@ -2522,10 +2523,17 @@ async function handleFleetWorker(req, base, body) {
         data: typeof body.data === 'object' && body.data ? body.data : {},
       };
       await refreshTradingRadarFromFleet(fleet);
+      // Report metrics from the PERSISTED fleet field (the one GET/radar-debug
+      // read), not from the request body, so the response cannot claim storage
+      // that a later read won't see.
+      const saved = (fleet.radarMicrostructureSnapshot && fleet.radarMicrostructureSnapshot.data) || {};
+      const savedKeys = Object.keys(saved);
       return json(req, {
         ok: true,
         stored: true,
-        metrics: Object.keys(fleet.radarMicrostructureSnapshot.data || {}).length,
+        metrics: savedKeys.length,
+        keys: savedKeys.slice(0, 20),
+        hasBEATUSDT: Boolean(saved.BEATUSDT),
         receivedAt: fleet.radarMicrostructureSnapshot.receivedAt,
       });
     });
@@ -4317,7 +4325,7 @@ async function handleWorkerPair(req) {
   });
 }
 
-const FLEET_WORKER_BASES = new Set(['worker-heartbeat', 'worker-session', 'execution-result', 'position-result', 'worker-command-ack', 'live-preflight-result', 'auto-market-snapshot', 'radar-microstructure', 'radar-candidates', 'auto-decision', 'auto-intent-request']);
+const FLEET_WORKER_BASES = new Set(['worker-heartbeat', 'worker-session', 'execution-result', 'position-result', 'worker-command-ack', 'live-preflight-result', 'auto-market-snapshot', 'radar-microstructure', 'radar-candidates', 'radar-debug', 'auto-decision', 'auto-intent-request']);
 const FLEET_BROWSER_BASES = new Set(['fleet', 'config', 'start-session', 'start-live-session', 'live-emergency-stop', 'global-kill-switch', 'auto-trader', 'session', 'clear-stale-sessions', 'create-execution-intent', 'create-smoke-execution-intent', 'create-live-execution-intent', 'create-worker-pairing-code', 'radar-context']);
 
 function isWorkerRoute(route) {

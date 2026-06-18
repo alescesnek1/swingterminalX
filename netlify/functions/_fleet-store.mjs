@@ -77,6 +77,7 @@ function emptyFleet() {
 
     autoTrader: null,      // operator-requested autonomous mode/status; no secrets, no order execution
     autoMarketSnapshot: null, // latest sanitized PUBLIC market snapshot posted by a local worker (no secrets, no orders)
+    radarMicrostructureSnapshot: null, // latest sanitized static microstructure (depth/spread/funding) posted by the read-only producer; no secrets, no orders. MUST be declared here or normalize() drops it on every load.
     radarContext: { scannerCandidates: [], receivedAt: null }, // context pushed by the browser
     tradingRadar: emptyTradingRadar(), // read-only advisory panel state; no orders, no intents, no gates
     lastRegime: null,     // { regime, entriesAllowed, reason[], metrics, updatedAt }
@@ -119,6 +120,15 @@ function normalize(data) {
     base.radarContext = { scannerCandidates: [], receivedAt: null };
   } else if (!Array.isArray(base.radarContext.scannerCandidates)) {
     base.radarContext.scannerCandidates = [];
+  }
+  // radarMicrostructureSnapshot is either null or { ..., data: {} }. Keep the
+  // shape sane so POST/GET/radar-debug all read the same `.data` map.
+  if (base.radarMicrostructureSnapshot !== null) {
+    if (typeof base.radarMicrostructureSnapshot !== 'object' || Array.isArray(base.radarMicrostructureSnapshot)) {
+      base.radarMicrostructureSnapshot = null;
+    } else if (typeof base.radarMicrostructureSnapshot.data !== 'object' || base.radarMicrostructureSnapshot.data === null || Array.isArray(base.radarMicrostructureSnapshot.data)) {
+      base.radarMicrostructureSnapshot.data = {};
+    }
   }
   return base;
 }
