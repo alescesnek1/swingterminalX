@@ -57,6 +57,8 @@ const mockEvent = (path, method, body, headers = {}) => {
   const lowerHeaders = Object.keys(headers).reduce((acc, k) => { acc[k.toLowerCase()] = headers[k]; return acc; }, {});
   return {
     path,
+    url: `http://localhost${path}`,
+    method,
     httpMethod: method,
     headers: {
       ...headers,

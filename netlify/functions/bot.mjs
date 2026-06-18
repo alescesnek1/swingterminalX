@@ -8,6 +8,15 @@ import { evaluateTradingRadar, defaultTradingRadarState, normalizeScannerSymbol 
 import { warmBinanceAlphaMapping } from '../../scripts/safety/token-metadata.mjs';
 import { microstructureSnapshotStatus } from '../../scripts/radar/market-data-provider.mjs';
 
+function safeRequestUrl(req, fallbackPath = '/') {
+  if (!req) return new URL(fallbackPath, 'http://localhost');
+  const u = req.url || req.path || fallbackPath;
+  try {
+    return new URL(u, 'http://localhost');
+  } catch (err) {
+    return new URL(fallbackPath, 'http://localhost');
+  }
+}
 const DEFAULT_STATE = {
   status: 'safety',
   mode: 'dry_run',
@@ -585,7 +594,7 @@ function normalizeCandidate(row, volumeP70, volumeP90) {
 }
 
 async function fetchMarkets(req) {
-  const requestUrl = new URL(req.url);
+  const requestUrl = safeRequestUrl(req);
   const baseOrigin = /^https?:\/\//i.test(requestUrl.origin)
     ? requestUrl.origin
     : 'https://swing-terminal-v6.netlify.app';
@@ -1010,15 +1019,9 @@ async function runDryRunScanFromMarkets(markets) {
 }
 
 function routeName(req) {
-  if (!req) return 'state';
-  const u = req.url || req.path || '';
-  try {
-    const url = new URL(u, 'http://localhost');
-    const route = url.pathname.replace(/^\/api\/bot\/?/, '').replace(/^\//, '');
-    return route || 'state';
-  } catch (err) {
-    return 'state';
-  }
+  const url = safeRequestUrl(req);
+  const route = url.pathname.replace(/^\/api\/bot\/?/, '').replace(/^\//, '');
+  return route || 'state';
 }
 
 function blockTestnetOrder(req, auth, reason, extra = {}) {
@@ -1925,11 +1928,11 @@ function queueCommand(fleet, sessionId, type, createdBy) {
 }
 
 function bodySessionId(req, body) {
-  const url = new URL(req.url);
+  const url = safeRequestUrl(req);
   return url.searchParams.get('sessionId') || (body && body.sessionId) || '';
 }
 function bodyWorkerId(req, body) {
-  const url = new URL(req.url);
+  const url = safeRequestUrl(req);
   return url.searchParams.get('workerId') || (body && body.workerId) || '';
 }
 
@@ -2433,7 +2436,7 @@ async function handleFleetWorker(req, base, body) {
   if (base === 'radar-debug') {
     if (req.method !== 'GET') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
     if (!checkWorkerToken(req)) return json(req, { ok: false, error: 'Unauthorized' }, 401);
-    const sym = new URL(req.url).searchParams.get('symbol') || 'BEATUSDT';
+    const sym = safeRequestUrl(req).searchParams.get('symbol') || 'BEATUSDT';
     
     return await mutateFleet(async (fleet) => {
       const snap = fleet.radarMicrostructureSnapshot || {};
@@ -4230,7 +4233,7 @@ function prunePairings(store) {
 // The function's own origin (installer/curl never sends an Origin header).
 function selfOrigin(req) {
   try {
-    const u = new URL(req.url);
+    const u = safeRequestUrl(req);
     if (u.protocol === 'http:' || u.protocol === 'https:') return u.origin;
   } catch { /* fall through */ }
   return getAllowedOrigins()[0] || 'https://swing-terminal-v6.netlify.app';
@@ -4296,7 +4299,7 @@ function buildMacosBootstrap(origin, code) {
 async function handleInstallScript(req, segments) {
   if (req.method !== 'GET') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
   const platform = (segments[1] || '').toLowerCase();
-  const url = new URL(req.url);
+  const url = safeRequestUrl(req);
   const code = (url.searchParams.get('pair') || '').trim();
   const origin = selfOrigin(req);
   if (!code) return textResponse(req, '# Missing pair code. Generate one from the web app (Install Worker).\n', 400);
