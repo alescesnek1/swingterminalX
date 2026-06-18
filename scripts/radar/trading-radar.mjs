@@ -285,6 +285,13 @@ export function evaluateMarketRegime(markets = []) {
     score: round(clamp(score), 0),
     blocksMeanReversion: blocks,
     reasons: compactReasons(reasons, 5),
+    diagnostics: {
+      btcChange: btcChange == null ? null : round(btcChange, 2),
+      ethChange: ethChange == null ? null : round(ethChange, 2),
+      breadthPct: breadthPct == null ? null : round(breadthPct, 1),
+      reasons: reasons,
+      hardBlockThreshold: 45
+    },
     breadthPct: breadthPct == null ? null : round(breadthPct, 1),
     btc: btc ? { symbol: btc.symbol, change24hPct: round(btcChange, 2) } : null,
     eth: eth ? { symbol: eth.symbol, change24hPct: round(ethChange, 2) } : null,
@@ -1558,6 +1565,7 @@ export function evaluateTradingRadar({
         absorptionBlockedReason: microDiag.absorptionBlockedReason,
         reclaimBlockedReason: microDiag.reclaimBlockedReason,
         missingSignals: missingForMarket(m).slice(0, 8),
+        marketRegimeDiagnostics: regime.diagnostics,
         nextRequiredConfirmation: v1.NEXT_CONFIRMATION || stageInfo.nextRequiredConfirmation,
         blockedBy: v1.BLOCKED_BY
           || (v1.STATUS === 'INVALIDATED' || v1.STATUS === 'RISK_OFF_BLOCKED' ? v1.INVALIDATION

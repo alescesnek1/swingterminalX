@@ -7383,7 +7383,8 @@ function _renderTradingRadar(radar, esc) {
         <div><span>Setup</span><b>${esc(_fleetFmtRadarValue(selected.SETUP_SCORE, 0))}</b></div>
         <div><span>Execution</span><b>${esc(_fleetFmtRadarValue(selected.EXECUTION_SCORE, 0))}</b></div>
         <div><span>Risk/Reward</span><b>${esc(_fleetFmtRadarValue(selected.RISK_REWARD_SCORE, 0))}</b></div>
-        <div><span>Regime</span><b>${esc(_fleetFmtRadarValue(selected.MARKET_REGIME_SCORE, 0))}</b></div>
+        <div><span>Regime</span><b>${esc(_fleetFmtRadarValue(selected.MARKET_REGIME_SCORE, 0))} ${selected.marketRegimeDiagnostics ? `/ hard block below ${selected.marketRegimeDiagnostics.hardBlockThreshold}` : ''}</b></div>
+        ${selected.marketRegimeDiagnostics && selected.marketRegimeDiagnostics.reasons && selected.marketRegimeDiagnostics.reasons.length ? `<div style="grid-column: 1 / -1; margin-top: 4px; color: var(--txt2);"><span>Regime Reason</span><b style="color:var(--txt); font-weight:normal;">${esc(selected.marketRegimeDiagnostics.reasons.join(' / '))}</b></div>` : ''}
         <div><span>Confidence</span><b>${esc(_fleetFmtRadarValue(selected.CONFIDENCE ?? selected.FINAL_CONFIDENCE ?? selected.confidence, 0))}</b></div>
         <div><span>Final safety</span><b>${esc(selected.finalSafetyStatus || selected.safetyStatus || 'UNKNOWN')}</b></div>
         <div><span>Safety</span><b>${esc(selected.safetyStatus || 'UNKNOWN')} ${esc(selected.safetyScore != null ? selected.safetyScore : '')}</b></div>
