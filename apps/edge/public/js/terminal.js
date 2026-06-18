@@ -7408,6 +7408,12 @@ function _renderTradingRadar(radar, esc) {
         <div><span>Waiting</span><div class="radar-chip-row">${chipList(groups.waiting, 'radar-status-chip radar-status-chip--wait')}</div></div>
         <div><span>Missing data</span><div class="radar-chip-row">${chipList([...(groups.missing || []), ...((selected.missingData || selected.missingSignals || []).slice(0, 8))], 'radar-status-chip radar-status-chip--missing')}</div></div>
       </div>
+      <div class="radar-microstructure" style="background: rgba(0,0,0,0.15);">
+        <div class="radar-microstructure__title">Score Breakdown</div>
+        <div style="font-family: var(--mono, monospace); font-size: 0.85em; color: var(--txt); padding: 4px 8px;">${esc(selected.diagnostics ? selected.diagnostics.setupBreakdown : 'SETUP: N/A')}</div>
+        <div style="font-family: var(--mono, monospace); font-size: 0.85em; color: var(--txt); padding: 0 8px 4px;">${esc(selected.diagnostics ? selected.diagnostics.executionBreakdown : 'EXECUTION: N/A')}</div>
+        <div style="font-family: var(--mono, monospace); font-size: 0.85em; color: var(--warn, #ffaa00); padding: 0 8px 8px;">NEXT STATUS NEEDS: ${esc(selected.diagnostics ? selected.diagnostics.nextMissingTransition : 'none')}</div>
+      </div>
       <div class="radar-microstructure">
         <div class="radar-microstructure__title">Microstructure readiness</div>
         <div class="radar-microstructure__row"><span>Data provider</span><b class="${providerUnavailable ? 'radar-micro-no' : 'radar-micro-yes'}">${esc(providerLabel)}</b></div>

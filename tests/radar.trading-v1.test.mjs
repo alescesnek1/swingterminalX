@@ -264,3 +264,27 @@ test('I: static stale/provider-none cache never unlocks Absorb, aggressive entry
   assert.notEqual(c.actionability, 'ENTRY_READY');
   assert.equal(c.telegramEligible, false);
 });
+
+test('J: score breakdown explains low SETUP_SCORE when Reclaim/Derivatives/Regime are weak', () => {
+  const c = candidate([DISLOCATION_ONLY], 'DISCUSDT');
+  assert.ok(c.diagnostics);
+  assert.match(c.diagnostics.setupBreakdown, /SETUP:/);
+  assert.match(c.diagnostics.setupBreakdown, /reclaim 0/);
+  assert.ok(c.SETUP_SCORE < 65);
+});
+
+test('K: execution score is low when microstructure/flow/reclaim are missing', () => {
+  const c = candidate([DISLOCATION_ONLY], 'DISCUSDT');
+  assert.ok(c.diagnostics);
+  assert.match(c.diagnostics.executionBreakdown, /EXECUTION:/);
+  assert.match(c.diagnostics.executionBreakdown, /flow N\/A/);
+  assert.ok(c.EXECUTION_SCORE < 40);
+});
+
+test('L: candidates with same visual chips but different score components produce different scores', () => {
+  const c1 = candidate([{...EARLY_REVERSAL, symbol: 'C1', btcRelativeChangePct: -10}], 'C1');
+  const c2 = candidate([{...EARLY_REVERSAL, symbol: 'C2', btcRelativeChangePct: 0}], 'C2');
+  // Both have same early reversal setup, but C1 dislocation score should be higher due to btcRelativeChangePct
+  assert.notEqual(c1.SETUP_SCORE, c2.SETUP_SCORE);
+  assert.notEqual(c1.DISLOCATION_SCORE, c2.DISLOCATION_SCORE);
+});

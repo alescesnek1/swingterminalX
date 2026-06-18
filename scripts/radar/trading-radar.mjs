@@ -746,6 +746,10 @@ function radarScorePack(market, regime, stageInfo, levels, safety) {
     rr,
     riskPct,
     tp1Distance,
+    diagnostics: {
+      setupBreakdown: `SETUP: ${round(setup, 0)} = dislocation ${round(dislocation, 0)}×20% + flush ${round(flush, 0)}×20% + stabilization ${round(stabilization, 0)}×20% + reclaim ${round(reclaim, 0)}×15% + derivatives ${round(deriv, 0)}×10% + regime ${round(marketRegime, 0)}×15%`,
+      executionBreakdown: `EXECUTION: ${round(execution, 0)} = orderbook ${execMissing.includes('orderBookDepth') || execMissing.includes('spread') ? 'N/A' : round(orderBook, 0)}×8% + flow ${execMissing.includes('flow') ? 'N/A' : round(flow, 0)}×8% + reclaim ${round(reclaim, 0)}×32% + stabilization ${round(stabilization, 0)}×18% + RR ${round(riskReward, 0)}×24% + regime ${round(marketRegime, 0)}×10%${execMissingPenalty ? ` - penalty ${execMissingPenalty}` : ''}`
+    }
   };
 }
 
@@ -981,6 +985,12 @@ function buildRadarV1Output(market, regime, stageInfo, levels, safety) {
       microstructureTrusted: dataQuality.microstructureTrusted,
       microstructureMissing: dataQuality.microstructureMissing,
       derivativesMissing: dataQuality.derivativesMissing,
+    },
+    diagnostics: {
+      ...(scores.diagnostics || {}),
+      riskRewardReason: status === 'CHASE_RISK' ? 'price extended / chase risk' : scores.RISK_REWARD_SCORE < 55 ? 'R/R is poor' : 'R/R acceptable',
+      nextMissingTransition: nextConfirmation,
+      stayedReason: blockedReason,
     },
     ...scores,
   };
@@ -1586,6 +1596,7 @@ export function evaluateTradingRadar({
           hasRollingMicrostructure: microDiag.hasRollingMicrostructure,
           missingAbsorptionFields: microDiag.missingAbsorptionFields,
           missingReclaimFields: microDiag.missingReclaimFields,
+          ...(v1.diagnostics || {}),
         },
       };
     }).sort((a, b) => {
