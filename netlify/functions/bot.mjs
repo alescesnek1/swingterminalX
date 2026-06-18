@@ -2515,6 +2515,8 @@ async function handleFleetWorker(req, base, body) {
           unavailableReason: status.unavailableReason,
           present: status.present,
           stale: status.stale,
+          trusted: status.trusted,
+          staticLabel: status.staticLabel,
           hasBEATUSDT: !!beat,
           hasBeat: !!beat, // back-compat alias
           beat: beat ? {

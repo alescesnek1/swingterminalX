@@ -159,6 +159,22 @@ test('G: with real rolling absorption data, diagnostics report it present and no
   assert.ok(c.reclaimBlockedReason);
 });
 
+// ── F2) Stale/untrusted static cache is fail-closed at the evaluator too ──────
+// A provider-none / stale snapshot is still merged into the candidate as static
+// fields (so the UI can label it "stale diagnostic cache"). It carries NO
+// rolling data, so the evaluator can never pass Absorb/Reclaim from it, and it
+// never reaches ENTRY_READY or Telegram — regardless of how the UI labels it.
+test('F2: untrusted/stale static cache (static-only) never passes Absorb/Reclaim, never ENTRY_READY/Telegram', () => {
+  const { c } = candidateFor('STAUSDT', [STATIC_ONLY]);
+  assert.ok(c);
+  assert.equal(c.hasStaticMicrostructure, true);   // fields present (diagnostic cache)
+  assert.equal(c.hasRollingMicrostructure, false); // but no trusted rolling data
+  assert.notEqual((c.conditionChecklist.absorption || {}).status, 'PASS');
+  assert.notEqual((c.conditionChecklist.squeezeOrReclaim || {}).status, 'PASS');
+  assert.notEqual(c.actionability, 'ENTRY_READY');
+  assert.equal(c.telegramEligible, false);
+});
+
 // ── D) Telegram safety on non-ENTRY_READY ────────────────────────────────────
 test('D: WATCH / NEAR_ENTRY / blocked candidates are never Telegram-eligible', () => {
   const { state } = candidateFor('NOMUSDT', [NO_MICRO, WITH_MICRO]);

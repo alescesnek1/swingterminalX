@@ -7137,6 +7137,48 @@ function _fleetRadarChecklistGroups(checklist) {
   return { passed, waiting, missing };
 }
 
+// Provider-aware microstructure diagnostics for the RADAR focus card.
+// Static microstructure is TRUSTED only when a real provider is actively
+// serving FRESH data. provider=none, an unavailable provider, OR a stale
+// snapshot are all UNTRUSTED: stale diagnostic cache at best, never live static
+// microstructure. Fail-closed and advisory only — this never makes Absorb pass
+// and never changes ENTRY_READY, Telegram, gates, thresholds, or scores.
+function _fleetRadarMicroDiag(microProv, candidate) {
+  const m = microProv || {};
+  const c = candidate || {};
+  const provider = m.provider || 'none';
+  const providerStatus = m.providerStatus || 'unavailable';
+  // Prefer the backend `trusted` flag; fall back to a conservative local check
+  // (a named provider serving present-and-fresh data) so old payloads stay safe.
+  const trusted = (m.trusted === true) || (provider !== 'none' && providerStatus === 'present');
+  const untrusted = !trusted;
+  const hasStatic = !!c.hasStaticMicrostructure;
+
+  // Data provider line: untrusted always reads "<provider> / provider unavailable".
+  const providerLabel = untrusted ? `${provider} / provider unavailable` : `${provider} (${providerStatus})`;
+
+  // Static line: untrusted static fields are stale diagnostic cache, never "present".
+  let staticLabel, staticCls;
+  if (untrusted) {
+    staticLabel = hasStatic ? 'stale diagnostic cache' : 'provider unavailable';
+    staticCls = 'radar-micro-no';
+  } else if (hasStatic) {
+    staticLabel = 'present';
+    staticCls = 'radar-micro-yes';
+  } else {
+    staticLabel = 'missing';
+    staticCls = 'radar-micro-no';
+  }
+
+  // Absorb block reason: untrusted prefers the trust-provider wording over the
+  // evaluator's per-candidate "static order-book/funding only" reason.
+  const absorbBlocked = untrusted
+    ? 'no trusted microstructure provider / stale static cache'
+    : (c.absorptionBlockedReason || 'not blocked');
+
+  return { provider, providerStatus, trusted, untrusted, providerLabel, staticLabel, staticCls, absorbBlocked };
+}
+
 function _renderTradingRadar(radar, esc) {
   radar = radar || {};
   const allCandidates = Array.isArray(radar.candidates) ? radar.candidates : [];
@@ -7296,27 +7338,17 @@ function _renderTradingRadar(radar, esc) {
     const groups = _fleetRadarChecklistGroups(selected.conditionChecklist || {});
 
     // Static microstructure is a provider-backed OPTIONAL overlay. Distinguish
-    // present / stale / provider-unavailable / missing so the operator never
-    // reads a misleading "missing/no-data error" when the provider is simply not
-    // configured (the production default = provider unavailable). Advisory only:
-    // this never makes Absorb pass, never changes ENTRY_READY or Telegram.
+    // present / stale-diagnostic-cache / provider-unavailable / missing so the
+    // operator never reads stale or unconfigured data as if it were trusted live
+    // static microstructure. Advisory only: never makes Absorb pass, never
+    // changes ENTRY_READY or Telegram.
     const microProv = (radar && radar.staticMicrostructure) || {};
-    const providerUnavailable = microProv.providerStatus === 'unavailable';
-    let staticLabel, staticCls;
-    if (selected.hasStaticMicrostructure) {
-      if (microProv.providerStatus === 'stale') { staticLabel = 'present (stale)'; staticCls = 'radar-micro-no'; }
-      else { staticLabel = 'present'; staticCls = 'radar-micro-yes'; }
-    } else if (providerUnavailable) {
-      staticLabel = 'provider unavailable'; staticCls = 'radar-micro-no';
-    } else {
-      staticLabel = 'missing'; staticCls = 'radar-micro-no';
-    }
-    const providerLabel = `${microProv.provider || 'none'} (${microProv.providerStatus || 'unavailable'})`;
-    // Absorb is fail-closed: it can never pass on provider-unavailable or
-    // static-only data. Show WHY it is blocked, preferring the provider state.
-    const absorbBlocked = providerUnavailable
-      ? 'provider unavailable (no trusted microstructure data)'
-      : (selected.absorptionBlockedReason || 'not blocked');
+    const microDiag = _fleetRadarMicroDiag(microProv, selected);
+    const providerUnavailable = microDiag.untrusted;
+    const providerLabel = microDiag.providerLabel;
+    const staticLabel = microDiag.staticLabel;
+    const staticCls = microDiag.staticCls;
+    const absorbBlocked = microDiag.absorbBlocked;
 
     focusHtml = `<div class="radar-focus-card">
       <div class="radar-focus-title"><b>${esc(selected.symbol || '--')}</b> <span class="${_fleetRadarBadgeClass(selected.actionability)}">${actLabel}</span></div>

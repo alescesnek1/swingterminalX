@@ -155,9 +155,21 @@ export function createMarketDataProvider(env = {}, opts = {}) {
   return createNoneProvider(env, opts);
 }
 
+// The Absorb-block reason shown whenever the microstructure overlay is not
+// backed by a trusted, fresh provider (provider=none / unavailable / stale).
+// Preferred over the evaluator's "static order-book/funding only" wording so a
+// stale or unconfigured snapshot is never read as usable live static data.
+export const UNTRUSTED_ABSORB_REASON = 'no trusted microstructure provider / stale static cache';
+
 // Classify a stored static snapshot for API/UI diagnostics. Pure, no network.
 // Distinguishes present / stale / unavailable so the UI never shows a
 // misleading "missing/no-data error" when the provider simply isn't configured.
+//
+// `trusted` is the fail-closed gate for DISPLAY wording: static fields count as
+// trusted LIVE microstructure ONLY when a real (non-"none") provider is serving
+// present-and-fresh data. A stale snapshot, an unavailable provider, or the
+// default provider=none are all UNTRUSTED — stale diagnostic cache at most.
+// This is advisory only; it never affects Absorb/Reclaim/ENTRY_READY/Telegram.
 export function microstructureSnapshotStatus(snapshot, nowMs = Date.now(), staleMs = MICROSTRUCTURE_STALE_MS) {
   const snap = snapshot && typeof snapshot === 'object' ? snapshot : {};
   const data = snap.data && typeof snap.data === 'object' ? snap.data : {};
@@ -177,5 +189,12 @@ export function microstructureSnapshotStatus(snapshot, nowMs = Date.now(), stale
   } else {
     providerStatus = 'present';
   }
-  return { provider, providerStatus, unavailableReason, present, stale, metrics, receivedAt };
+  const trusted = present && !stale && provider !== 'none';
+  // Global static label for serialization. Untrusted-but-present data is
+  // explicitly "stale diagnostic cache", never "present".
+  let staticLabel;
+  if (!present) staticLabel = 'provider unavailable';
+  else if (!trusted) staticLabel = 'stale diagnostic cache';
+  else staticLabel = 'present';
+  return { provider, providerStatus, unavailableReason, present, stale, trusted, staticLabel, metrics, receivedAt };
 }

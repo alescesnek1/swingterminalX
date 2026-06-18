@@ -66,7 +66,12 @@ test('Trading RADAR focus panel surfaces microstructure blocking diagnostics', (
   assert.match(terminalJs, /Microstructure readiness/);
   assert.match(terminalJs, /Static \(depth\/spread\/funding\)/);
   assert.match(terminalJs, /Rolling absorption data/);
-  assert.match(terminalJs, /selected\.absorptionBlockedReason/);
+  // The absorb-block reason is now provider-aware via the _fleetRadarMicroDiag
+  // helper (prefers the untrusted-provider wording over the evaluator reason).
+  assert.match(terminalJs, /_fleetRadarMicroDiag/);
+  assert.match(terminalJs, /no trusted microstructure provider \/ stale static cache/);
+  assert.match(terminalJs, /stale diagnostic cache/);
+  assert.match(terminalJs, /c\.absorptionBlockedReason/);
   assert.match(terminalJs, /selected\.reclaimBlockedReason/);
   assert.match(terminalJs, /selected\.missingAbsorptionFields/);
   assert.match(terminalJs, /selected\.missingReclaimFields/);

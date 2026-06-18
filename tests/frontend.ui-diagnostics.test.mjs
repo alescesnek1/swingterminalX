@@ -37,6 +37,11 @@ function loadScannerSortHelpers() {
   return Function(`${block}; return { _scannerCompare, _scannerC24Value };`)();
 }
 
+function loadRadarMicroDiag() {
+  const block = sliceBetween(terminalJs, 'function _fleetRadarMicroDiag', 'function _renderTradingRadar');
+  return Function(`${block}; return _fleetRadarMicroDiag;`)();
+}
+
 // Extract loadOrderbook() in isolation. It depends on _esc (for the error
 // path) plus a tiny DOM/fetch surface that the caller injects, so we slice
 // just the function and hand it controllable globals.
@@ -360,6 +365,48 @@ test('aggressive-poll failure warning is cooldown-throttled (no per-tick console
   const tickBlock = sliceBetween(terminalJs, 'async function _aggressivePollTick', 'function _enableAggressivePoll');
   // The warn is gated by a timestamp comparison, not logged unconditionally.
   assert.match(tickBlock, /_aggressivePollWarnAt[\s\S]*STREAM_AGGRESSIVE_WARN_COOLDOWN_MS[\s\S]*console\.warn\('\[STREAM\] aggressive poll failed:'/);
+});
+
+test('RADAR micro diag: provider=none + stale snapshot reads as stale diagnostic cache (untrusted)', () => {
+  const _fleetRadarMicroDiag = loadRadarMicroDiag();
+  // The exact production case: default provider, an old snapshot still merged
+  // into the candidate so it carries static fields, but nothing is trusted.
+  const microProv = { provider: 'none', providerStatus: 'stale', present: true, stale: true, trusted: false };
+  const candidate = { hasStaticMicrostructure: true, absorptionBlockedReason: 'static order-book/funding only; no rolling absorption data' };
+  const d = _fleetRadarMicroDiag(microProv, candidate);
+
+  assert.equal(d.untrusted, true);
+  assert.equal(d.providerLabel, 'none / provider unavailable');
+  assert.equal(d.staticLabel, 'stale diagnostic cache');
+  assert.notEqual(d.staticLabel, 'present');
+  // Absorb block reason must NOT primarily read "static order-book/funding only".
+  assert.equal(d.absorbBlocked, 'no trusted microstructure provider / stale static cache');
+  assert.doesNotMatch(d.absorbBlocked, /static order-book\/funding only/);
+});
+
+test('RADAR micro diag: provider unavailable with no cache reads as provider unavailable', () => {
+  const _fleetRadarMicroDiag = loadRadarMicroDiag();
+  const d = _fleetRadarMicroDiag(
+    { provider: 'none', providerStatus: 'unavailable', present: false, trusted: false },
+    { hasStaticMicrostructure: false },
+  );
+  assert.equal(d.untrusted, true);
+  assert.equal(d.providerLabel, 'none / provider unavailable');
+  assert.equal(d.staticLabel, 'provider unavailable');
+  assert.equal(d.absorbBlocked, 'no trusted microstructure provider / stale static cache');
+});
+
+test('RADAR micro diag: a future trusted provider with FRESH static data reads as present', () => {
+  const _fleetRadarMicroDiag = loadRadarMicroDiag();
+  const microProv = { provider: 'binance-public', providerStatus: 'present', present: true, stale: false, trusted: true };
+  const candidate = { hasStaticMicrostructure: true, absorptionBlockedReason: 'static order-book/funding only; no rolling absorption data' };
+  const d = _fleetRadarMicroDiag(microProv, candidate);
+
+  assert.equal(d.untrusted, false);
+  assert.equal(d.providerLabel, 'binance-public (present)');
+  assert.equal(d.staticLabel, 'present');
+  // When trusted, the evaluator's own per-candidate reason is shown verbatim.
+  assert.equal(d.absorbBlocked, 'static order-book/funding only; no rolling absorption data');
 });
 
 test('market briefing diagnostics sanitize secrets and expose source states', () => {

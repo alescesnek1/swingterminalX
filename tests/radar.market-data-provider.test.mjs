@@ -129,3 +129,40 @@ test('microstructureSnapshotStatus: old data => stale', () => {
   assert.equal(s.stale, true);
   assert.equal(s.providerStatus, 'stale');
 });
+
+// ── trusted gate + serialized staticLabel (stale must read as diagnostic cache) ──
+
+test('microstructureSnapshotStatus: provider=none + stale serializes as untrusted stale diagnostic cache', () => {
+  const now = Date.now();
+  // Pre-provider snapshot (no provider field => "none") that has gone stale.
+  const snap = { receivedAt: new Date(now - 60 * 60 * 1000).toISOString(), data: { BEATUSDT: {} } };
+  const s = microstructureSnapshotStatus(snap, now);
+  assert.equal(s.provider, 'none');
+  assert.equal(s.providerStatus, 'stale');
+  assert.equal(s.trusted, false);
+  assert.equal(s.staticLabel, 'stale diagnostic cache');
+});
+
+test('microstructureSnapshotStatus: fresh data from provider=none is still untrusted', () => {
+  const now = Date.now();
+  // Even fresh, a snapshot with no real provider tag is not trusted live data.
+  const snap = { receivedAt: new Date(now - 1000).toISOString(), data: { BEATUSDT: {} } };
+  const s = microstructureSnapshotStatus(snap, now);
+  assert.equal(s.provider, 'none');
+  assert.equal(s.trusted, false);
+  assert.equal(s.staticLabel, 'stale diagnostic cache');
+});
+
+test('microstructureSnapshotStatus: missing snapshot => unavailable staticLabel, untrusted', () => {
+  const s = microstructureSnapshotStatus(null, Date.now());
+  assert.equal(s.trusted, false);
+  assert.equal(s.staticLabel, 'provider unavailable');
+});
+
+test('microstructureSnapshotStatus: fresh data from a real provider is trusted/present', () => {
+  const now = Date.now();
+  const snap = { provider: 'binance-public', receivedAt: new Date(now - 1000).toISOString(), data: { BEATUSDT: {} } };
+  const s = microstructureSnapshotStatus(snap, now);
+  assert.equal(s.trusted, true);
+  assert.equal(s.staticLabel, 'present');
+});
