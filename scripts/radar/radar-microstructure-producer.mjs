@@ -114,7 +114,7 @@ export async function main() {
       //     any Binance/backend response body — only derived symbol metadata.
       for (const r of diagnostics.perCandidate) {
         console.log(
-          `[PRODUCER] candidate symbol=${r.symbol} base=${r.base} pair=${r.pair} ` +
+          `[PRODUCER] candidate rank=${r.index} symbol=${r.symbol} base=${r.base} pair=${r.pair} ` +
           `futures_pair=${r.futures_pair} quote=${r.quote} binance_market=${r.binance_market} ` +
           `-> fapiSymbol=${r.fapiSymbol || 'none'} source=${r.source || 'none'} ` +
           `measured=${r.measured ? 'yes' : 'no'}${r.skipReason ? ` skip=${r.skipReason}` : ''}`
@@ -136,7 +136,9 @@ export async function main() {
       console.log(JSON.stringify({
         tag: 'radar-microstructure',
         candidatesReceived: diagnostics.candidatesReceived,
-        candidatesSelected: diagnostics.candidatesSelected,
+        scanLimit: diagnostics.scanLimit,
+        targetMeasured: diagnostics.targetMeasured,
+        candidatesScanned: diagnostics.candidatesScanned,
         attempted: diagnostics.attempted,
         measured: diagnostics.measured,
         skippedNoFapiSymbol: diagnostics.skippedNoFapiSymbol,

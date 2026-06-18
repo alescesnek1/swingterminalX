@@ -40,6 +40,10 @@ const DEFAULT_FUTURES_BASE = 'https://fapi.binance.com';
 
 // Bounded so a misconfiguration can never fan out to the whole universe.
 const TOP_N_HARD_CAP = 50;
+// How many candidates we may walk through (in rank order) looking for TOP_N
+// measurable symbols. Bounded so a bad list can never trigger hundreds of calls.
+const SCAN_LIMIT_HARD_CAP = 100;
+const DEFAULT_SCAN_LIMIT = 50;
 const DEPTH_LIMIT = 100; // Binance spot depth weight is small at limit<=100.
 
 // ── Config (explicit, OFF by default) ────────────────────────────────────────
@@ -170,11 +174,30 @@ async function getJson(url, { allowed, timeoutMs, fetchImpl }) {
       headers: { Accept: 'application/json' }, // NO API KEY
       signal: ctrl.signal,
     });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
+    if (!res.ok) {
+      const e = new Error('HTTP ' + res.status);
+      e.httpStatus = res.status;
+      throw e;
+    }
     return await res.json();
   } finally {
     clearTimeout(timer);
   }
+}
+
+// Map a fetch/parse failure to a short, safe, fixed reason code. Never includes
+// any response body, URL, token, or header — only a coarse classification.
+export function classifyFetchError(err) {
+  if (!err) return 'network-error';
+  const status = err.httpStatus;
+  if (status === 400) return 'invalid-symbol';      // Binance -1121 invalid symbol
+  if (status === 451) return 'http-451-or-region-block';
+  if (status === 403) return 'http-403';
+  if (status === 429) return 'http-429';
+  if (Number.isFinite(status)) return `http-${status}`;
+  if (err.name === 'AbortError') return 'network-error'; // timeout
+  if (err.name === 'SyntaxError') return 'parse-error';
+  return 'network-error';
 }
 
 // ── Enrichment ───────────────────────────────────────────────────────────────
@@ -309,12 +332,19 @@ export async function enrichMarketsWithMicrostructure(markets, opts = {}) {
 
 export function radarMicrostructureConfigFromEnv(env = {}) {
   const enabled = String(env.WORKER_RADAR_MICROSTRUCTURE_ENABLED) === 'true';
+  // TOP_N is the TARGET number of measured symbols to collect (not "scan only
+  // the first N"). We walk the ranked candidate list until we have this many.
   let topN = Number(env.WORKER_RADAR_MICROSTRUCTURE_TOP_N);
   if (!Number.isInteger(topN) || topN <= 0) topN = 20;
   topN = Math.min(topN, TOP_N_HARD_CAP);
+  // SCAN_LIMIT bounds how deep we may walk looking for those TOP_N measurable
+  // symbols. Default 50, hard-capped at 100 so a bad list can't fan out.
+  let scanLimit = Number(env.WORKER_RADAR_MICROSTRUCTURE_SCAN_LIMIT);
+  if (!Number.isInteger(scanLimit) || scanLimit <= 0) scanLimit = DEFAULT_SCAN_LIMIT;
+  scanLimit = Math.min(scanLimit, SCAN_LIMIT_HARD_CAP);
   let cacheMs = Number(env.WORKER_RADAR_MICROSTRUCTURE_CACHE_MS);
   if (!Number.isFinite(cacheMs) || cacheMs < 0) cacheMs = 10000;
-  return { enabled, topN, cacheMs };
+  return { enabled, topN, scanLimit, cacheMs };
 }
 
 // A public-fapi perp symbol is 2..30 alphanumerics ending in a stablecoin
@@ -379,12 +409,18 @@ export async function enrichRadarCandidatesMicrostructure(candidates, opts = {})
   const cache = opts.cache instanceof Map ? opts.cache : null;
 
   // Optional structured diagnostics. When an object is supplied we populate
-  // counts + a per-candidate trail (symbol info, derived fapiSymbol, skip
+  // counts + a per-candidate trail (rank, symbol info, derived fapiSymbol, skip
   // reason, measured y/n). Never contains tokens/headers/response bodies.
   const diag = opts.diagnostics && typeof opts.diagnostics === 'object' ? opts.diagnostics : null;
+  const scanLimit = Number.isInteger(config.scanLimit) && config.scanLimit > 0
+    ? Math.min(config.scanLimit, SCAN_LIMIT_HARD_CAP)
+    : DEFAULT_SCAN_LIMIT;
+  const targetMeasured = Number.isInteger(config.topN) && config.topN > 0 ? config.topN : 20;
   if (diag) {
     diag.candidatesReceived = Array.isArray(candidates) ? candidates.length : 0;
-    diag.candidatesSelected = 0;
+    diag.scanLimit = scanLimit;
+    diag.targetMeasured = targetMeasured;
+    diag.candidatesScanned = 0;
     diag.attempted = 0;
     diag.measured = 0;
     diag.skippedNoFapiSymbol = 0;
@@ -397,14 +433,86 @@ export async function enrichRadarCandidatesMicrostructure(candidates, opts = {})
     return {};
   }
 
-  const targets = candidates.slice(0, config.topN);
-  if (diag) diag.candidatesSelected = targets.length;
-  const microMap = {};
+  // Measure ONE resolved fapi symbol. Public, read-only: futures depth +
+  // premiumIndex, with a spot depth fallback only when futures yields no book.
+  // Returns { fields, venue, reason } — reason is a safe classification used
+  // only for diagnostics when nothing measurable was found.
+  async function measureSymbol(fapiSymbol) {
+    const fields = {};
+    let venue = null;
+    let reason = null; // most-informative failure classification so far
 
-  for (const c of targets) {
-    if (!c || typeof c !== 'object') continue;
+    // 1) Futures order-book depth (source of truth).
+    try {
+      const url = `${futBase}/fapi/v1/depth?symbol=${encodeURIComponent(fapiSymbol)}&limit=${DEPTH_LIMIT}`;
+      const book = await getJson(url, { allowed: FUTURES_HOSTS, timeoutMs, fetchImpl });
+      const depth = computeDepthWithin1Pct(book);
+      if (depth) {
+        fields.orderBookDepthWithin1Pct = depth.orderBookDepthWithin1Pct;
+        fields.depthUsdWithin1Pct = depth.depthUsdWithin1Pct;
+        if (Number.isFinite(depth.spreadPct)) fields.spreadPct = depth.spreadPct;
+        venue = 'futures';
+      } else {
+        reason = 'no-depth';
+      }
+    } catch (err) {
+      reason = classifyFetchError(err);
+    }
+
+    // 2) Futures funding rate (premiumIndex), USDT-perp only. Non-critical.
+    if (fapiSymbol.endsWith('USDT')) {
+      try {
+        const url = `${futBase}/fapi/v1/premiumIndex?symbol=${encodeURIComponent(fapiSymbol)}`;
+        const prem = await getJson(url, { allowed: FUTURES_HOSTS, timeoutMs, fetchImpl });
+        const funding = fundingRateFromPremiumIndex(prem);
+        if (funding != null) { fields.fundingRate = funding; if (!venue) venue = 'futures'; }
+      } catch (err) { /* funding is optional; depth/spot decides measured */ }
+    }
+
+    // 3) Spot depth fallback — only when futures produced no order book.
+    if (fields.orderBookDepthWithin1Pct == null) {
+      try {
+        const url = `${spotBase}/api/v3/depth?symbol=${encodeURIComponent(fapiSymbol)}&limit=${DEPTH_LIMIT}`;
+        const book = await getJson(url, { allowed: SPOT_HOSTS, timeoutMs, fetchImpl });
+        const depth = computeDepthWithin1Pct(book);
+        if (depth) {
+          fields.orderBookDepthWithin1Pct = depth.orderBookDepthWithin1Pct;
+          fields.depthUsdWithin1Pct = depth.depthUsdWithin1Pct;
+          if (Number.isFinite(depth.spreadPct)) fields.spreadPct = depth.spreadPct;
+          if (!venue) venue = 'spot';
+          reason = null;
+        } else if (!reason) {
+          reason = 'no-depth';
+        }
+      } catch (err) {
+        if (!reason || reason === 'no-depth') reason = classifyFetchError(err);
+      }
+    }
+
+    const measured = Object.keys(fields).length > 0;
+    return { fields, venue, reason: measured ? null : (reason || 'fapi-no-data') };
+  }
+
+  const microMap = {};
+  // Walk the ranked candidate list (bounded by scanLimit) until we have
+  // targetMeasured symbols. Invalid / no-data candidates are skipped, not fatal.
+  const scanList = candidates.slice(0, scanLimit);
+  let measuredCount = 0;
+
+  for (let i = 0; i < scanList.length; i++) {
+    if (measuredCount >= targetMeasured) break;
+    if (diag) diag.candidatesScanned = i + 1;
+    const c = scanList[i];
+
+    if (!c || typeof c !== 'object') {
+      if (diag) diag.skippedNoFapiSymbol += 1;
+      recordDiag({ index: i, symbol: null, base: null, pair: null, futures_pair: null, quote: null, binance_market: null, fapiSymbol: null, source: null, measured: false, skipReason: 'no-candidate' });
+      continue;
+    }
+
     const { fapiSymbol, source, skipReason } = resolveFapiSymbolForCandidate(c);
     const baseRec = {
+      index: i,
       symbol: c.symbol ?? null,
       base: c.base ?? null,
       pair: c.pair ?? null,
@@ -426,64 +534,24 @@ export async function enrichRadarCandidatesMicrostructure(candidates, opts = {})
       const hit = cache.get(fapiSymbol);
       if (hit && now() - hit.at <= config.cacheMs) {
         const cached = hit.fields && Object.keys(hit.fields).length ? hit.fields : null;
-        if (cached) { microMap[fapiSymbol] = cached; if (diag) diag.measured += 1; }
+        if (cached) { microMap[fapiSymbol] = cached; measuredCount += 1; if (diag) diag.measured += 1; }
         recordDiag({ ...baseRec, measured: !!cached, skipReason: cached ? null : 'no-data-cached', venue: 'cache' });
         continue;
       }
     }
 
     if (diag) diag.attempted += 1;
-    const fields = {};
-    let venue = null;
-
-    // 1) Futures order-book depth (public fapi). fapi is the source of truth.
-    try {
-      const url = `${futBase}/fapi/v1/depth?symbol=${encodeURIComponent(fapiSymbol)}&limit=${DEPTH_LIMIT}`;
-      const book = await getJson(url, { allowed: FUTURES_HOSTS, timeoutMs, fetchImpl });
-      const depth = computeDepthWithin1Pct(book);
-      if (depth) {
-        fields.orderBookDepthWithin1Pct = depth.orderBookDepthWithin1Pct;
-        fields.depthUsdWithin1Pct = depth.depthUsdWithin1Pct;
-        if (Number.isFinite(depth.spreadPct)) fields.spreadPct = depth.spreadPct;
-        venue = 'futures';
-      }
-    } catch (err) {}
-
-    // 2) Futures funding rate (public premiumIndex), USDT-perp only.
-    if (fapiSymbol.endsWith('USDT')) {
-      try {
-        const url = `${futBase}/fapi/v1/premiumIndex?symbol=${encodeURIComponent(fapiSymbol)}`;
-        const prem = await getJson(url, { allowed: FUTURES_HOSTS, timeoutMs, fetchImpl });
-        const funding = fundingRateFromPremiumIndex(prem);
-        if (funding != null) { fields.fundingRate = funding; if (!venue) venue = 'futures'; }
-      } catch (err) {}
-    }
-
-    // 3) Spot depth fallback — ONLY when futures produced no order-book fields
-    //    (e.g. a spot-listed symbol that has no perp). Still public, read-only.
-    if (fields.orderBookDepthWithin1Pct == null) {
-      try {
-        const url = `${spotBase}/api/v3/depth?symbol=${encodeURIComponent(fapiSymbol)}&limit=${DEPTH_LIMIT}`;
-        const book = await getJson(url, { allowed: SPOT_HOSTS, timeoutMs, fetchImpl });
-        const depth = computeDepthWithin1Pct(book);
-        if (depth) {
-          fields.orderBookDepthWithin1Pct = depth.orderBookDepthWithin1Pct;
-          fields.depthUsdWithin1Pct = depth.depthUsdWithin1Pct;
-          if (Number.isFinite(depth.spreadPct)) fields.spreadPct = depth.spreadPct;
-          if (!venue) venue = 'spot';
-        }
-      } catch (err) {}
-    }
-
+    const { fields, venue, reason } = await measureSymbol(fapiSymbol);
     if (cache) cache.set(fapiSymbol, { at: now(), fields });
 
     if (Object.keys(fields).length) {
       microMap[fapiSymbol] = fields;
+      measuredCount += 1;
       if (diag) diag.measured += 1;
       recordDiag({ ...baseRec, measured: true, skipReason: null, venue: venue || 'futures' });
     } else {
       if (diag) diag.failedFetch += 1;
-      recordDiag({ ...baseRec, measured: false, skipReason: 'fapi-no-data', venue: null });
+      recordDiag({ ...baseRec, measured: false, skipReason: reason, venue: null });
     }
   }
 
