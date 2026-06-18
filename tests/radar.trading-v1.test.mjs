@@ -58,6 +58,18 @@ const CHASE_RISK = {
   meanReversionTarget: 116,
 };
 
+const NO_RECLAIM = {
+  ...EARLY_REVERSAL,
+  symbol: 'NORECUSDT',
+  reclaimConfirmed: false,
+  vwapHeld: false,
+  higherLowHeld: false,
+  higherLow: undefined,
+  change4hPct: -0.5,
+  change1hPct: -0.2,
+  btcRelativeChangePct: -4,
+};
+
 const HIGH_EXEC_LOW_SETUP = {
   ...FULL_MICRO_ENTRY,
   symbol: 'EXECUSDT',
@@ -141,7 +153,25 @@ test('D: hard market-regime block produces RISK_OFF_BLOCKED and zero position si
     ],
   });
   assert.equal(c.STATUS, 'RISK_OFF_BLOCKED');
+  assert.equal(c.ACTION, 'No new long entry. Monitor only.');
+  assert.equal(c.ENTRY_TYPE, 'NONE');
   assert.match(c.POSITION_SIZE_GUIDANCE, /^0%/);
+  assert.match(c.blockedBy, /market regime/i);
+});
+
+test('D2: candidate serialization exposes V1 STATUS instead of generic WATCH on hard regime block', () => {
+  const state = stateFor([], {
+    markets: [
+      { ...BTC, change24hPct: -5 },
+      { ...ETH, change24hPct: -6 },
+      { ...FULL_MICRO_ENTRY, symbol: 'SERUSDT' },
+    ],
+  });
+  const c = state.candidates.find((x) => x.symbol === 'SERUSDT');
+  assert.ok(c);
+  assert.equal(c.STATUS, 'RISK_OFF_BLOCKED');
+  assert.notEqual(c.STATUS, 'WATCH');
+  assert.match(c.blockedBy, /market regime/i);
 });
 
 test('E: missing microstructure lowers confidence and blocks aggressive entry without collapsing setup states', () => {
@@ -172,6 +202,27 @@ test('G: valid setup with bad current R/R is CHASE_RISK, not STANDARD_ENTRY_READ
   const c = candidate([CHASE_RISK], 'CHASEUSDT');
   assert.equal(c.STATUS, 'CHASE_RISK');
   assert.notEqual(c.STATUS, 'STANDARD_ENTRY_READY');
+});
+
+test('G2: dislocation + flush + stabilization without reclaim returns WAIT_FOR_RECLAIM with specific reason', () => {
+  const c = candidate([NO_RECLAIM], 'NORECUSDT');
+  assert.ok(c.DISLOCATION_SCORE >= 70);
+  assert.ok(c.FLUSH_SCORE >= 65);
+  assert.ok(c.STABILIZATION_SCORE >= 55);
+  assert.equal(c.STATUS, 'WAIT_FOR_RECLAIM');
+  assert.notEqual(c.STATUS, 'WATCH');
+  assert.match(c.blockedBy, /waiting for reclaim/i);
+  assert.doesNotMatch(c.blockedBy, /requires structural reclaim/i);
+});
+
+test('G3: missing microstructure lowers confidence but preserves intermediate V1 status', () => {
+  const missingMicro = candidate([NO_RECLAIM], 'NORECUSDT');
+  const withMicro = candidate([{ ...NO_RECLAIM, symbol: 'NOMIRUSDT', depthUsdWithin1Pct: 2e6, depthUsd: 2e6, bidDepthRebuildPct: 14, marketBuyVolumeDominance: 0.59, shortLiquidationSpike: 1.5 }], 'NOMIRUSDT');
+  assert.equal(missingMicro.microstructureMissing, true);
+  assert.ok(missingMicro.FINAL_CONFIDENCE < withMicro.FINAL_CONFIDENCE);
+  assert.equal(missingMicro.STATUS, 'WAIT_FOR_RECLAIM');
+  assert.notEqual(missingMicro.actionability, 'ENTRY_READY');
+  assert.equal(missingMicro.telegramEligible, false);
 });
 
 test('H: every ENTRY_READY candidate satisfies setup, execution, R/R, regime, and data gates', () => {

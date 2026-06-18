@@ -81,6 +81,22 @@ test('Trading RADAR focus panel surfaces microstructure blocking diagnostics', (
   assert.match(terminalCss, /\.radar-microstructure/);
 });
 
+test('Trading RADAR UI surfaces V1 status/action and structured output fields', () => {
+  assert.match(terminalJs, /const v1Status = c\.STATUS \|\| c\.actionability/);
+  assert.match(terminalJs, /const v1Action = c\.ACTION \|\| c\.nextRequiredConfirmation/);
+  assert.match(terminalJs, /_fleetRadarBadgeClass\(v1Status\)/);
+  assert.match(terminalJs, /<span>Status<\/span><b>\$\{esc\(selected\.STATUS/);
+  assert.match(terminalJs, /<span>Action<\/span><b>\$\{esc\(selected\.ACTION/);
+  assert.match(terminalJs, /<span>Entry type<\/span><b>\$\{esc\(selected\.ENTRY_TYPE/);
+  assert.match(terminalJs, /POSITION_SIZE_GUIDANCE/);
+  assert.match(terminalJs, /<span>Hard invalidation<\/span>/);
+  assert.match(terminalJs, /<span>Timeframe<\/span><b>\$\{esc\(selected\.TIMEFRAME_CONTEXT/);
+  assert.match(terminalJs, /<span>Time validity<\/span><b>\$\{esc\(selected\.TIME_VALIDITY/);
+  assert.match(terminalJs, /<span>Reason<\/span><b>\$\{esc\(\(selected\.REASON/);
+  assert.match(terminalJs, /<span>Invalidation<\/span><b>\$\{esc\(selected\.INVALIDATION/);
+  assert.match(terminalJs, /selected\.missingData \|\| selected\.missingSignals/);
+});
+
 test('Trading RADAR diagnostics and matrix expose coverage counts and readable states', () => {
   assert.match(terminalJs, /Scanner Rows Available/);
   assert.match(terminalJs, /Scanner Rows Sent/);

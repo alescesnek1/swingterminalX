@@ -759,6 +759,53 @@ function positionSizeGuidance(status, confidence) {
   return `${base[0]}-${base[1]}% planned position`;
 }
 
+function v1BlockedReason(status, scores, dataQuality, regime, hasCriticalRisk) {
+  if (status === 'RISK_OFF_BLOCKED') return 'market regime blocks long mean reversion';
+  if (status === 'INVALIDATED') return hasCriticalRisk ? 'safety/fundamental risk active' : 'setup invalidated';
+  if (status === 'DISLOCATION_CONFIRMED') return 'waiting for long flush confirmation';
+  if (status === 'LONG_FLUSH_CONFIRMED') return 'waiting for stabilization / no-new-low structure';
+  if (status === 'STABILIZATION') return 'waiting for reclaim';
+  if (status === 'WAIT_FOR_RECLAIM') return 'waiting for reclaim';
+  if (status === 'RECLAIM_DETECTED') {
+    if (scores.EXECUTION_SCORE < 65) return dataQuality.microstructureMissing
+      ? 'setup valid but execution not confirmed; missing trusted flow/orderbook data lowers confidence'
+      : 'setup valid but execution not confirmed';
+    if (scores.RISK_REWARD_SCORE < 55) return 'setup valid but R/R is poor';
+    return 'reclaim detected; waiting for entry data quality';
+  }
+  if (status === 'WAIT_FOR_PULLBACK') return dataQuality.microstructureMissing
+    ? 'setup valid but execution not confirmed; missing trusted flow/orderbook data lowers confidence'
+    : 'setup valid but execution not confirmed';
+  if (status === 'CHASE_RISK') return 'price extended / chase risk; setup valid but R/R is poor';
+  if (status === 'EXTENDED_ENTRY') return 'price extended; no full entry at current R/R';
+  if (status.includes('ENTRY_READY')) return 'entry gates passed';
+  if (status === 'WATCH') {
+    if (scores.FLUSH_SCORE >= 50) return 'watching flush; waiting for stronger stabilization';
+    if (scores.DISLOCATION_SCORE >= 45) return 'watching dislocation; waiting for flush confirmation';
+    if (scores.RECLAIM_SCORE >= 45) return 'reclaim proxy present but setup is not valid yet';
+    if (dataQuality.microstructureMissing) return 'provider unavailable / stale microstructure lowers confidence';
+    return 'waiting for setup confirmation';
+  }
+  if (regime && regime.blocksMeanReversion) return 'market regime blocks long mean reversion';
+  return 'waiting for setup confirmation';
+}
+
+function v1NextConfirmation(status, dataQuality) {
+  if (status === 'RISK_OFF_BLOCKED') return 'needs BTC/ETH regime and breadth to recover';
+  if (status === 'INVALIDATED') return 'needs safety/fundamental risk cleared';
+  if (status === 'DISLOCATION_CONFIRMED') return 'needs long flush confirmation';
+  if (status === 'LONG_FLUSH_CONFIRMED') return 'needs stabilization / no-new-low structure';
+  if (status === 'STABILIZATION' || status === 'WAIT_FOR_RECLAIM') return 'needs structural reclaim';
+  if (status === 'RECLAIM_DETECTED') return dataQuality.microstructureMissing
+    ? 'needs execution confirmation or stronger non-micro evidence'
+    : 'needs execution and R/R alignment';
+  if (status === 'WAIT_FOR_PULLBACK') return 'needs pullback / higher low with execution confirmation';
+  if (status === 'CHASE_RISK') return 'needs better R/R after pullback';
+  if (status === 'EXTENDED_ENTRY') return 'needs pullback before standard entry';
+  if (status.includes('ENTRY_READY')) return 'manage invalidation and TP plan';
+  return 'needs setup confirmation';
+}
+
 function buildRadarV1Output(market, regime, stageInfo, levels, safety) {
   const rawScores = radarScorePack(market, regime, stageInfo, levels, safety);
   const missing = missingForMarket(market);
@@ -807,8 +854,6 @@ function buildRadarV1Output(market, regime, stageInfo, levels, safety) {
   } else if (hasCriticalRisk) {
     status = safety.safetyStatus === 'DANGER' ? 'INVALIDATED' : 'RISK_OFF_BLOCKED';
     action = 'No long entry while safety/fundamental risk is active.';
-  } else if (!setupQualitySufficient || scores.SETUP_SCORE < 45) {
-    status = 'WATCH';
   } else if (scores.DISLOCATION_SCORE >= 70 && scores.FLUSH_SCORE < 65) {
     status = 'DISLOCATION_CONFIRMED';
     action = 'Watch for long flush and stabilization. No entry yet.';
@@ -859,6 +904,8 @@ function buildRadarV1Output(market, regime, stageInfo, levels, safety) {
   } else if (scores.RECLAIM_SCORE >= 50) {
     status = 'RECLAIM_DETECTED';
     action = 'Reclaim detected. Wait for execution score and risk/reward to align.';
+  } else if (!setupQualitySufficient || scores.SETUP_SCORE < 45) {
+    status = 'WATCH';
   }
 
   const execMissing = Array.isArray(scores.executionDataMissing) ? scores.executionDataMissing : [];
@@ -885,6 +932,8 @@ function buildRadarV1Output(market, regime, stageInfo, levels, safety) {
     microstructureTrusted: dataQuality.microstructureTrusted,
     microstructureMissing: dataQuality.microstructureMissing,
   };
+  const blockedReason = v1BlockedReason(status, scores, dataQuality, regime, hasCriticalRisk);
+  const nextConfirmation = v1NextConfirmation(status, dataQuality);
 
   return {
     STATUS: status,
@@ -900,7 +949,11 @@ function buildRadarV1Output(market, regime, stageInfo, levels, safety) {
     TIMEFRAME_CONTEXT: market.timeframeContext || '1D setup, 1H/15M execution',
     TIME_VALIDITY: status.includes('ENTRY_READY') ? 'valid until next 15m/1H structure update or reclaim failure' : 'valid until next public snapshot',
     REASON: compactReasons(reason, 4),
-    INVALIDATION: hasCriticalRisk ? 'safety/fundamental risk active' : 'loss of reclaim zone, new low below panic wick, bid depth disappearance, or BTC/ETH risk-off',
+    INVALIDATION: status === 'RISK_OFF_BLOCKED' ? 'market regime blocks long mean reversion'
+      : hasCriticalRisk ? 'safety/fundamental risk active'
+      : 'loss of reclaim zone, new low below panic wick, bid depth disappearance, or BTC/ETH risk-off',
+    BLOCKED_BY: blockedReason,
+    NEXT_CONFIRMATION: nextConfirmation,
     allRadarConditionsPassed: entryBaseValid && gates.dataQualitySufficient && status.includes('ENTRY_READY'),
     structuralStopExists,
     tpZonesExist,
@@ -1438,9 +1491,10 @@ export function evaluateTradingRadar({
       const entryReadyV1 = ['EARLY_ENTRY_READY', 'STANDARD_ENTRY_READY', 'AGGRESSIVE_ENTRY_READY'].includes(v1.STATUS);
       const adjustedConfidence = Math.min(stageInfo.confidence, v1.FINAL_CONFIDENCE);
       const effectiveActionability = entryReadyV1 ? 'ENTRY_READY'
-        : v1.STATUS === 'WAIT_FOR_PULLBACK' || v1.STATUS === 'EXTENDED_ENTRY' || v1.STATUS === 'RECLAIM_DETECTED' ? 'NEAR_ENTRY'
-        : v1.STATUS === 'WAIT_FOR_RECLAIM' ? 'NEEDS_CONFIRMATION'
+        : v1.STATUS === 'WAIT_FOR_PULLBACK' || v1.STATUS === 'EXTENDED_ENTRY' || v1.STATUS === 'CHASE_RISK' || v1.STATUS === 'RECLAIM_DETECTED' ? 'NEAR_ENTRY'
+        : v1.STATUS === 'WAIT_FOR_RECLAIM' || v1.STATUS === 'STABILIZATION' ? 'NEEDS_CONFIRMATION'
         : v1.STATUS === 'LONG_FLUSH_CONFIRMED' ? 'NEEDS_STABILIZATION'
+        : v1.STATUS === 'DISLOCATION_CONFIRMED' ? 'NEEDS_FLUSH_CONFIRMATION'
         : v1.STATUS === 'RISK_OFF_BLOCKED' || v1.STATUS === 'INVALIDATED' || safety.safetyStatus === 'DANGER' ? 'INVALIDATED'
         // Never let a heuristic stage-machine ENTRY_READY leak through the fallback.
         : stageInfo.actionability === 'ENTRY_READY' ? 'NEAR_ENTRY'
@@ -1500,10 +1554,11 @@ export function evaluateTradingRadar({
         absorptionBlockedReason: microDiag.absorptionBlockedReason,
         reclaimBlockedReason: microDiag.reclaimBlockedReason,
         missingSignals: missingForMarket(m).slice(0, 8),
-        nextRequiredConfirmation: stageInfo.nextRequiredConfirmation,
-        blockedBy: v1.STATUS === 'INVALIDATED' || v1.STATUS === 'RISK_OFF_BLOCKED' ? v1.INVALIDATION
+        nextRequiredConfirmation: v1.NEXT_CONFIRMATION || stageInfo.nextRequiredConfirmation,
+        blockedBy: v1.BLOCKED_BY
+          || (v1.STATUS === 'INVALIDATED' || v1.STATUS === 'RISK_OFF_BLOCKED' ? v1.INVALIDATION
           : safety.safetyStatus !== 'SAFE' && entryReadyV1 ? `safety ${safety.safetyStatus} (not SAFE) blocks entry/alert`
-          : stageInfo.blockedBy,
+          : stageInfo.blockedBy),
         // Telegram eligibility is fail-safe: V1 ENTRY_READY + all conditions +
         // confidence>=75 + concrete entry/stop + safety strictly SAFE. UNKNOWN or
         // DANGER safety can never be alertable here.
@@ -1522,8 +1577,9 @@ export function evaluateTradingRadar({
         },
       };
     }).sort((a, b) => {
-        const aAction = { EARLY_ENTRY_READY: 8, STANDARD_ENTRY_READY: 8, AGGRESSIVE_ENTRY_READY: 8, ENTRY_READY: 7, EXTENDED_ENTRY: 7, WAIT_FOR_PULLBACK: 6, NEAR_ENTRY: 6, WAIT_FOR_RECLAIM: 5, NEEDS_ABSORPTION: 5, NEEDS_STABILIZATION: 4, NEEDS_CONFIRMATION: 4, NEEDS_FLUSH_CONFIRMATION: 3, WATCH_ONLY: 2, RISK_OFF_BLOCKED: 1, INVALIDATED: 1 }[a.STATUS] || ({ ENTRY_READY: 7, NEAR_ENTRY: 6, NEEDS_ABSORPTION: 5, NEEDS_STABILIZATION: 4, NEEDS_CONFIRMATION: 4, NEEDS_FLUSH_CONFIRMATION: 3, WATCH_ONLY: 2, INVALIDATED: 1 }[a.actionability] || 0);
-        const bAction = { EARLY_ENTRY_READY: 8, STANDARD_ENTRY_READY: 8, AGGRESSIVE_ENTRY_READY: 8, ENTRY_READY: 7, EXTENDED_ENTRY: 7, WAIT_FOR_PULLBACK: 6, NEAR_ENTRY: 6, WAIT_FOR_RECLAIM: 5, NEEDS_ABSORPTION: 5, NEEDS_STABILIZATION: 4, NEEDS_CONFIRMATION: 4, NEEDS_FLUSH_CONFIRMATION: 3, WATCH_ONLY: 2, RISK_OFF_BLOCKED: 1, INVALIDATED: 1 }[b.STATUS] || ({ ENTRY_READY: 7, NEAR_ENTRY: 6, NEEDS_ABSORPTION: 5, NEEDS_STABILIZATION: 4, NEEDS_CONFIRMATION: 4, NEEDS_FLUSH_CONFIRMATION: 3, WATCH_ONLY: 2, INVALIDATED: 1 }[b.actionability] || 0);
+        const v1Rank = { EARLY_ENTRY_READY: 8, STANDARD_ENTRY_READY: 8, AGGRESSIVE_ENTRY_READY: 8, ENTRY_READY: 7, EXTENDED_ENTRY: 7, CHASE_RISK: 6, WAIT_FOR_PULLBACK: 6, RECLAIM_DETECTED: 6, NEAR_ENTRY: 6, WAIT_FOR_RECLAIM: 5, STABILIZATION: 5, LONG_FLUSH_CONFIRMED: 4, NEEDS_ABSORPTION: 5, NEEDS_STABILIZATION: 4, DISLOCATION_CONFIRMED: 3, NEEDS_CONFIRMATION: 4, NEEDS_FLUSH_CONFIRMATION: 3, WATCH_ONLY: 2, RISK_OFF_BLOCKED: 1, INVALIDATED: 1 };
+        const aAction = v1Rank[a.STATUS] || ({ ENTRY_READY: 7, NEAR_ENTRY: 6, NEEDS_ABSORPTION: 5, NEEDS_STABILIZATION: 4, NEEDS_CONFIRMATION: 4, NEEDS_FLUSH_CONFIRMATION: 3, WATCH_ONLY: 2, INVALIDATED: 1 }[a.actionability] || 0);
+        const bAction = v1Rank[b.STATUS] || ({ ENTRY_READY: 7, NEAR_ENTRY: 6, NEEDS_ABSORPTION: 5, NEEDS_STABILIZATION: 4, NEEDS_CONFIRMATION: 4, NEEDS_FLUSH_CONFIRMATION: 3, WATCH_ONLY: 2, INVALIDATED: 1 }[b.actionability] || 0);
         if (aAction !== bAction) return bAction - aAction;
         if (a.distanceToEntryReadyScore !== b.distanceToEntryReadyScore) return b.distanceToEntryReadyScore - a.distanceToEntryReadyScore;
         if (a.setupQualityScore !== b.setupQualityScore) return b.setupQualityScore - a.setupQualityScore;

@@ -7317,12 +7317,14 @@ function _renderTradingRadar(radar, esc) {
     : null;
 
   const watchNowHtml = watchNowCandidates.length ? watchNowCandidates.map(c => {
+    const v1Status = c.STATUS || c.actionability || '--';
+    const v1Action = c.ACTION || c.nextRequiredConfirmation || '--';
     return `<div class="radar-watch-card" onclick="window._radarSelect('${esc(c.symbol)}')">
-      <div class="radar-watch-card__head"><b>${esc(c.symbol)}</b> <span class="${_fleetRadarBadgeClass(c.actionability)}">${esc(c.actionability)}</span></div>
+      <div class="radar-watch-card__head"><b>${esc(c.symbol)}</b> <span class="${_fleetRadarBadgeClass(v1Status)}">${esc(v1Status)}</span></div>
       <div class="radar-watch-card__metrics"><span>dist ${esc(_fleetFmtRadarValue(c.distanceToEntryReadyScore, 0))}</span><span>score ${esc(_fleetFmtRadarValue(c.setupQualityScore, 0))}</span><span>conf ${esc(_fleetFmtRadarValue(c.confidence, 0))}</span></div>
       <div class="radar-watch-card__blocker"><b>Blocked by:</b> ${esc(c.blockedBy || '--')}</div>
-      <div class="radar-watch-card__conf"><b>Next:</b> ${esc(c.nextRequiredConfirmation || '--')}</div>
-      ${c.entryZone ? `<div class="radar-watch-card__zone">Zone: ${esc(zoneText(c.entryZone))}</div>` : ''}
+      <div class="radar-watch-card__conf"><b>Action:</b> ${esc(v1Action)}</div>
+      ${(c.ENTRY_ZONE || c.entryZone) ? `<div class="radar-watch-card__zone">Zone: ${esc(zoneText(c.ENTRY_ZONE || c.entryZone))}</div>` : ''}
     </div>`;
   }).join('') : '<div class="fleet-empty">No candidates nearing entry.</div>';
 
@@ -7351,14 +7353,17 @@ function _renderTradingRadar(radar, esc) {
     const absorbBlocked = microDiag.absorbBlocked;
 
     focusHtml = `<div class="radar-focus-card">
-      <div class="radar-focus-title"><b>${esc(selected.symbol || '--')}</b> <span class="${_fleetRadarBadgeClass(selected.actionability)}">${actLabel}</span></div>
+      <div class="radar-focus-title"><b>${esc(selected.symbol || '--')}</b> <span class="${_fleetRadarBadgeClass(selected.STATUS || selected.actionability)}">${actLabel}</span></div>
+      <div class="radar-focus-blocked"><span>Status</span><b>${esc(selected.STATUS || '--')}</b></div>
       <div class="radar-focus-blocked"><span>Action</span><b>${esc(selected.ACTION || '--')}</b></div>
       <div class="radar-focus-blocked"><span>Blocked by</span><b>${esc(selected.blockedBy || 'none')}</b></div>
       <div class="radar-focus-levels">
+        <div><span>Entry type</span><b>${esc(selected.ENTRY_TYPE || selected.entryType || 'NONE')}</b></div>
         <div><span>Setup</span><b>${esc(_fleetFmtRadarValue(selected.SETUP_SCORE, 0))}</b></div>
         <div><span>Execution</span><b>${esc(_fleetFmtRadarValue(selected.EXECUTION_SCORE, 0))}</b></div>
         <div><span>Risk/Reward</span><b>${esc(_fleetFmtRadarValue(selected.RISK_REWARD_SCORE, 0))}</b></div>
         <div><span>Regime</span><b>${esc(_fleetFmtRadarValue(selected.MARKET_REGIME_SCORE, 0))}</b></div>
+        <div><span>Confidence</span><b>${esc(_fleetFmtRadarValue(selected.CONFIDENCE ?? selected.FINAL_CONFIDENCE ?? selected.confidence, 0))}</b></div>
         <div><span>Final safety</span><b>${esc(selected.finalSafetyStatus || selected.safetyStatus || 'UNKNOWN')}</b></div>
         <div><span>Safety</span><b>${esc(selected.safetyStatus || 'UNKNOWN')} ${esc(selected.safetyScore != null ? selected.safetyScore : '')}</b></div>
         <div><span>Safety reason</span><b>${esc(selected.safetyReason || (selected.safetyReasons||[])[0] || '--')}</b></div>
@@ -7393,11 +7398,16 @@ function _renderTradingRadar(radar, esc) {
       </div>
       <div class="radar-next-trigger"><span>Next trigger</span><b>${esc(selected.nextRequiredConfirmation || 'none')}</b></div>
       <div class="radar-focus-levels">
-        <div><span>Entry zone</span><b>${esc(zoneText(selected.entryZone))}</b></div>
+        <div><span>Entry zone</span><b>${esc(zoneText(selected.ENTRY_ZONE || selected.entryZone))}</b></div>
         <div><span>Suggested stop</span><b>${esc(_fleetFmtRadarPrice(selected.STOP_LOSS_LEVEL ?? selected.suggestedStop))}</b></div>
         <div><span>Invalidation</span><b>${esc(_fleetFmtRadarPrice(selected.HARD_INVALIDATION ?? selected.invalidationLevel))}</b></div>
+        <div><span>Hard invalidation</span><b>${esc(_fleetFmtRadarPrice(selected.HARD_INVALIDATION ?? selected.invalidationLevel))}</b></div>
+        <div><span>Timeframe</span><b>${esc(selected.TIMEFRAME_CONTEXT || '--')}</b></div>
+        <div><span>Time validity</span><b>${esc(selected.TIME_VALIDITY || '--')}</b></div>
       </div>
       <div class="radar-next-trigger"><span>TP zones</span><b>${esc((selected.TAKE_PROFIT_LEVELS || selected.takeProfitCheckpoints || []).map(tp => `${tp.label || 'TP'} ${_fleetFmtRadarPrice(tp.level)}`).join(' / ') || '--')}</b></div>
+      <div class="radar-focus-blocked"><span>Reason</span><b>${esc((selected.REASON || selected.reasons || []).join(' | ') || '--')}</b></div>
+      <div class="radar-focus-blocked"><span>Invalidation</span><b>${esc(selected.INVALIDATION || '--')}</b></div>
     </div>`;
   } else {
     focusHtml = '<div class="fleet-empty radar-focus-card">No selected setup. Click a row to focus.</div>';
