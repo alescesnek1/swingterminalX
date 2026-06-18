@@ -711,10 +711,10 @@ function radarScorePack(market, regime, stageInfo, levels, safety) {
   if (market.buyVolumeDominance == null && market.marketBuyVolumeDominance == null
       && market.cumulativeDelta == null && market.takerBuySellRatio == null
       && market.deltaImprovementPct == null) execMissing.push('flow');
-  const execMissingPenalty = Math.min(30, execMissing.length * 8);
+  const execMissingPenalty = Math.min(12, execMissing.length * 3);
 
   const setup = clamp(dislocation * 0.20 + flush * 0.20 + stabilization * 0.20 + reclaim * 0.15 + deriv * 0.10 + marketRegime * 0.15);
-  const execution = clamp(orderBook * 0.25 + flow * 0.25 + reclaim * 0.15 + riskReward * 0.25 + marketRegime * 0.10 - execMissingPenalty);
+  const execution = clamp(orderBook * 0.08 + flow * 0.08 + reclaim * 0.32 + stabilization * 0.18 + riskReward * 0.24 + marketRegime * 0.10 - execMissingPenalty);
   // UNKNOWN safety is no longer a near-free pass: an unverifiable token cannot
   // be implicitly trusted, so it carries a real confidence penalty (and blocks
   // Telegram eligibility downstream — only SAFE is alertable).
@@ -760,8 +760,13 @@ function positionSizeGuidance(status, confidence) {
 }
 
 function buildRadarV1Output(market, regime, stageInfo, levels, safety) {
-  const scores = radarScorePack(market, regime, stageInfo, levels, safety);
+  const rawScores = radarScorePack(market, regime, stageInfo, levels, safety);
   const missing = missingForMarket(market);
+  const dataQuality = radarDataQuality(market, rawScores, missing);
+  const cappedConfidence = dataQuality.microstructureMissing
+    ? Math.min(rawScores.FINAL_CONFIDENCE, dataQuality.derivativesMissing ? 64 : 68)
+    : rawScores.FINAL_CONFIDENCE;
+  const scores = { ...rawScores, FINAL_CONFIDENCE: round(cappedConfidence, 0) };
   const structuralStopExists = !!(levels && levels.suggestedStop && levels.stopReference);
   const tpZonesExist = !!(levels && Array.isArray(levels.takeProfitCheckpoints) && levels.takeProfitCheckpoints.length >= 3);
   const hasCriticalRisk = safety.safetyStatus === 'DANGER'
@@ -774,56 +779,82 @@ function buildRadarV1Output(market, regime, stageInfo, levels, safety) {
   let status = 'WATCH';
   let entryType = 'NONE';
   let action = 'Monitor only. Waiting for setup and execution alignment.';
-  const setupOk = scores.SETUP_SCORE >= 65;
-  const execOk = scores.EXECUTION_SCORE >= 65;
-  const rrOk = scores.RISK_REWARD_SCORE >= 55;
-  const regimeOk = scores.MARKET_REGIME_SCORE >= 50 && !regime.blocksMeanReversion;
+  const setupValid = scores.SETUP_SCORE >= 65;
+  const executionValid = scores.EXECUTION_SCORE >= 65;
+  const riskRewardValid = scores.RISK_REWARD_SCORE >= 55;
+  const regimeAllowsLong = scores.MARKET_REGIME_SCORE >= 50 && !regime.blocksMeanReversion;
+  const setupQualitySufficient = dataQuality.sufficientForSetup;
+  const hasEarlyRecovery = scores.RECLAIM_SCORE >= 50
+    || market.retestHeld === true
+    || market.reclaimHeld === true
+    || market.vwapHeld === true
+    || market.higherLowHeld === true
+    || (stageInfo._signals && (stageInfo._signals.c1 > 0 || stageInfo._signals.c4 > 0));
+  const extendedNow = scores.RISK_REWARD_SCORE < 62
+    || (stageInfo._signals && (stageInfo._signals.c1 > 4 || stageInfo._signals.c4 > 8));
+  const entryBaseValid = setupValid
+    && executionValid
+    && riskRewardValid
+    && regimeAllowsLong
+    && !hasCriticalRisk
+    && structuralStopExists
+    && tpZonesExist
+    && scores.FINAL_CONFIDENCE >= 55;
 
-  if (regime.blocksMeanReversion || scores.MARKET_REGIME_SCORE < 40) {
+  if (regime.blocksMeanReversion || scores.MARKET_REGIME_SCORE < 45) {
     status = 'RISK_OFF_BLOCKED';
     action = 'No new long entry. Monitor only.';
   } else if (hasCriticalRisk) {
     status = safety.safetyStatus === 'DANGER' ? 'INVALIDATED' : 'RISK_OFF_BLOCKED';
     action = 'No long entry while safety/fundamental risk is active.';
-  } else if (scores.SETUP_SCORE < 45) {
+  } else if (!setupQualitySufficient || scores.SETUP_SCORE < 45) {
     status = 'WATCH';
-  } else if (scores.DISLOCATION_SCORE >= 65 && scores.FLUSH_SCORE < 60) {
+  } else if (scores.DISLOCATION_SCORE >= 70 && scores.FLUSH_SCORE < 65) {
     status = 'DISLOCATION_CONFIRMED';
     action = 'Watch for long flush and stabilization. No entry yet.';
   } else if (scores.FLUSH_SCORE >= 65 && scores.STABILIZATION_SCORE < 55) {
     status = 'LONG_FLUSH_CONFIRMED';
     action = 'Wait for no-new-low structure and fading sell pressure.';
   } else if (scores.STABILIZATION_SCORE >= 55 && scores.RECLAIM_SCORE < 50) {
-    status = 'WAIT_FOR_RECLAIM';
-    action = 'Wait for VWAP/range/breakdown reclaim before entry.';
-  } else if (setupOk && !execOk) {
-    status = scores.RISK_REWARD_SCORE < 45 ? 'CHASE_RISK' : 'WAIT_FOR_PULLBACK';
+    status = setupValid ? 'WAIT_FOR_RECLAIM' : 'STABILIZATION';
+    action = status === 'WAIT_FOR_RECLAIM'
+      ? 'Wait for VWAP/range/breakdown reclaim before entry.'
+      : 'Stabilization detected. Wait for reclaim before entry.';
+  } else if (setupValid && (!executionValid || !riskRewardValid)) {
+    status = scores.RISK_REWARD_SCORE < 55 ? 'CHASE_RISK' : 'WAIT_FOR_PULLBACK';
     action = status === 'CHASE_RISK'
       ? 'Do not open standard position. Wait for new structure or ignore.'
       : 'Setup valid, but do not chase current impulse. Wait for shallow pullback / higher low.';
-  } else if (!setupOk && execOk) {
+  } else if (!setupValid && executionValid) {
     status = 'WATCH';
     action = 'Execution looks better than setup quality. Wait for full setup confirmation.';
-  } else if (setupOk && execOk && rrOk && regimeOk && structuralStopExists && tpZonesExist && scores.FINAL_CONFIDENCE >= 55) {
-    const extended = scores.RISK_REWARD_SCORE < 62 || (stageInfo._signals && (stageInfo._signals.c1 > 4 || stageInfo._signals.c4 > 8));
-    if (extended) {
+  } else if (entryBaseValid) {
+    if (extendedNow) {
       status = scores.RISK_REWARD_SCORE < 45 ? 'CHASE_RISK' : 'EXTENDED_ENTRY';
       entryType = 'EXTENDED';
       action = status === 'CHASE_RISK'
         ? 'Do not open standard position. Only tiny starter allowed if strategy explicitly permits.'
         : 'No full entry. Only small starter allowed if live flow is strong.';
-    } else if (scores.RECLAIM_SCORE >= 70 && market.higherLowHeld === true) {
+    } else if (scores.RECLAIM_SCORE >= 70 && (market.higherLowHeld === true || market.retestHeld === true) && dataQuality.sufficientForStandardEntry) {
       status = 'STANDARD_ENTRY_READY';
       entryType = 'STANDARD_RETEST';
       action = 'Enter standard position on first higher low / reclaim retest.';
-    } else if (scores.ORDER_BOOK_SUPPORT_SCORE >= 72 && scores.FLOW_CONFIRMATION_SCORE >= 68) {
+    } else if (dataQuality.sufficientForAggressiveEntry && scores.ORDER_BOOK_SUPPORT_SCORE >= 72 && scores.FLOW_CONFIRMATION_SCORE >= 68) {
       status = 'AGGRESSIVE_ENTRY_READY';
       entryType = 'AGGRESSIVE_RECLAIM';
       action = 'Enter partial position now or on shallow intraday pullback. Do not wait for deep retest.';
-    } else {
+    } else if (scores.DISLOCATION_SCORE >= 70
+      && scores.FLUSH_SCORE >= 65
+      && scores.STABILIZATION_SCORE >= 55
+      && hasEarlyRecovery
+      && dataQuality.sufficientForEarlyEntry
+      && (!dataQuality.microstructureMissing || (scores.SETUP_SCORE >= 72 && scores.RECLAIM_SCORE >= 58))) {
       status = 'EARLY_ENTRY_READY';
       entryType = 'EARLY_REVERSAL';
       action = 'Open first tranche. Use current price or shallow intraday pullback.';
+    } else {
+      status = scores.RECLAIM_SCORE >= 50 ? 'RECLAIM_DETECTED' : 'WAIT_FOR_PULLBACK';
+      action = 'Setup is valid, but entry type data quality is not sufficient yet.';
     }
   } else if (scores.RECLAIM_SCORE >= 50) {
     status = 'RECLAIM_DETECTED';
@@ -831,13 +862,29 @@ function buildRadarV1Output(market, regime, stageInfo, levels, safety) {
   }
 
   const execMissing = Array.isArray(scores.executionDataMissing) ? scores.executionDataMissing : [];
-  const allMissingForReason = Array.from(new Set([...missing, ...execMissing]));
+  const allMissingForReason = dataQuality.missingData;
   const reason = [
     `setup ${scores.SETUP_SCORE}/100, execution ${scores.EXECUTION_SCORE}/100`,
     safety.safetyStatus === 'SAFE' ? 'safety check clear' : `safety ${safety.safetyStatus}: ${(safety.reasons || [])[0] || 'missing chain data'}`,
     allMissingForReason.length ? `missing data: ${allMissingForReason.slice(0, 4).join(', ')}` : 'critical market data present',
     regime.blocksMeanReversion ? 'market regime blocks longs' : `market regime ${scores.MARKET_REGIME_SCORE}/100`,
   ];
+  const dataQualityLabel = dataQuality.criticalMissing.length ? 'CRITICAL_MISSING'
+    : dataQuality.score >= 80 ? 'GOOD'
+    : dataQuality.score >= 60 ? 'DEGRADED'
+    : 'LOW';
+  const gates = {
+    setupValid,
+    executionValid,
+    riskRewardValid,
+    regimeAllowsLong,
+    dataQualitySufficient: status === 'EARLY_ENTRY_READY' ? dataQuality.sufficientForEarlyEntry
+      : status === 'STANDARD_ENTRY_READY' ? dataQuality.sufficientForStandardEntry
+      : status === 'AGGRESSIVE_ENTRY_READY' ? dataQuality.sufficientForAggressiveEntry
+      : dataQuality.sufficientForSetup,
+    microstructureTrusted: dataQuality.microstructureTrusted,
+    microstructureMissing: dataQuality.microstructureMissing,
+  };
 
   return {
     STATUS: status,
@@ -849,13 +896,32 @@ function buildRadarV1Output(market, regime, stageInfo, levels, safety) {
     STOP_REFERENCE: levels.stopReference,
     HARD_INVALIDATION: levels.invalidationLevel,
     TAKE_PROFIT_LEVELS: levels.takeProfitCheckpoints,
+    CONFIDENCE: scores.FINAL_CONFIDENCE,
     TIMEFRAME_CONTEXT: market.timeframeContext || '1D setup, 1H/15M execution',
     TIME_VALIDITY: status.includes('ENTRY_READY') ? 'valid until next 15m/1H structure update or reclaim failure' : 'valid until next public snapshot',
     REASON: compactReasons(reason, 4),
     INVALIDATION: hasCriticalRisk ? 'safety/fundamental risk active' : 'loss of reclaim zone, new low below panic wick, bid depth disappearance, or BTC/ETH risk-off',
-    allRadarConditionsPassed: setupOk && execOk && rrOk && regimeOk && !hasCriticalRisk && structuralStopExists && tpZonesExist,
+    allRadarConditionsPassed: entryBaseValid && gates.dataQualitySufficient && status.includes('ENTRY_READY'),
     structuralStopExists,
     tpZonesExist,
+    gates,
+    setupValid,
+    executionValid,
+    riskRewardValid,
+    regimeAllowsLong,
+    dataQualitySufficient: gates.dataQualitySufficient,
+    microstructureTrusted: dataQuality.microstructureTrusted,
+    microstructureMissing: dataQuality.microstructureMissing,
+    missingData: dataQuality.missingData,
+    dataQuality: {
+      status: dataQualityLabel,
+      score: dataQuality.score,
+      criticalMissing: dataQuality.criticalMissing,
+      missingData: dataQuality.missingData,
+      microstructureTrusted: dataQuality.microstructureTrusted,
+      microstructureMissing: dataQuality.microstructureMissing,
+      derivativesMissing: dataQuality.derivativesMissing,
+    },
     ...scores,
   };
 }
@@ -1140,6 +1206,53 @@ function missingForMarket(m) {
   if (m.bidDepthRebuildPct == null && m.bidDepthChangePct == null) miss.push('bidDepthRebuildPct');
   if (!m.reclaimConfirmed && !m.vwapReclaimed && !m.rangeHighReclaimed && !m.retestHeld) miss.push('vwap/reclaim/retest');
   return miss;
+}
+
+function radarDataQuality(market, scores, missing) {
+  const missingSet = new Set([...(missing || []), ...((scores && scores.executionDataMissing) || [])]);
+  const px = market.mid || midPrice(market) || n(market.lastPrice ?? market.price);
+  const criticalMissing = [];
+  if (!(px > 0)) criticalMissing.push('price');
+  if (!(n(market.quoteVolume ?? market.quoteVolume24h ?? market.volume24hUsd) > 0)) criticalMissing.push('quoteVolume');
+  if (n(market.change24hPct ?? market.priceChangePercent) == null && !market.isScannerContext) criticalMissing.push('change24hPct');
+
+  const hasDepth = microPresent(market.depthUsdWithin1Pct ?? market.orderBookDepthWithin1Pct ?? market.depthUsd ?? market.orderBookDepthUsd);
+  const hasSpread = microPresent(market.spreadPct);
+  const hasFlow = microPresent(market.marketBuyVolumeDominance ?? market.buyVolumeDominance)
+    || microPresent(market.cumulativeDelta)
+    || microPresent(market.takerBuySellRatio)
+    || microPresent(market.deltaImprovementPct)
+    || market.aggressiveSellsFailed != null
+    || market.bidAbsorption != null;
+  const hasRolling = market.absorptionScore != null
+    || microPresent(market.bidDepthRebuildPct)
+    || microPresent(market.bidDepthChangePct)
+    || market.bidAbsorption != null
+    || market.aggressiveSellsFailed != null
+    || hasFlow;
+  const microstructureTrusted = hasDepth && hasSpread && hasFlow && hasRolling
+    && market.microstructureStale !== true
+    && market.staticMicrostructureTrusted !== false;
+  const microstructureMissing = !hasDepth || !hasSpread || !hasFlow;
+  const derivMissing = missingSet.has('derivatives')
+    || missingSet.has('openInterestChangePct')
+    || missingSet.has('fundingRate')
+    || missingSet.has('longLiquidationSpike')
+    || missingSet.has('shortLiquidationSpike');
+  const score = clamp(100 - missingSet.size * 4 - criticalMissing.length * 22 - (microstructureMissing ? 10 : 0) - (derivMissing ? 8 : 0));
+
+  return {
+    score: round(score, 0),
+    criticalMissing,
+    sufficientForSetup: criticalMissing.length === 0 && score >= 45,
+    sufficientForEarlyEntry: criticalMissing.length === 0 && score >= 55,
+    sufficientForStandardEntry: criticalMissing.length === 0 && score >= 60,
+    sufficientForAggressiveEntry: criticalMissing.length === 0 && score >= 70 && microstructureTrusted,
+    microstructureTrusted,
+    microstructureMissing,
+    derivativesMissing: derivMissing,
+    missingData: Array.from(missingSet).sort(),
+  };
 }
 
 function buildPipeline(candidates, universeSize) {

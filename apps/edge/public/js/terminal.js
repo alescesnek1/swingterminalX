@@ -7373,12 +7373,13 @@ function _renderTradingRadar(radar, esc) {
         <div><span>Alpha token id</span><b>${esc(selected.alphaTokenId || '--')}</b></div>
         <div><span>Alpha pair</span><b>${esc(selected.alphaPair || '--')}</b></div>
         <div><span>Size</span><b>${esc(selected.POSITION_SIZE_GUIDANCE || '--')}</b></div>
+        <div><span>Data quality</span><b>${esc(selected.dataQuality ? `${selected.dataQuality.status || '--'} ${selected.dataQuality.score != null ? selected.dataQuality.score : ''}` : '--')}</b></div>
       </div>
       <div class="radar-focus-blocked"><span>Telegram</span><b>${String(selected.safetyStatus||'UNKNOWN')==='SAFE' ? 'allowed by safety only; ENTRY_READY microstructure gates still apply' : 'blocked: safety is not SAFE'}</b></div>
       <div class="radar-focus-grid">
         <div><span>Passed</span><div class="radar-chip-row">${chipList(groups.passed, 'radar-status-chip radar-status-chip--pass')}</div></div>
         <div><span>Waiting</span><div class="radar-chip-row">${chipList(groups.waiting, 'radar-status-chip radar-status-chip--wait')}</div></div>
-        <div><span>Missing data</span><div class="radar-chip-row">${chipList([...(groups.missing || []), ...((selected.missingSignals || []).slice(0, 6))], 'radar-status-chip radar-status-chip--missing')}</div></div>
+        <div><span>Missing data</span><div class="radar-chip-row">${chipList([...(groups.missing || []), ...((selected.missingData || selected.missingSignals || []).slice(0, 8))], 'radar-status-chip radar-status-chip--missing')}</div></div>
       </div>
       <div class="radar-microstructure">
         <div class="radar-microstructure__title">Microstructure readiness</div>
