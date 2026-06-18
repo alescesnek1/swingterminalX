@@ -45,10 +45,17 @@ test('workflow does not reference Telegram or ENTRY_READY', () => {
   assert.doesNotMatch(workflow, /telegram/i);
 });
 
-test('workflow uses BOT_WORKER_TOKEN secret and the public control base URL', () => {
-  assert.match(workflow, /BOT_WORKER_TOKEN/);
-  assert.match(workflow, /secrets\.BOT_WORKER_TOKEN/);
-  assert.match(workflow, /CONTROL_BASE_URL/);
+test('workflow injects BOT_WORKER_TOKEN from the GitHub Actions secret', () => {
+  // Exact injection line — the producer reads process.env.BOT_WORKER_TOKEN, so
+  // the step env must map it from the repository secret (whitespace-tolerant).
+  assert.match(workflow, /BOT_WORKER_TOKEN:\s*\$\{\{\s*secrets\.BOT_WORKER_TOKEN\s*\}\}/);
+});
+
+test('workflow sets the full producer env block', () => {
+  assert.match(workflow, /CONTROL_BASE_URL:\s*https:\/\/swingterminalx\.netlify\.app/);
+  assert.match(workflow, /WORKER_RADAR_MICROSTRUCTURE_ENABLED:\s*['"]true['"]/);
+  assert.match(workflow, /WORKER_RADAR_MICROSTRUCTURE_TOP_N:\s*['"]5['"]/);
+  assert.match(workflow, /WORKER_RADAR_MICROSTRUCTURE_CACHE_MS:\s*['"]10000['"]/);
 });
 
 test('docs exist and document fail-closed / static-only does not pass Absorb', () => {
