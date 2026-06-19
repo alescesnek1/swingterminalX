@@ -1053,6 +1053,8 @@ function buildRadarV1Output(market, regime, stageInfo, levels, safety) {
     RECLAIM_REJECT_REASONS: reclaimV2.RECLAIM_REJECT_REASONS,
     RECLAIM_CLASSIFICATION: reclaimV2.RECLAIM_CLASSIFICATION,
     RECLAIM_LEVELS: reclaimV2.RECLAIM_LEVELS,
+    RECLAIM_SOURCE_DATA_STATUS: reclaimV2.RECLAIM_SOURCE_DATA_STATUS,
+    RECLAIM_MISSING_SOURCE_FIELDS: reclaimV2.RECLAIM_MISSING_SOURCE_FIELDS,
     reclaimV2: { ...reclaimV2, legacyProxyScore: scores.RECLAIM_SCORE },
   };
 }
@@ -1580,6 +1582,13 @@ const RECLAIM_LEVEL_SOURCES = Object.freeze([
   { type: 'local pivot before breakdown', importance: 58, lostByNature: true, get: (m) => n(m.preBreakdownPivot ?? m.pivotHigh ?? m.localPivot) },
   { type: 'MA / trend zone', importance: 50, lostByNature: false, get: (m) => n(m.maResistance ?? m.ma50 ?? m.trendZone ?? m.emaZone) },
 ]);
+const RECLAIM_SOURCE_FIELD_NAMES = Object.freeze([
+  'breakdownLevel', 'nearestBreakdownLevel', 'reclaimLevel', 'flushHigh',
+  'flushCandleHigh', 'panicHigh', 'rangeLow', 'previousSupport',
+  'nearestSupport', 'anchoredVwap', 'vwap', 'baseHigh', 'localHigh',
+  'priorBounceHigh', 'preBreakdownPivot', 'pivotHigh', 'localPivot',
+  'maResistance', 'ma50', 'trendZone', 'emaZone',
+]);
 
 function reclaimTimeframeOf(m) {
   const explicit = String(m.reclaimTimeframe || m.timeframe || '').toUpperCase().replace(/\s+/g, '');
@@ -1662,14 +1671,20 @@ function evaluateReclaimV2(market, regime, dataQuality) {
   }
   const primary = levels[0] || null;
   if (!primary) {
-    rejectReasons.push('no relevant reclaim level found');
+    const missingSourceFields = RECLAIM_SOURCE_FIELD_NAMES.filter((k) => !microPresent(m[k]));
+    const hasSourceData = missingSourceFields.length < RECLAIM_SOURCE_FIELD_NAMES.length;
+    rejectReasons.push(hasSourceData ? 'no relevant reclaim level found' : 'RECLAIM_DATA_SOURCE_MISSING');
     return buildReclaimResult({
       status: 'RECLAIM_LEVEL_UNDEFINED', score: 0, confidence: 0, timeframe,
       primary: null, levels, closeAbove: false, retestStatus: 'undefined',
       classification: 'NONE', tolPct,
       failedReason: null, rejectReasons,
-      nextRequired: 'identify a breakdown / range / VWAP / base level to reclaim',
+      nextRequired: hasSourceData
+        ? 'identify a valid breakdown / range / VWAP / base level to reclaim'
+        : 'scanner did not supply reclaim source fields: breakdownLevel, rangeLow, vwap, baseHigh',
       components: {},
+      sourceDataStatus: hasSourceData ? 'NO_LEVEL_FOUND' : 'RECLAIM_DATA_SOURCE_MISSING',
+      missingSourceFields,
     });
   }
 
@@ -1823,6 +1838,7 @@ function evaluateReclaimV2(market, regime, dataQuality) {
 function buildReclaimResult({
   status, score, confidence, timeframe, primary, levels, closeAbove, retestStatus,
   classification, tolPct, failedReason, rejectReasons, nextRequired, components,
+  sourceDataStatus, missingSourceFields,
 }) {
   return {
     RECLAIM_STATUS: status,
@@ -1841,6 +1857,8 @@ function buildReclaimResult({
     RECLAIM_CLASSIFICATION: classification,
     RECLAIM_LEVELS: levels || [],
     RECLAIM_TOLERANCE_PCT: round(tolPct, 3),
+    RECLAIM_SOURCE_DATA_STATUS: sourceDataStatus || (primary ? 'SOURCE_DATA_PRESENT' : 'NO_LEVEL_FOUND'),
+    RECLAIM_MISSING_SOURCE_FIELDS: missingSourceFields || [],
     components: components || {},
   };
 }
@@ -2184,7 +2202,12 @@ export function evaluateTradingRadar({
         a.absorbMode = v1.ABSORB_MODE;
         a.strictAbsorbStatus = v1.STRICT_ABSORB_STATUS;
         a.proxyAbsorbStatus = v1.PROXY_ABSORB_STATUS;
-        a.displayReason = `${v1.ABSORB_STATUS}${v1.ABSORB_BLOCK_REASON && v1.ABSORB_BLOCK_REASON !== 'none' ? ' — ' + v1.ABSORB_BLOCK_REASON : ''}`;
+        const strictUnavailable = v1.STRICT_ABSORB_STATUS === 'ABSORB_DATA_UNAVAILABLE';
+        const proxyRejected = v1.PROXY_ABSORB_STATUS === 'ABSORB_REJECTED';
+        const absorbDisplayStatus = strictUnavailable && proxyRejected
+          ? 'ABSORB_DATA_UNAVAILABLE (proxy rejected)'
+          : v1.ABSORB_STATUS;
+        a.displayReason = `${absorbDisplayStatus}${v1.ABSORB_BLOCK_REASON && v1.ABSORB_BLOCK_REASON !== 'none' ? ' — ' + v1.ABSORB_BLOCK_REASON : ''}`;
       }
       // SINGLE SOURCE OF TRUTH: a candidate is ENTRY_READY only when the V1/spec
       // gate in buildRadarV1Output passes. The heuristic stage machine

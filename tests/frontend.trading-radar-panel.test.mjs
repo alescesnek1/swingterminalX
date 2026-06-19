@@ -121,6 +121,7 @@ test('Phase C: focus panel renders a Reclaim Diagnostics Panel (never a bare Rec
   // RECLAIM IS NOT ABSORB — rendered in its own panel with all required fields.
   assert.match(terminalJs, /Reclaim Diagnostics Panel/);
   assert.match(terminalJs, /RECLAIM_STATUS/);
+  assert.match(terminalJs, /RECLAIM_SOURCE_DATA_STATUS/);
   assert.match(terminalJs, /RECLAIM_SCORE/);
   assert.match(terminalJs, /RECLAIM_CLASSIFICATION/);
   assert.match(terminalJs, /RECLAIM_LEVEL_ZONE/);
@@ -131,8 +132,10 @@ test('Phase C: focus panel renders a Reclaim Diagnostics Panel (never a bare Rec
   assert.match(terminalJs, /FAILED_REASON/);
   assert.match(terminalJs, /NEXT_REQUIRED_CONDITION/);
   assert.match(terminalJs, /selected\.RECLAIM_STATUS/);
+  assert.match(terminalJs, /selected\.RECLAIM_SOURCE_DATA_STATUS/);
   assert.match(terminalJs, /selected\.RECLAIM_SCORE/);
   assert.match(terminalJs, /selected\.RECLAIM_REJECT_REASONS/);
+  assert.match(terminalJs, /selected\.RECLAIM_MISSING_SOURCE_FIELDS/);
   // Detected/confirmed/retest-hold are surfaced as an explicit status string, not
   // a boolean, so the UI can never collapse to "Reclaim: false" / blank.
   assert.match(terminalJs, /reclaimStatus = selected\.RECLAIM_STATUS \|\| 'RECLAIM_DATA_UNAVAILABLE'/);
@@ -224,7 +227,7 @@ test('Phase C.1: Matrix Absorb cell renders explicit compact text, never a bare 
   // Evidence level is surfaced even in proxy mode, so the operator can tell
   // proxy-only from watch from rejected at a glance (not all collapsed to PROXY).
   assert.equal(absorbCompact({ ABSORB_STATUS: 'ABSORB_WATCH', ABSORB_MODE: 'PROXY' }), 'WATCH');
-  assert.equal(absorbCompact({ ABSORB_STATUS: 'ABSORB_REJECTED', ABSORB_MODE: 'PROXY' }), 'REJECTED');
+  assert.equal(absorbCompact({ ABSORB_STATUS: 'ABSORB_REJECTED', ABSORB_MODE: 'PROXY', STRICT_ABSORB_STATUS: 'ABSORB_DATA_UNAVAILABLE', PROXY_ABSORB_STATUS: 'ABSORB_REJECTED' }), 'STRICT N/A');
   assert.equal(absorbCompact({ ABSORB_STATUS: 'ABSORB_REJECTED', ABSORB_MODE: 'STRICT' }), 'REJECTED');
   // No branch ever returns a bare "?".
   for (const st of ['', 'ABSORB_DATA_UNAVAILABLE', 'ABSORB_DATA_STALE', 'ABSORB_PROVIDER_UNTRUSTED', 'ABSORB_PARTIAL_EVIDENCE', 'ABSORB_WATCH', 'ABSORB_REJECTED', 'ABSORB_CONFIRMED']) {
@@ -234,9 +237,40 @@ test('Phase C.1: Matrix Absorb cell renders explicit compact text, never a bare 
   }
 });
 
+test('Phase C.5: unavailable strict absorb does not render as plain rejected', () => {
+  const absorbCompact = extractFn(terminalJs, '_fleetRadarAbsorbCompact');
+  const absorbVerdict = extractFn(terminalJs, '_fleetRadarAbsorbVerdict');
+  const noStrictProxyRejected = {
+    ABSORB_STATUS: 'ABSORB_REJECTED',
+    ABSORB_MODE: 'PROXY',
+    STRICT_ABSORB_STATUS: 'ABSORB_DATA_UNAVAILABLE',
+    PROXY_ABSORB_STATUS: 'ABSORB_REJECTED',
+  };
+  assert.equal(absorbCompact(noStrictProxyRejected), 'STRICT N/A');
+  assert.notEqual(absorbCompact(noStrictProxyRejected), 'REJECTED');
+  assert.equal(absorbVerdict(noStrictProxyRejected), 'NO STRICT DATA — proxy rejected');
+  assert.equal(absorbVerdict({
+    ABSORB_STATUS: 'ABSORB_REJECTED',
+    ABSORB_MODE: 'STRICT',
+    STRICT_ABSORB_STATUS: 'ABSORB_REJECTED',
+    PROXY_ABSORB_STATUS: 'ABSORB_REJECTED',
+  }), 'REJECTED — no absorption');
+  assert.match(terminalJs, /Proxy evidence only — NOT confirmed absorption/);
+});
+
+test('Phase C.5: Matrix Entry column uses final executable entry, not heuristic setup variant', () => {
+  const entryLabel = extractFn(terminalJs, '_fleetRadarMatrixEntryLabel');
+  assert.equal(entryLabel({ ENTRY_TYPE: 'NONE', conditionChecklist: { entryVariant: { type: 'ABSORPTION_ENTRY' } } }, 'RISK_OFF_BLOCKED'), 'NONE');
+  assert.equal(entryLabel({ ENTRY_TYPE: 'STANDARD_RECLAIM' }, 'STANDARD_ENTRY_READY'), 'STANDARD_RECLAIM');
+  assert.match(terminalJs, /_fleetRadarMatrixEntryLabel\(c, v1Status\)/);
+  assert.match(terminalJs, /Setup signal:/);
+  assert.doesNotMatch(terminalJs, /<td>\$\{esc\(\(cl\.entryVariant \|\| \{\}\)\.type \|\| '--'\)\}<\/td>/);
+});
+
 test('Phase C.1: Matrix Reclaim cell renders explicit compact labels', () => {
   assert.match(terminalJs, /_fleetRadarReclaimCompact\(c\)/);
   const reclaimCompact = extractFn(terminalJs, '_fleetRadarReclaimCompact');
+  assert.equal(reclaimCompact({ RECLAIM_STATUS: 'RECLAIM_LEVEL_UNDEFINED', RECLAIM_SOURCE_DATA_STATUS: 'RECLAIM_DATA_SOURCE_MISSING' }), 'NO RECLAIM DATA');
   assert.equal(reclaimCompact({ RECLAIM_STATUS: 'RECLAIM_LEVEL_UNDEFINED' }), 'NO LEVEL');
   assert.equal(reclaimCompact({ RECLAIM_STATUS: 'RECLAIM_NOT_STARTED' }), 'NOT STARTED');
   assert.equal(reclaimCompact({ RECLAIM_STATUS: 'RECLAIM_ATTEMPT' }), 'ATTEMPT');
@@ -257,7 +291,7 @@ test('Phase C.2: focus candidate renders a decision-card Operator Summary (Entry
   // Verdicts are derived from existing fields only.
   assert.match(terminalJs, /_fleetRadarEntryVerdict\(selected, selectedV1Status, selectedV1BlockedBy\)/);
   assert.match(terminalJs, /_fleetRadarAbsorbVerdict\(selected\)/);
-  assert.match(terminalJs, /_fleetRadarReclaimHuman\(reclaimStatus\)/);
+  assert.match(terminalJs, /_fleetRadarReclaimHuman\(reclaimDisplayStatus\)/);
   // The top summary is NO LONGER a full-width key/value table (label far-left,
   // value far-right). The old row markup must be gone.
   assert.doesNotMatch(terminalJs, /radar-operator-summary[^]*?<span>Entry<\/span><b>\$\{esc\(opEntryVerdict\)\}/);
@@ -325,6 +359,9 @@ test('Phase C.1: reclaim level undefined renders human "NO LEVEL FOUND" text', (
   assert.match(attempt.meaning, /testing reclaim zone, not confirmed/);
   const detected = human('RECLAIM_DETECTED');
   assert.match(detected.meaning, /moved above the level, but confirmation\/retest is missing/);
+  const sourceMissing = human('RECLAIM_DATA_SOURCE_MISSING');
+  assert.equal(sourceMissing.verdict, 'NO RECLAIM DATA');
+  assert.match(sourceMissing.meaning, /scanner did not provide/);
 });
 
 test('Phase C.1: proxy absorb is explicitly labelled NOT confirmed absorption', () => {

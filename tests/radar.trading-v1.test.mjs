@@ -340,7 +340,8 @@ const R_DETECTED = { ...RB, symbol: 'RDETUSDT', bidPrice: 100, askPrice: 100.04,
 const R_CONFIRMED_NR = { ...RB, symbol: 'RCNRUSDT', bidPrice: 100, askPrice: 100.04, breakdownLevel: 98, reclaimConfirmed: true, change24hPct: -8 };
 const R_RETEST_HOLD = { ...RB, symbol: 'RRHUSDT', bidPrice: 100, askPrice: 100.04, breakdownLevel: 98, reclaimConfirmed: true, retestHeld: true, higherLowHeld: true, change24hPct: -8 };
 const R_FAILED = { ...RB, symbol: 'RFAILUSDT', bidPrice: 100, askPrice: 100.04, breakdownLevel: 98, reclaimConfirmed: true, reclaimLost: true, change24hPct: -8 };
-const R_LEVEL_UNDEFINED = { ...RB, symbol: 'RUNDUSDT', bidPrice: 100, askPrice: 100.04, change24hPct: -8 };
+const R_LEVEL_UNDEFINED = { ...RB, symbol: 'RUNDUSDT', bidPrice: 100, askPrice: 100.04, rangeLow: 0, change24hPct: -8 };
+const R_SOURCE_MISSING = { ...RB, symbol: 'RSRCUSDT', bidPrice: 100, askPrice: 100.04, change24hPct: -8 };
 
 // Strict-absorb + reclaim-confirmed fixture (full trusted microstructure) used to
 // prove gates still apply even when both Absorb and Reclaim are confirmed.
@@ -371,7 +372,18 @@ test('Reclaim-2: no relevant level => RECLAIM_LEVEL_UNDEFINED with a reason', ()
   const c = candidate([R_LEVEL_UNDEFINED], 'RUNDUSDT');
   assert.equal(c.RECLAIM_STATUS, 'RECLAIM_LEVEL_UNDEFINED');
   assert.equal(c.RECLAIM_LEVEL, null);
+  assert.equal(c.RECLAIM_SOURCE_DATA_STATUS, 'NO_LEVEL_FOUND');
   assert.ok(c.RECLAIM_REJECT_REASONS.includes('no relevant reclaim level found'));
+});
+
+test('Reclaim-2b: missing scanner source fields => explicit source-data-missing diagnostic', () => {
+  const c = candidate([R_SOURCE_MISSING], 'RSRCUSDT');
+  assert.equal(c.RECLAIM_STATUS, 'RECLAIM_LEVEL_UNDEFINED');
+  assert.equal(c.RECLAIM_SOURCE_DATA_STATUS, 'RECLAIM_DATA_SOURCE_MISSING');
+  assert.equal(c.RECLAIM_LEVEL, null);
+  assert.ok(c.RECLAIM_REJECT_REASONS.includes('RECLAIM_DATA_SOURCE_MISSING'));
+  assert.ok(c.RECLAIM_MISSING_SOURCE_FIELDS.includes('breakdownLevel'));
+  assert.match(c.RECLAIM_NEXT_REQUIRED_CONDITION, /scanner did not supply reclaim source fields/i);
 });
 
 test('Reclaim-3: price below the zone => RECLAIM_NOT_STARTED', () => {
@@ -461,4 +473,33 @@ test('Reclaim-13: reclaim funnel exposes snapshot counters separate from absorb 
   // Funnel is wired into the pipeline alongside (but distinct from) absorbFunnel.
   assert.ok(state.pipeline.reclaimFunnel);
   assert.notEqual(state.reclaimFunnel, state.absorbFunnel);
+});
+
+test('Reclaim-14: current scanner-shaped rows with missing reclaim sources stay fail-safe and non-telegram', () => {
+  const state = evaluateTradingRadar({
+    markets: [BTC, ETH],
+    scannerCandidates: [{
+      symbol: 'REALMISSUSDT',
+      price: 0.42,
+      volume: 80_000_000,
+      c24: -9,
+      c12: -6,
+      c4: -1,
+      c1: 0.4,
+      score: 70,
+      signal: 'FLUSH',
+      source: 'scanner-fixture',
+    }],
+    source: 'scanner-shaped-fixture',
+    now: NOW,
+  });
+  const c = state.candidates.find((x) => x.symbol === 'REALMISSUSDT');
+  assert.ok(c, 'scanner-shaped candidate should be evaluated');
+  assert.equal(c.RECLAIM_STATUS, 'RECLAIM_LEVEL_UNDEFINED');
+  assert.equal(c.RECLAIM_SOURCE_DATA_STATUS, 'RECLAIM_DATA_SOURCE_MISSING');
+  assert.equal(c.STRICT_ABSORB_STATUS, 'ABSORB_DATA_UNAVAILABLE');
+  assert.notEqual(c.actionability, 'ENTRY_READY');
+  assert.notEqual(c.STATUS, 'AGGRESSIVE_ENTRY_READY');
+  assert.equal(c.ENTRY_TYPE, 'NONE');
+  assert.equal(c.telegramEligible, false);
 });
