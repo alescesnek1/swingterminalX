@@ -81,6 +81,47 @@ test('Trading RADAR focus panel surfaces microstructure blocking diagnostics', (
   assert.match(terminalCss, /\.radar-microstructure/);
 });
 
+test('Phase B: focus panel renders Provider Status and Absorb Diagnostics panels', () => {
+  // Provider Status Panel with explicit feed/latency fields (N/A when unknown).
+  assert.match(terminalJs, /Provider Status Panel/);
+  assert.match(terminalJs, /MICROSTRUCTURE_PROVIDER/);
+  assert.match(terminalJs, /LAST_UPDATE/);
+  assert.match(terminalJs, /DATA_LATENCY_MS/);
+  assert.match(terminalJs, /ORDER_BOOK_FEED/);
+  assert.match(terminalJs, /TRADES_FEED/);
+  assert.match(terminalJs, /OI_FEED/);
+  assert.match(terminalJs, /FUNDING_FEED/);
+  assert.match(terminalJs, /ABSORB_MODE/);
+  // Latency/feed values are N/A when not reported — never invented.
+  assert.match(terminalJs, /N\/A \(not reported by provider\)/);
+
+  // Absorb Diagnostics Panel with strict/proxy split and component scores.
+  assert.match(terminalJs, /Absorb Diagnostics Panel/);
+  assert.match(terminalJs, /STRICT Absorb Status/);
+  assert.match(terminalJs, /PROXY Absorb Status/);
+  assert.match(terminalJs, /STRICT Absorb Score/);
+  assert.match(terminalJs, /PROXY Absorb Score/);
+  assert.match(terminalJs, /Sell Pressure Score/);
+  assert.match(terminalJs, /Price Impact Score/);
+  assert.match(terminalJs, /Bid Survival \/ Rebuild Score/);
+  assert.match(terminalJs, /Low Rejection Score/);
+  assert.match(terminalJs, /Support Retest Score/);
+  assert.match(terminalJs, /Spread \/ Liquidity Score/);
+  assert.match(terminalJs, /Market Regime Score/);
+  assert.match(terminalJs, /Reject \/ Block Reason/);
+  assert.match(terminalJs, /Next Required Condition/);
+  assert.match(terminalJs, /selected\.STRICT_ABSORB_STATUS/);
+  assert.match(terminalJs, /selected\.PROXY_ABSORB_STATUS/);
+  assert.match(terminalJs, /selected\.ABSORB_MISSING_FIELDS/);
+  // Proxy partial evidence is explicitly labelled NOT a confirmed absorb.
+  assert.match(terminalJs, /proxy evidence — NOT a confirmed absorb/);
+});
+
+test('Phase B: absorption checklist row shows explicit Absorb v2 state, never a bare label', () => {
+  // The absorption row prefers the explicit Absorb v2 displayReason.
+  assert.match(terminalJs, /k === 'absorption' && item\.displayReason/);
+});
+
 test('Trading RADAR UI surfaces V1 status/action and structured output fields', () => {
   assert.match(terminalJs, /function _fleetRadarV1Status\(c\)/);
   assert.match(terminalJs, /function _fleetRadarV1BlockedBy\(c\)/);

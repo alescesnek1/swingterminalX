@@ -7357,7 +7357,14 @@ function _renderTradingRadar(radar, esc) {
                      selected.actionability === 'INVALIDATED' ? 'INVALIDATED' : 'NOT ACTIONABLE YET');
     
     const cl = selected.conditionChecklist || {};
-    const checklistHtml = Object.keys(cl).map(k => `<li>${pillStatus(cl[k].status)} <b>${k}</b>: ${esc(cl[k].reason)}</li>`).join('');
+    // Phase B: the absorption row always shows the EXPLICIT Absorb v2 state
+    // (e.g. ABSORB_DATA_UNAVAILABLE / ABSORB_PROVIDER_UNTRUSTED / ABSORB_REJECTED /
+    // ABSORB_CONFIRMED), so the operator never sees a bare "Absorb: ?" label.
+    const checklistHtml = Object.keys(cl).map(k => {
+      const item = cl[k] || {};
+      const reason = (k === 'absorption' && item.displayReason) ? item.displayReason : item.reason;
+      return `<li>${pillStatus(item.status)} <b>${k}</b>: ${esc(reason)}</li>`;
+    }).join('');
     const groups = _fleetRadarChecklistGroups(selected.conditionChecklist || {});
 
     // Static microstructure is a provider-backed OPTIONAL overlay. Distinguish
@@ -7372,6 +7379,27 @@ function _renderTradingRadar(radar, esc) {
     const staticLabel = microDiag.staticLabel;
     const staticCls = microDiag.staticCls;
     const absorbBlocked = microDiag.absorbBlocked;
+
+    // Phase B — Provider Status Panel + Absorb Diagnostics Panel data. All values
+    // are derived from real backend fields; anything the provider does not report
+    // (per-feed health, latency without a timestamp) is shown as N/A, never faked.
+    const provState = (() => {
+      if (!microProv || microProv.present === false || microProv.providerStatus === 'unavailable') return 'OFFLINE';
+      if (microProv.stale || microProv.providerStatus === 'stale') return 'STALE';
+      if (microProv.trusted === false) return 'UNTRUSTED';
+      if (microProv.trusted === true && microProv.providerStatus === 'present') return 'ONLINE';
+      return 'OFFLINE';
+    })();
+    const provLastUpdate = (microProv && microProv.receivedAt) ? microProv.receivedAt : 'N/A';
+    const provLatencyMs = (microProv && microProv.receivedAt) ? (Date.now() - Date.parse(microProv.receivedAt)) : null;
+    const provLatencyLabel = (provLatencyMs != null && isFinite(provLatencyMs)) ? `${Math.max(0, Math.round(provLatencyMs))} ms` : 'N/A';
+    // Per-feed health is not individually reported by the snapshot provider today.
+    const feedLabel = (provState === 'OFFLINE') ? 'MISSING (no provider)' : 'N/A (not reported by provider)';
+    const absorbMode = selected.ABSORB_MODE || 'DISABLED';
+    const av = selected.absorbV2 || {};
+    const avComp = av.components || {};
+    const proxyPartial = selected.PROXY_ABSORB_STATUS === 'ABSORB_PARTIAL_EVIDENCE';
+    const strictConfirmedUi = selected.STRICT_ABSORB_CONFIRMED === true;
 
     focusHtml = `<div class="radar-focus-card">
       <div class="radar-focus-title"><b>${esc(selected.symbol || '--')}</b> <span class="${_fleetRadarBadgeClass(selectedV1Status)}">${actLabel}</span></div>
@@ -7435,6 +7463,35 @@ function _renderTradingRadar(radar, esc) {
         <div class="radar-microstructure__row"><span>Reclaim blocked by</span><b>${esc(selected.reclaimBlockedReason || 'not blocked')}</b></div>
         <div class="radar-microstructure__row"><span>Missing absorption fields</span><div class="radar-chip-row">${chipList(selected.missingAbsorptionFields, 'radar-status-chip radar-status-chip--missing')}</div></div>
         <div class="radar-microstructure__row"><span>Missing reclaim fields</span><div class="radar-chip-row">${chipList(selected.missingReclaimFields, 'radar-status-chip radar-status-chip--missing')}</div></div>
+      </div>
+      <div class="radar-microstructure">
+        <div class="radar-microstructure__title">Provider Status Panel</div>
+        <div class="radar-microstructure__row"><span>MICROSTRUCTURE_PROVIDER</span><b class="${provState === 'ONLINE' ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(provState)} (${esc(microDiag.provider || 'none')})</b></div>
+        <div class="radar-microstructure__row"><span>LAST_UPDATE</span><b>${esc(provLastUpdate)}</b></div>
+        <div class="radar-microstructure__row"><span>DATA_LATENCY_MS</span><b>${esc(provLatencyLabel)}</b></div>
+        <div class="radar-microstructure__row"><span>ORDER_BOOK_FEED</span><b>${esc(feedLabel)}</b></div>
+        <div class="radar-microstructure__row"><span>TRADES_FEED</span><b>${esc(feedLabel)}</b></div>
+        <div class="radar-microstructure__row"><span>OI_FEED</span><b>${esc(feedLabel)}</b></div>
+        <div class="radar-microstructure__row"><span>FUNDING_FEED</span><b>${esc(feedLabel)}</b></div>
+        <div class="radar-microstructure__row"><span>ABSORB_MODE</span><b class="${absorbMode === 'STRICT' ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(absorbMode)}</b></div>
+      </div>
+      <div class="radar-microstructure">
+        <div class="radar-microstructure__title">Absorb Diagnostics Panel</div>
+        <div class="radar-microstructure__row"><span>STRICT Absorb Status</span><b class="${strictConfirmedUi ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(selected.STRICT_ABSORB_STATUS || 'ABSORB_DATA_UNAVAILABLE')}</b></div>
+        <div class="radar-microstructure__row"><span>PROXY Absorb Status</span><b>${esc(selected.PROXY_ABSORB_STATUS || 'ABSORB_DATA_UNAVAILABLE')}${proxyPartial ? ' (proxy evidence — NOT a confirmed absorb)' : ''}</b></div>
+        <div class="radar-microstructure__row"><span>STRICT Absorb Score</span><b>${esc(_fleetFmtRadarValue(selected.STRICT_ABSORB_SCORE, 0))}</b></div>
+        <div class="radar-microstructure__row"><span>PROXY Absorb Score</span><b>${esc(_fleetFmtRadarValue(selected.PROXY_ABSORB_SCORE, 0))}</b></div>
+        <div class="radar-microstructure__row"><span>Sell Pressure Score</span><b>${esc(_fleetFmtRadarValue(avComp.sellPressureScore, 0))}</b></div>
+        <div class="radar-microstructure__row"><span>Price Impact Score</span><b>${esc(_fleetFmtRadarValue(avComp.priceImpactScore, 0))}</b></div>
+        <div class="radar-microstructure__row"><span>Bid Survival / Rebuild Score</span><b>${esc(_fleetFmtRadarValue(avComp.bidSurvivalRebuildScore, 0))}</b></div>
+        <div class="radar-microstructure__row"><span>Low Rejection Score</span><b>${esc(_fleetFmtRadarValue(avComp.lowRejectionScore, 0))}</b></div>
+        <div class="radar-microstructure__row"><span>Support Retest Score</span><b>${esc(_fleetFmtRadarValue(avComp.supportRetestScore, 0))}</b></div>
+        <div class="radar-microstructure__row"><span>Spread / Liquidity Score</span><b>${esc(_fleetFmtRadarValue(avComp.spreadLiquidityScore, 0))}</b></div>
+        <div class="radar-microstructure__row"><span>Market Regime Score</span><b>${esc(_fleetFmtRadarValue(selected.MARKET_REGIME_SCORE, 0))}</b></div>
+        <div class="radar-microstructure__row"><span>Missing Fields</span><div class="radar-chip-row">${chipList(selected.ABSORB_MISSING_FIELDS, 'radar-status-chip radar-status-chip--missing')}</div></div>
+        <div class="radar-microstructure__row"><span>Reject / Block Reason</span><b>${esc(selected.ABSORB_BLOCK_REASON || 'none')}</b></div>
+        <div class="radar-microstructure__row"><span>Next Required Condition</span><b>${esc(selected.ABSORB_NEXT_REQUIRED_CONDITION || '--')}</b></div>
+        <div class="radar-microstructure__row"><span>Entry Impact</span><b>${esc(selected.ENTRY_IMPACT || 'BLOCKED_NO_ABSORB')}</b></div>
       </div>
       <div class="radar-next-trigger"><span>Next trigger</span><b>${esc(selected.nextRequiredConfirmation || 'none')}</b></div>
       <div class="radar-focus-levels">

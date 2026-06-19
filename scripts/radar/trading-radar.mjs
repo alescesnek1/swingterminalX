@@ -831,6 +831,10 @@ function buildRadarV1Output(market, regime, stageInfo, levels, safety) {
     ? Math.min(rawScores.FINAL_CONFIDENCE, dataQuality.derivativesMissing ? 64 : 68)
     : rawScores.FINAL_CONFIDENCE;
   const scores = { ...rawScores, FINAL_CONFIDENCE: round(cappedConfidence, 0) };
+  // Absorb v2 (Phase B): pure, additive STRICT/PROXY diagnostics. Computed here so
+  // it shares the single-source dataQuality.microstructureTrusted gate. On its own
+  // it changes nothing; the aggressive-entry branch below only TIGHTENS using it.
+  const absorbV2 = evaluateAbsorbV2(market, regime, dataQuality);
   const structuralStopExists = !!(levels && levels.suggestedStop && levels.stopReference);
   const tpZonesExist = !!(levels && Array.isArray(levels.takeProfitCheckpoints) && levels.takeProfitCheckpoints.length >= 3);
   const hasCriticalRisk = safety.safetyStatus === 'DANGER'
@@ -901,10 +905,20 @@ function buildRadarV1Output(market, regime, stageInfo, levels, safety) {
       status = 'STANDARD_ENTRY_READY';
       entryType = 'STANDARD_RETEST';
       action = 'Enter standard position on first higher low / reclaim retest.';
-    } else if (dataQuality.sufficientForAggressiveEntry && scores.ORDER_BOOK_SUPPORT_SCORE >= 72 && scores.FLOW_CONFIRMATION_SCORE >= 68) {
+    } else if (dataQuality.sufficientForAggressiveEntry
+      && scores.ORDER_BOOK_SUPPORT_SCORE >= 72
+      && scores.FLOW_CONFIRMATION_SCORE >= 68
+      // Phase B: AGGRESSIVE_ABSORPTION_ENTRY now additionally requires a STRICT
+      // absorb confirmation (trusted, fresh rolling microstructure + score >= 75).
+      // This is a pure TIGHTENING — it only ever REMOVES a row from aggressive
+      // entry (it then falls through to the already-gated EARLY/RECLAIM/WAIT
+      // branches), and can never create a new ENTRY_READY. A PROXY absorb can
+      // never satisfy this because STRICT_ABSORB_CONFIRMED is false in PROXY mode.
+      && absorbV2.STRICT_ABSORB_CONFIRMED === true
+      && absorbV2.STRICT_ABSORB_SCORE >= AGGRESSIVE_ABSORPTION_MIN) {
       status = 'AGGRESSIVE_ENTRY_READY';
       entryType = 'AGGRESSIVE_RECLAIM';
-      action = 'Enter partial position now or on shallow intraday pullback. Do not wait for deep retest.';
+      action = 'Enter partial position now or on shallow intraday pullback. Strict absorb confirmed; do not wait for deep retest.';
     } else if (scores.DISLOCATION_SCORE >= 70
       && scores.FLUSH_SCORE >= 65
       && scores.STABILIZATION_SCORE >= 55
@@ -971,6 +985,21 @@ function buildRadarV1Output(market, regime, stageInfo, levels, safety) {
       : 'loss of reclaim zone, new low below panic wick, bid depth disappearance, or BTC/ETH risk-off',
     BLOCKED_BY: blockedReason,
     NEXT_CONFIRMATION: nextConfirmation,
+    // Absorb v2 structured output (Phase B). Flat ABSORB_* fields are the spec's
+    // required output fields; absorbV2 carries the component sub-scores. All
+    // read-only / advisory — see evaluateAbsorbV2.
+    ABSORB_STATUS: absorbV2.ABSORB_STATUS,
+    ABSORB_MODE: absorbV2.ABSORB_MODE,
+    STRICT_ABSORB_STATUS: absorbV2.STRICT_ABSORB_STATUS,
+    PROXY_ABSORB_STATUS: absorbV2.PROXY_ABSORB_STATUS,
+    STRICT_ABSORB_SCORE: absorbV2.STRICT_ABSORB_SCORE,
+    PROXY_ABSORB_SCORE: absorbV2.PROXY_ABSORB_SCORE,
+    ABSORB_BLOCK_REASON: absorbV2.ABSORB_BLOCK_REASON,
+    ABSORB_MISSING_FIELDS: absorbV2.ABSORB_MISSING_FIELDS,
+    ABSORB_NEXT_REQUIRED_CONDITION: absorbV2.ABSORB_NEXT_REQUIRED_CONDITION,
+    ENTRY_IMPACT: absorbV2.ENTRY_IMPACT,
+    STRICT_ABSORB_CONFIRMED: absorbV2.STRICT_ABSORB_CONFIRMED,
+    absorbV2,
     allRadarConditionsPassed: entryBaseValid && gates.dataQualitySufficient && status.includes('ENTRY_READY'),
     structuralStopExists,
     tpZonesExist,
@@ -1269,6 +1298,217 @@ function radarMicrostructureDiagnostics(m, checklist = null) {
   };
 }
 
+// ── Absorb v2: STRICT vs PROXY separation (Phase B) ──────────────────────────
+// Splits "is this dump being absorbed?" into two explicit, independently-scored
+// branches so the UI never shows a bare "Absorb: ?" and a proxy reading can
+// never masquerade as a confirmed absorb.
+//
+//   STRICT_ABSORB — the ONLY branch allowed to CONFIRM absorption. Requires
+//   trusted, FRESH rolling microstructure (order-flow / order-book) data. Each
+//   component is scored from a REAL measured field only; a field that is absent
+//   scores 0 and is surfaced in ABSORB_MISSING_FIELDS — it is never inferred
+//   from candles. A STRICT confirmation is a PRECONDITION (not a trigger) for
+//   AGGRESSIVE_ABSORPTION_ENTRY; the entry gate still requires every existing
+//   setup/execution/RR/regime/data-quality/safety/Telegram gate to pass.
+//
+//   PROXY_ABSORB — information-only. Used when no trusted rolling provider is
+//   available but candle/volume/structure data exist. It can raise WATCH /
+//   PARTIAL_EVIDENCE awareness but can NEVER produce ABSORB_CONFIRMED, unlock
+//   aggressive entry, or unlock Telegram.
+//
+// This function is PURE and additive: on its own it changes no score, stage,
+// gate, ENTRY_READY status, or Telegram eligibility. The single place that
+// consumes STRICT_ABSORB_CONFIRMED (buildRadarV1Output's aggressive branch) only
+// ever makes entry STRICTER, never looser.
+const STRICT_ABSORB_WEIGHTS = Object.freeze({
+  aggressiveSellsFailed: 25,
+  priceImpactWeakVsSellVolume: 20,
+  bidDepthRebuildPct: 20,
+  supportRetestHeld: 15,
+  deltaImprovement: 10,
+  spreadAndSlippageHealthy: 10,
+});
+const PROXY_ABSORB_WEIGHTS = Object.freeze({
+  panicLowRejected: 20,
+  noCleanNewLow: 20,
+  volumeSpikeWithoutContinuationLower: 20,
+  reclaimAttempt: 15,
+  higherLowOrRangeHold: 15,
+  relativeStrengthVsBTC: 10,
+});
+const STRICT_ABSORB_WATCH_MIN = 50;
+const STRICT_ABSORB_CONFIRMED_MIN = 65;
+const AGGRESSIVE_ABSORPTION_MIN = 75;
+const PROXY_ABSORB_WATCH_MIN = 50;
+const PROXY_ABSORB_PARTIAL_MIN = 65;
+
+function evaluateAbsorbV2(market, regime, dataQuality) {
+  const m = market || {};
+  const dq = dataQuality || {};
+
+  // ── STRICT components ── each { present, pass }. `present` decides whether the
+  // field is surfaced as missing (never invented); `pass` decides the score.
+  const spreadVal = microPresent(m.spreadPct) ? Number(m.spreadPct) : null;
+  const slippageVal = microPresent(m.slippagePct) ? Number(m.slippagePct) : null;
+  const bidRebuildVal = microPresent(m.bidDepthRebuildPct) ? Number(m.bidDepthRebuildPct)
+    : microPresent(m.bidDepthChangePct) ? Number(m.bidDepthChangePct) : null;
+  const deltaPresent = microPresent(m.deltaImprovementPct) || microPresent(m.marketBuyVolumeDominance)
+    || microPresent(m.buyVolumeDominance) || microPresent(m.cumulativeDelta) || microPresent(m.takerBuySellRatio);
+  const strict = {
+    aggressiveSellsFailed: {
+      present: m.aggressiveSellsFailed != null || microPresent(m.marketSellRatio),
+      pass: m.aggressiveSellsFailed === true || (microPresent(m.marketSellRatio) && Number(m.marketSellRatio) <= 0.56),
+    },
+    priceImpactWeakVsSellVolume: {
+      // absorptionScore is the system's measure of price holding despite sell
+      // pressure (= price impact weak vs sell volume). Real field, real threshold.
+      present: microPresent(m.absorptionScore),
+      pass: microPresent(m.absorptionScore) && Number(m.absorptionScore) >= 70,
+    },
+    bidDepthRebuildPct: {
+      present: bidRebuildVal != null,
+      pass: bidRebuildVal != null && bidRebuildVal >= 8,
+    },
+    supportRetestHeld: {
+      present: m.supportRetested != null || m.liquidationLowRetested != null || microPresent(m.distanceToSupportPct),
+      pass: m.supportRetested === true || m.liquidationLowRetested === true
+        || (microPresent(m.distanceToSupportPct) && Number(m.distanceToSupportPct) <= 0.75),
+    },
+    deltaImprovement: {
+      present: deltaPresent,
+      pass: (microPresent(m.deltaImprovementPct) && Number(m.deltaImprovementPct) > 0)
+        || Number(m.marketBuyVolumeDominance ?? m.buyVolumeDominance ?? 0) >= 0.55
+        || m.deltaImproves === true,
+    },
+    spreadAndSlippageHealthy: {
+      present: spreadVal != null,
+      pass: spreadVal != null && spreadVal <= 0.10 && (slippageVal == null || slippageVal <= 0.15),
+    },
+  };
+  let strictScore = 0;
+  const strictMissing = [];
+  for (const key of Object.keys(STRICT_ABSORB_WEIGHTS)) {
+    if (strict[key].pass) strictScore += STRICT_ABSORB_WEIGHTS[key];
+    if (!strict[key].present) strictMissing.push(key);
+  }
+
+  // STRICT may only CONFIRM when trusted, fresh rolling microstructure exists.
+  // microstructureTrusted is the single source of truth (radarDataQuality):
+  // depth + spread + flow + rolling all present AND not stale AND provider not
+  // marked untrusted. When that is false we report WHY (stale / untrusted /
+  // unavailable) and STRICT can never confirm.
+  const trustedRolling = dq.microstructureTrusted === true;
+  let strictStatus;
+  let strictConfirmed = false;
+  if (trustedRolling) {
+    if (strictScore >= STRICT_ABSORB_CONFIRMED_MIN) { strictStatus = 'ABSORB_CONFIRMED'; strictConfirmed = true; }
+    else if (strictScore >= STRICT_ABSORB_WATCH_MIN) strictStatus = 'ABSORB_WATCH';
+    else strictStatus = 'ABSORB_REJECTED';
+  } else if (m.microstructureStale === true) {
+    strictStatus = 'ABSORB_DATA_STALE';
+  } else if (m.staticMicrostructureTrusted === false) {
+    strictStatus = 'ABSORB_PROVIDER_UNTRUSTED';
+  } else {
+    strictStatus = 'ABSORB_DATA_UNAVAILABLE';
+  }
+
+  // ── PROXY components ── candle / volume / structure only; NEVER order-flow.
+  const s = signalBooleans(m, regime || evaluateMarketRegime([]));
+  const hasCandleContext = microPresent(m.change24hPct ?? m.priceChangePercent ?? (m.diagnostics && m.diagnostics.change24hPct));
+  const proxy = {
+    panicLowRejected: { present: hasCandleContext, pass: s.wickOk === true },
+    noCleanNewLow: { present: hasCandleContext, pass: s.noNewLows === true },
+    volumeSpikeWithoutContinuationLower: { present: hasCandleContext, pass: s.volumeSpike >= 1.2 && s.c1 >= 0 },
+    reclaimAttempt: { present: hasCandleContext, pass: s.reclaim === true || s.isScannerReclaim === true },
+    higherLowOrRangeHold: { present: hasCandleContext, pass: s.higherLow === true || s.rangeFormed === true },
+    relativeStrengthVsBTC: { present: microPresent(m.btcRelativeChangePct ?? m.relativeToBtcPct), pass: s.btcRel > 0 },
+  };
+  let proxyScore = 0;
+  const proxyMissing = [];
+  for (const key of Object.keys(PROXY_ABSORB_WEIGHTS)) {
+    if (proxy[key].pass) proxyScore += PROXY_ABSORB_WEIGHTS[key];
+    if (!proxy[key].present) proxyMissing.push(key);
+  }
+  let proxyStatus;
+  if (!hasCandleContext) proxyStatus = 'ABSORB_DATA_UNAVAILABLE';
+  else if (proxyScore >= PROXY_ABSORB_PARTIAL_MIN) proxyStatus = 'ABSORB_PARTIAL_EVIDENCE';
+  else if (proxyScore >= PROXY_ABSORB_WATCH_MIN) proxyStatus = 'ABSORB_WATCH';
+  else proxyStatus = 'ABSORB_REJECTED';
+
+  // ── Mode + unified status ──
+  let mode;
+  if (trustedRolling) mode = 'STRICT';
+  else if (hasCandleContext) mode = 'PROXY';
+  else mode = 'DISABLED';
+  const absorbStatus = mode === 'STRICT' ? strictStatus
+    : mode === 'PROXY' ? proxyStatus
+    : 'ABSORB_DATA_UNAVAILABLE';
+
+  // ── Block reason (why this row is NOT a confirmed strict absorb) ──
+  let blockReason = null;
+  if (!strictConfirmed) {
+    if (mode !== 'STRICT') {
+      if (m.microstructureStale === true) blockReason = 'stale static cache';
+      else if (m.staticMicrostructureTrusted === false) blockReason = 'untrusted provider';
+      else blockReason = 'provider unavailable';
+    } else if (!strict.aggressiveSellsFailed.present) blockReason = 'missing aggressiveSellsFailed';
+    else if (!strict.priceImpactWeakVsSellVolume.present) blockReason = 'missing absorptionScore';
+    else if (!strict.bidDepthRebuildPct.present) blockReason = 'missing bidDepthRebuildPct';
+    else if (!strict.supportRetestHeld.present) blockReason = 'missing supportRetest';
+    else if (!strict.deltaImprovement.present) blockReason = 'missing deltaImprovement';
+    else if (spreadVal != null && spreadVal > 0.10) blockReason = 'spread too wide';
+    else if (slippageVal != null && slippageVal > 0.15) blockReason = 'slippage too high';
+    else blockReason = `strict score ${strictScore} below confirmation threshold ${STRICT_ABSORB_CONFIRMED_MIN}`;
+  }
+  // Regime / new-low context refines a generic score block but never overrides a
+  // concrete missing-data reason.
+  if (!strictConfirmed && (!blockReason || blockReason.startsWith('strict score'))) {
+    if (regime && regime.blocksMeanReversion) blockReason = 'market regime blocked';
+    else if (s.c12 <= -4 && s.c24 <= -8 && s.c1 < 0) blockReason = 'new low acceleration';
+  }
+
+  // ── Next required condition ──
+  let nextRequired;
+  if (strictConfirmed) nextRequired = 'none — strict absorb confirmed';
+  else if (mode !== 'STRICT') nextRequired = 'trusted rolling microstructure provider (order book + trades + delta)';
+  else if (strictMissing.length) nextRequired = `strict input: ${strictMissing[0]}`;
+  else nextRequired = `raise strict score to >= ${STRICT_ABSORB_CONFIRMED_MIN} (now ${strictScore})`;
+
+  // ── Entry impact ── proxy / unavailable are ALWAYS informational only.
+  const entryImpact = strictConfirmed
+    ? 'STRICT_CONFIRMED_AGGRESSIVE_ALLOWED_IF_ALL_GATES_PASS'
+    : (absorbStatus === 'ABSORB_PARTIAL_EVIDENCE' || absorbStatus === 'ABSORB_WATCH')
+      ? 'INFORMATIONAL_ONLY_NO_AGGRESSIVE_ENTRY'
+      : 'BLOCKED_NO_ABSORB';
+
+  return {
+    ABSORB_STATUS: absorbStatus,
+    ABSORB_MODE: mode,
+    STRICT_ABSORB_STATUS: strictStatus,
+    PROXY_ABSORB_STATUS: proxyStatus,
+    STRICT_ABSORB_SCORE: strictScore,
+    PROXY_ABSORB_SCORE: proxyScore,
+    ABSORB_BLOCK_REASON: blockReason || 'none',
+    // Always the STRICT inputs that are absent — those are the fields actually
+    // required to CONFIRM an absorb. Surfaced, never invented. PROXY_MISSING_FIELDS
+    // keeps the (candle-derived) proxy gaps separately for completeness.
+    ABSORB_MISSING_FIELDS: strictMissing,
+    PROXY_MISSING_FIELDS: proxyMissing,
+    ABSORB_NEXT_REQUIRED_CONDITION: nextRequired,
+    ENTRY_IMPACT: entryImpact,
+    STRICT_ABSORB_CONFIRMED: strictConfirmed,
+    // Component sub-scores for the Absorb Diagnostics Panel (read-only display).
+    components: {
+      sellPressureScore: strict.aggressiveSellsFailed.pass ? STRICT_ABSORB_WEIGHTS.aggressiveSellsFailed : 0,
+      priceImpactScore: strict.priceImpactWeakVsSellVolume.pass ? STRICT_ABSORB_WEIGHTS.priceImpactWeakVsSellVolume : 0,
+      bidSurvivalRebuildScore: strict.bidDepthRebuildPct.pass ? STRICT_ABSORB_WEIGHTS.bidDepthRebuildPct : 0,
+      supportRetestScore: strict.supportRetestHeld.pass ? STRICT_ABSORB_WEIGHTS.supportRetestHeld : 0,
+      lowRejectionScore: proxy.panicLowRejected.pass ? PROXY_ABSORB_WEIGHTS.panicLowRejected : 0,
+      spreadLiquidityScore: strict.spreadAndSlippageHealthy.pass ? STRICT_ABSORB_WEIGHTS.spreadAndSlippageHealthy : 0,
+    },
+  };
+}
+
 function missingForMarket(m) {
   const miss = [];
   if (m.depthUsd == null) miss.push('orderBookDepthWithin1Pct');
@@ -1329,6 +1569,53 @@ function radarDataQuality(market, scores, missing) {
     derivativesMissing: derivMissing,
     missingData: Array.from(missingSet).sort(),
   };
+}
+
+// Phase B: current-snapshot Absorb funnel counters. Pure aggregation over the
+// already-evaluated candidates — it derives nothing new and changes no gate.
+// Durable 24h/7d rolling aggregation is intentionally left as a TODO (it needs a
+// persistence layer; doing it inline would be riskier than the snapshot view).
+function buildAbsorbFunnel(candidates = [], universeSize = 0) {
+  const f = {
+    coinsScanned: Number(universeSize) || (candidates ? candidates.length : 0),
+    dislocationConfirmed: 0,
+    longFlushConfirmed: 0,
+    stabilizationDetected: 0,
+    proxyAbsorbWatch: 0,
+    proxyPartialEvidence: 0,
+    strictAbsorbEvaluated: 0,
+    strictAbsorbConfirmed: 0,
+    aggressiveAbsorptionEntry: 0,
+    blockedByMissingProvider: 0,
+    blockedByStaleCache: 0,
+    blockedByUntrustedProvider: 0,
+    blockedByMarketRegime: 0,
+    blockedBySpreadLiquidity: 0,
+    blockedByMissingFields: 0,
+    // TODO(durable): rolling 24h / 7d aggregation requires persistence.
+    rollingWindow: 'snapshot-only',
+  };
+  for (const c of candidates || []) {
+    if (!c) continue;
+    if (c.STATUS === 'DISLOCATION_CONFIRMED') f.dislocationConfirmed++;
+    if (c.STATUS === 'LONG_FLUSH_CONFIRMED') f.longFlushConfirmed++;
+    if (c.STATUS === 'STABILIZATION' || c.STATUS === 'WAIT_FOR_RECLAIM') f.stabilizationDetected++;
+    if (c.ABSORB_MODE === 'STRICT') f.strictAbsorbEvaluated++;
+    if (c.ABSORB_MODE === 'PROXY') {
+      if (c.PROXY_ABSORB_STATUS === 'ABSORB_WATCH') f.proxyAbsorbWatch++;
+      if (c.PROXY_ABSORB_STATUS === 'ABSORB_PARTIAL_EVIDENCE') f.proxyPartialEvidence++;
+    }
+    if (c.STRICT_ABSORB_CONFIRMED === true) f.strictAbsorbConfirmed++;
+    if (c.STATUS === 'AGGRESSIVE_ENTRY_READY') f.aggressiveAbsorptionEntry++;
+    const br = c.ABSORB_BLOCK_REASON;
+    if (br === 'provider unavailable') f.blockedByMissingProvider++;
+    else if (br === 'stale static cache') f.blockedByStaleCache++;
+    else if (br === 'untrusted provider') f.blockedByUntrustedProvider++;
+    else if (br === 'market regime blocked') f.blockedByMarketRegime++;
+    else if (br === 'spread too wide' || br === 'slippage too high') f.blockedBySpreadLiquidity++;
+    else if (typeof br === 'string' && br.startsWith('missing ')) f.blockedByMissingFields++;
+  }
+  return f;
 }
 
 function buildPipeline(candidates, universeSize) {
@@ -1506,6 +1793,19 @@ export function evaluateTradingRadar({
       // READ-ONLY observability: why Absorb./Reclaim are (not) passing for this
       // row. Derived from the same fields the gates read; changes no gate.
       const microDiag = radarMicrostructureDiagnostics(m, stageInfo.conditionChecklist);
+      // Phase B: annotate the absorption checklist row with the EXPLICIT Absorb v2
+      // state for display, so the UI never renders a bare "Absorb: ?". This is a
+      // display-only annotation — the `.status` field that the stage machine and
+      // the microstructure fail-closed tests rely on is intentionally left
+      // untouched, so no gate, stage, or score changes here.
+      if (stageInfo.conditionChecklist && stageInfo.conditionChecklist.absorption) {
+        const a = stageInfo.conditionChecklist.absorption;
+        a.absorbStatus = v1.ABSORB_STATUS;
+        a.absorbMode = v1.ABSORB_MODE;
+        a.strictAbsorbStatus = v1.STRICT_ABSORB_STATUS;
+        a.proxyAbsorbStatus = v1.PROXY_ABSORB_STATUS;
+        a.displayReason = `${v1.ABSORB_STATUS}${v1.ABSORB_BLOCK_REASON && v1.ABSORB_BLOCK_REASON !== 'none' ? ' — ' + v1.ABSORB_BLOCK_REASON : ''}`;
+      }
       // SINGLE SOURCE OF TRUTH: a candidate is ENTRY_READY only when the V1/spec
       // gate in buildRadarV1Output passes. The heuristic stage machine
       // (classifyRadarStage) can suggest a stage but can NEVER, on its own,
@@ -1660,6 +1960,8 @@ export function evaluateTradingRadar({
     state.selected = selected;
     state.exitGuidance = buildExitGuidance({ market: positionMarket, position, regime, now });
     state.pipeline = buildPipeline(candidates, universe.length);
+    state.absorbFunnel = buildAbsorbFunnel(candidates, universe.length);
+    state.pipeline.absorbFunnel = state.absorbFunnel;
     state.candidatesByStage = { ...state.pipeline };
     state.missingSignals = Array.from(allMissing).sort();
     state.dataCompleteness = completeness(state.missingSignals);

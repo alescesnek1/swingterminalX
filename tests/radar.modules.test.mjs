@@ -48,6 +48,19 @@ const FLUSH = {
   depthUsd: 2_000_000,
 };
 
+// Phase B: a flush→entry candidate that carries GENUINE strict-absorb inputs
+// (aggressive sells failing, absorptionScore, support retest held) so it
+// legitimately reaches a confirmed ENTRY_READY under the stricter aggressive gate.
+// Kept separate from the shared FLUSH fixture so the stage-progression test (which
+// relies on FLUSH having no rolling absorption data) is unaffected.
+const FLUSH_STRICT = {
+  ...FLUSH,
+  marketSellRatio: 0.50,
+  aggressiveSellsFailed: true,
+  supportRetested: true,
+  absorptionScore: 82,
+};
+
 test('RADAR universe filters liquid stablecoin spot pairs and rejects weird/thin books', () => {
   const { universe, diagnostics } = buildRadarUniverse([
     BTC,
@@ -155,7 +168,7 @@ test('RADAR sorts by distanceToEntryReadyScore correctly', () => {
     markets: [
       { ...BTC, diagnostics: { change1hPct: 2, change12hPct: -5 }, scannerScore: 8, scannerSignal: 'RECLAIM', scannerTags: ['FLUSH', 'BUY', 'RECLAIM'], depthUsd: 1e6 }, // SQUEEZE (NEAR_ENTRY)
       { ...ETH, diagnostics: { change12hPct: -6 }, scannerPanic: 60, depthUsd: 1e6 }, // WATCH
-      FLUSH // ENTRY_READY
+      FLUSH_STRICT // ENTRY_READY (strict absorb confirmed)
     ],
     source: 'test',
     fetchedAt: new Date(NOW).toISOString(),
@@ -300,7 +313,7 @@ test('fleet empty state persists tradingRadar top-level field', () => {
   assert.ok(Object.hasOwn(fleet, 'tradingRadar'));
   assert.ok(Object.hasOwn(fleet.tradingRadar, 'pipeline'));
   assert.ok(Object.hasOwn(fleet.tradingRadar, 'telegramAlertState'));
-  fleet.tradingRadar = evaluateTradingRadar({ markets: [BTC, ETH, FLUSH], source: 'test', fetchedAt: new Date(NOW).toISOString(), now: NOW });
+  fleet.tradingRadar = evaluateTradingRadar({ markets: [BTC, ETH, FLUSH_STRICT], source: 'test', fetchedAt: new Date(NOW).toISOString(), now: NOW });
   assert.equal(fleet.tradingRadar.selected.symbol, 'SOLUSDT');
   assert.equal(fleet.tradingRadar.status, 'ENTRY_READY');
   assert.equal(fleet.tradingRadar.pipeline.ENTRY_READY, 1);
