@@ -191,6 +191,113 @@ test('Trading RADAR frontend uses hardBlockReason to avoid misleading score thre
 });
 
 
+// Brace-balanced extractor for a top-level function body (handles helpers that
+// may contain object literals). Returns a callable.
+function extractFn(src, name) {
+  const sig = `function ${name}(`;
+  const start = src.indexOf(sig);
+  assert.ok(start >= 0, `${name} must be defined`);
+  const argStart = src.indexOf('(', start);
+  const argEnd = src.indexOf(')', argStart);
+  const args = src.slice(argStart + 1, argEnd).split(',').map(s => s.trim()).filter(Boolean);
+  let i = src.indexOf('{', argEnd);
+  let depth = 0, end = -1;
+  for (let j = i; j < src.length; j++) {
+    if (src[j] === '{') depth++;
+    else if (src[j] === '}') { depth--; if (depth === 0) { end = j; break; } }
+  }
+  assert.ok(end > i, `${name} body must parse`);
+  const body = src.slice(i + 1, end);
+  return new Function(...args, body);
+}
+
+test('Phase C.1: Matrix Absorb cell renders explicit compact text, never a bare "?"', () => {
+  // Matrix uses the compact helper, not the old pill on the absorption checklist.
+  assert.match(terminalJs, /_fleetRadarAbsorbCompact\(c\)/);
+  assert.doesNotMatch(terminalJs, /pillStatus\(\(cl\.absorption \|\| \{\}\)\.status\)/);
+  const absorbCompact = extractFn(terminalJs, '_fleetRadarAbsorbCompact');
+  assert.equal(absorbCompact({ STRICT_ABSORB_CONFIRMED: true }), 'STRICT OK');
+  assert.equal(absorbCompact({ ABSORB_STATUS: 'ABSORB_DATA_UNAVAILABLE' }), 'NO DATA');
+  assert.equal(absorbCompact({ ABSORB_STATUS: 'ABSORB_DATA_STALE' }), 'STALE');
+  assert.equal(absorbCompact({ ABSORB_STATUS: 'ABSORB_PROVIDER_UNTRUSTED' }), 'UNTRUSTED');
+  assert.equal(absorbCompact({ ABSORB_STATUS: 'ABSORB_PARTIAL_EVIDENCE', ABSORB_MODE: 'PROXY' }), 'PROXY');
+  // Evidence level is surfaced even in proxy mode, so the operator can tell
+  // proxy-only from watch from rejected at a glance (not all collapsed to PROXY).
+  assert.equal(absorbCompact({ ABSORB_STATUS: 'ABSORB_WATCH', ABSORB_MODE: 'PROXY' }), 'WATCH');
+  assert.equal(absorbCompact({ ABSORB_STATUS: 'ABSORB_REJECTED', ABSORB_MODE: 'PROXY' }), 'REJECTED');
+  assert.equal(absorbCompact({ ABSORB_STATUS: 'ABSORB_REJECTED', ABSORB_MODE: 'STRICT' }), 'REJECTED');
+  // No branch ever returns a bare "?".
+  for (const st of ['', 'ABSORB_DATA_UNAVAILABLE', 'ABSORB_DATA_STALE', 'ABSORB_PROVIDER_UNTRUSTED', 'ABSORB_PARTIAL_EVIDENCE', 'ABSORB_WATCH', 'ABSORB_REJECTED', 'ABSORB_CONFIRMED']) {
+    for (const mode of ['PROXY', 'STRICT', 'DISABLED']) {
+      assert.notEqual(absorbCompact({ ABSORB_STATUS: st, ABSORB_MODE: mode }), '?');
+    }
+  }
+});
+
+test('Phase C.1: Matrix Reclaim cell renders explicit compact labels', () => {
+  assert.match(terminalJs, /_fleetRadarReclaimCompact\(c\)/);
+  const reclaimCompact = extractFn(terminalJs, '_fleetRadarReclaimCompact');
+  assert.equal(reclaimCompact({ RECLAIM_STATUS: 'RECLAIM_LEVEL_UNDEFINED' }), 'NO LEVEL');
+  assert.equal(reclaimCompact({ RECLAIM_STATUS: 'RECLAIM_NOT_STARTED' }), 'NOT STARTED');
+  assert.equal(reclaimCompact({ RECLAIM_STATUS: 'RECLAIM_ATTEMPT' }), 'ATTEMPT');
+  assert.equal(reclaimCompact({ RECLAIM_STATUS: 'RECLAIM_DETECTED' }), 'DETECTED');
+  assert.equal(reclaimCompact({ RECLAIM_STATUS: 'RECLAIM_CONFIRMED' }), 'CONFIRMED');
+  assert.equal(reclaimCompact({ RECLAIM_STATUS: 'RECLAIM_CONFIRMED_NO_RETEST' }), 'CONFIRMED');
+  assert.equal(reclaimCompact({ RECLAIM_STATUS: 'RECLAIM_RETEST_HOLD' }), 'RETEST HELD');
+  assert.equal(reclaimCompact({ RECLAIM_STATUS: 'RECLAIM_FAILED' }), 'FAILED');
+  assert.equal(reclaimCompact({}), 'NO DATA');
+});
+
+test('Phase C.1: focus candidate renders an Operator Summary with Entry/Absorb/Reclaim/Next/Telegram', () => {
+  assert.match(terminalJs, /OPERATOR SUMMARY/);
+  assert.match(terminalJs, /radar-operator-summary/);
+  assert.match(terminalJs, /<span>Entry<\/span><b>\$\{esc\(opEntryVerdict\)/);
+  assert.match(terminalJs, /<span>Absorb<\/span><b>\$\{esc\(opAbsorbVerdict\)/);
+  assert.match(terminalJs, /<span>Reclaim<\/span><b>\$\{esc\(opReclaimVerdict\)/);
+  assert.match(terminalJs, /<span>Next<\/span><b>\$\{esc\(opNext\)/);
+  assert.match(terminalJs, /<span>Telegram<\/span>/);
+  // Verdicts are derived from existing fields only.
+  assert.match(terminalJs, /_fleetRadarEntryVerdict\(selected, selectedV1Status, selectedV1BlockedBy\)/);
+  assert.match(terminalJs, /_fleetRadarAbsorbVerdict\(selected\)/);
+  assert.match(terminalJs, /_fleetRadarReclaimHuman\(reclaimStatus\)/);
+});
+
+test('Phase C.1: reclaim level undefined renders human "NO LEVEL FOUND" text', () => {
+  const human = extractFn(terminalJs, '_fleetRadarReclaimHuman');
+  const undef = human('RECLAIM_LEVEL_UNDEFINED');
+  assert.equal(undef.verdict, 'NO LEVEL FOUND');
+  assert.match(undef.meaning, /price structure has no usable reclaim level yet/);
+  assert.match(undef.next, /identify breakdown\/range\/VWAP\/base level to reclaim/);
+  const notStarted = human('RECLAIM_NOT_STARTED');
+  assert.equal(notStarted.verdict, 'NOT STARTED');
+  assert.match(notStarted.meaning, /price is still below reclaim zone/);
+  const attempt = human('RECLAIM_ATTEMPT');
+  assert.match(attempt.meaning, /testing reclaim zone, not confirmed/);
+  const detected = human('RECLAIM_DETECTED');
+  assert.match(detected.meaning, /moved above the level, but confirmation\/retest is missing/);
+});
+
+test('Phase C.1: proxy absorb is explicitly labelled NOT confirmed absorption', () => {
+  assert.match(terminalJs, /Proxy evidence only — NOT confirmed absorption/);
+  assert.match(terminalJs, /Strict Absorb: unavailable — trusted rolling microstructure missing/);
+  const absorbVerdict = extractFn(terminalJs, '_fleetRadarAbsorbVerdict');
+  assert.equal(absorbVerdict({ ABSORB_STATUS: 'ABSORB_PARTIAL_EVIDENCE' }), 'PROXY ONLY — not confirmed');
+  assert.equal(absorbVerdict({ STRICT_ABSORB_CONFIRMED: true }), 'STRICT CONFIRMED');
+  assert.equal(absorbVerdict({ ABSORB_STATUS: 'ABSORB_DATA_STALE' }), 'STALE — not confirmed');
+});
+
+test('Phase C.1: readability changes do not loosen Telegram or entry gating (display-only)', () => {
+  // Operator Summary Telegram is a read-only reflection of telegramEligible.
+  assert.match(terminalJs, /selected\.telegramEligible === true \? 'YES' : 'NO'/);
+  // Entry verdict only ever reports ENTRY READY when STATUS already says ENTRY_READY.
+  const entryVerdict = extractFn(terminalJs, '_fleetRadarEntryVerdict');
+  assert.equal(entryVerdict({}, 'RISK_OFF_BLOCKED', 'x'), 'NO ENTRY — market regime blocked');
+  assert.equal(entryVerdict({}, 'WATCH', '--'), 'NO ENTRY — waiting for confirmation');
+  assert.equal(entryVerdict({}, 'STANDARD_ENTRY_READY', '--'), 'ENTRY READY');
+  // The existing fail-safe Telegram gate text on the focus card is unchanged.
+  assert.match(terminalJs, /ENTRY_READY microstructure gates still apply/);
+});
+
 test('UI renders heatmap/data before Live Feed so operator sees market context earlier', () => {
   assert.ok(indexHtml.indexOf("sv('heatmap'") < indexHtml.indexOf("sv('livefeed'"));
   const refreshBody = terminalJs.slice(terminalJs.indexOf('async function doRefresh()'));

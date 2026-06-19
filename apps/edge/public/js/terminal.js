@@ -7195,6 +7195,90 @@ function _fleetRadarV1BlockedBy(c) {
   return v1 || c.ACTION || c.nextRequiredConfirmation || '--';
 }
 
+// ── Phase C.1: operator-readability helpers (UI-only) ───────────────────────
+// Pure label/verdict derivation from EXISTING candidate fields. They change no
+// score, gate, routing, or Telegram eligibility — display only. Kept brace-light
+// (if/return chains, no nested blocks) so they stay simple and unit-testable.
+// Compact matrix label for the Absorb column. Never returns a bare "?" — every
+// branch yields an explicit word so the operator reads meaning without hover.
+function _fleetRadarAbsorbCompact(c) {
+  if (!c) return 'NO DATA';
+  if (c.STRICT_ABSORB_CONFIRMED === true) return 'STRICT OK';
+  const st = c.ABSORB_STATUS || '';
+  const mode = c.ABSORB_MODE || 'DISABLED';
+  if (st === 'ABSORB_CONFIRMED') return 'STRICT OK';
+  if (st === 'ABSORB_DATA_STALE') return 'STALE';
+  if (st === 'ABSORB_PROVIDER_UNTRUSTED') return 'UNTRUSTED';
+  if (st === 'ABSORB_PARTIAL_EVIDENCE') return 'PROXY';
+  if (st === 'ABSORB_WATCH') return 'WATCH';
+  if (st === 'ABSORB_REJECTED') return 'REJECTED';
+  if (st === 'ABSORB_DATA_UNAVAILABLE') return 'NO DATA';
+  if (mode === 'PROXY') return 'PROXY';
+  if (mode === 'STRICT') return 'WATCH';
+  return 'NO DATA';
+}
+// Compact matrix label for the Reclaim column. Explicit text for every status.
+function _fleetRadarReclaimCompact(c) {
+  const s = (c && c.RECLAIM_STATUS) || 'RECLAIM_DATA_UNAVAILABLE';
+  if (s === 'RECLAIM_LEVEL_UNDEFINED') return 'NO LEVEL';
+  if (s === 'RECLAIM_NOT_STARTED') return 'NOT STARTED';
+  if (s === 'RECLAIM_ATTEMPT') return 'ATTEMPT';
+  if (s === 'RECLAIM_DETECTED') return 'DETECTED';
+  if (s === 'RECLAIM_CONFIRMED' || s === 'RECLAIM_CONFIRMED_NO_RETEST') return 'CONFIRMED';
+  if (s === 'RECLAIM_RETEST_HOLD') return 'RETEST HELD';
+  if (s === 'RECLAIM_FAILED') return 'FAILED';
+  return 'NO DATA';
+}
+// Shared pill colour for a compact label (reuses existing radar-pill classes).
+function _fleetRadarCompactClass(label) {
+  if (label === 'STRICT OK' || label === 'CONFIRMED' || label === 'RETEST HELD') return 'radar-pill radar-pill-pass';
+  if (label === 'FAILED' || label === 'REJECTED' || label === 'STALE' || label === 'UNTRUSTED') return 'radar-pill radar-pill-fail';
+  if (label === 'NO DATA' || label === 'NO LEVEL') return 'radar-pill radar-pill-missing';
+  return 'radar-pill radar-pill-wait';
+}
+// One-line Absorb verdict for the Operator Summary. Proxy/stale/unavailable are
+// always explicitly NOT-confirmed so proxy evidence can never read as a confirm.
+function _fleetRadarAbsorbVerdict(c) {
+  if (!c) return 'NO DATA';
+  if (c.STRICT_ABSORB_CONFIRMED === true) return 'STRICT CONFIRMED';
+  const st = c.ABSORB_STATUS || '';
+  if (st === 'ABSORB_PARTIAL_EVIDENCE') return 'PROXY ONLY — not confirmed';
+  if (st === 'ABSORB_WATCH') return 'PROXY — watch, not confirmed';
+  if (st === 'ABSORB_DATA_STALE') return 'STALE — not confirmed';
+  if (st === 'ABSORB_PROVIDER_UNTRUSTED') return 'UNTRUSTED provider — not confirmed';
+  if (st === 'ABSORB_REJECTED') return 'REJECTED — no absorption';
+  if (st === 'ABSORB_DATA_UNAVAILABLE') return 'NO DATA — not confirmed';
+  if ((c.ABSORB_MODE || '') === 'PROXY') return 'PROXY ONLY — not confirmed';
+  return 'NO DATA — not confirmed';
+}
+// One-line Entry verdict for the Operator Summary, derived from V1 status.
+function _fleetRadarEntryVerdict(c, status, blockedBy) {
+  const s = String(status || '');
+  if (s.indexOf('ENTRY_READY') >= 0) return 'ENTRY READY';
+  if (s === 'RISK_OFF_BLOCKED') return 'NO ENTRY — market regime blocked';
+  if (s === 'INVALIDATED') return 'NO ENTRY — invalidated / safety risk';
+  if (s === 'CHASE_RISK') return 'NO ENTRY — chase risk / poor R/R';
+  if (s === 'EXTENDED_ENTRY') return 'NO FULL ENTRY — price extended';
+  const why = (blockedBy && blockedBy !== '--') ? blockedBy : 'waiting for confirmation';
+  return 'NO ENTRY — ' + why;
+}
+// Human-first Reclaim verdict/meaning/next for every RECLAIM_STATUS.
+function _fleetRadarReclaimHuman(status) {
+  const s = String(status || 'RECLAIM_DATA_UNAVAILABLE');
+  const map = {
+    RECLAIM_LEVEL_UNDEFINED: { verdict: 'NO LEVEL FOUND', meaning: 'price structure has no usable reclaim level yet.', next: 'identify breakdown/range/VWAP/base level to reclaim.' },
+    RECLAIM_DATA_UNAVAILABLE: { verdict: 'NO DATA', meaning: 'insufficient OHLCV/VWAP/level data to evaluate reclaim.', next: 'wait for fresh price/level data.' },
+    RECLAIM_NOT_STARTED: { verdict: 'NOT STARTED', meaning: 'price is still below reclaim zone.', next: 'wait for price to enter reclaim zone.' },
+    RECLAIM_ATTEMPT: { verdict: 'ATTEMPT', meaning: 'price is testing reclaim zone, not confirmed.', next: 'wait for close/hold above zone.' },
+    RECLAIM_DETECTED: { verdict: 'DETECTED', meaning: 'price moved above the level, but confirmation/retest is missing.', next: 'wait for close/hold or higher-low retest.' },
+    RECLAIM_CONFIRMED_NO_RETEST: { verdict: 'CONFIRMED (no retest)', meaning: 'price closed/held above zone; retest not yet seen.', next: 'wait for retest hold or execution/RR alignment.' },
+    RECLAIM_CONFIRMED: { verdict: 'CONFIRMED', meaning: 'price closed/held above the reclaim zone.', next: 'retest hold or execution/RR alignment.' },
+    RECLAIM_RETEST_HOLD: { verdict: 'RETEST HELD', meaning: 'reclaimed level was retested and held as support.', next: 'execution score and risk/reward alignment.' },
+    RECLAIM_FAILED: { verdict: 'FAILED', meaning: 'price reclaimed then lost the zone.', next: 'wait for a fresh reclaim attempt and new higher low.' },
+  };
+  return map[s] || map.RECLAIM_DATA_UNAVAILABLE;
+}
+
 function _renderTradingRadar(radar, esc) {
   radar = radar || {};
   const allCandidates = Array.isArray(radar.candidates) ? radar.candidates : [];
@@ -7281,8 +7365,8 @@ function _renderTradingRadar(radar, esc) {
       <td>${pillStatus((cl.relativeDump || {}).status)}</td>
       <td>${pillStatus((cl.longFlush || {}).status)}</td>
       <td>${pillStatus((cl.stabilization || {}).status)}</td>
-      <td>${pillStatus((cl.absorption || {}).status)}</td>
-      <td>${pillStatus((cl.squeezeOrReclaim || {}).status)}</td>
+      <td>${(() => { const lbl = _fleetRadarAbsorbCompact(c); const tip = (c.ABSORB_BLOCK_REASON && c.ABSORB_BLOCK_REASON !== 'none') ? c.ABSORB_BLOCK_REASON : lbl; return `<span class="${_fleetRadarCompactClass(lbl)} radar-pill--text" title="${esc(tip)}">${esc(lbl)}</span>`; })()}</td>
+      <td>${(() => { const lbl = _fleetRadarReclaimCompact(c); const tip = c.RECLAIM_NEXT_REQUIRED_CONDITION || lbl; return `<span class="${_fleetRadarCompactClass(lbl)} radar-pill--text" title="${esc(tip)}">${esc(lbl)}</span>`; })()}</td>
       <td>${pillStatus((cl.marketRegime || {}).status)}</td>
       <td>${esc((cl.entryVariant || {}).type || '--')}</td>
       <td class="radar-zone-td">${esc(zoneText(c.ENTRY_ZONE || c.entryZone))}</td>
@@ -7395,6 +7479,7 @@ function _renderTradingRadar(radar, esc) {
     const provLatencyLabel = (provLatencyMs != null && isFinite(provLatencyMs)) ? `${Math.max(0, Math.round(provLatencyMs))} ms` : 'N/A';
     // Per-feed health is not individually reported by the snapshot provider today.
     const feedLabel = (provState === 'OFFLINE') ? 'MISSING (no provider)' : 'N/A (not reported by provider)';
+    const feedShort = (provState === 'OFFLINE') ? 'MISSING' : 'N/A';
     const absorbMode = selected.ABSORB_MODE || 'DISABLED';
     const av = selected.absorbV2 || {};
     const avComp = av.components || {};
@@ -7408,8 +7493,31 @@ function _renderTradingRadar(radar, esc) {
     const reclaimZoneText = (reclaimZone && reclaimZone.low != null && reclaimZone.high != null)
       ? `${_fleetFmtRadarPrice(reclaimZone.low)} – ${_fleetFmtRadarPrice(reclaimZone.high)}` : '--';
     const reclaimConfirmedUi = reclaimStatus === 'RECLAIM_CONFIRMED' || reclaimStatus === 'RECLAIM_CONFIRMED_NO_RETEST' || reclaimStatus === 'RECLAIM_RETEST_HOLD';
+    // Phase C.1 — Operator Summary: 5-second human verdict from existing fields.
+    const opEntryVerdict = _fleetRadarEntryVerdict(selected, selectedV1Status, selectedV1BlockedBy);
+    const opAbsorbVerdict = _fleetRadarAbsorbVerdict(selected);
+    const reclaimHuman = _fleetRadarReclaimHuman(reclaimStatus);
+    const opReclaimVerdict = `${reclaimHuman.verdict} — ${reclaimHuman.meaning}`;
+    const regimeReasonText = (selected.marketRegimeDiagnostics && Array.isArray(selected.marketRegimeDiagnostics.reasons) && selected.marketRegimeDiagnostics.reasons.length)
+      ? selected.marketRegimeDiagnostics.reasons.join(' / ') : null;
+    const reclaimSettled = reclaimStatus === 'RECLAIM_RETEST_HOLD' || reclaimStatus === 'RECLAIM_CONFIRMED';
+    const opNext = [
+      (selectedV1Status === 'RISK_OFF_BLOCKED') ? 'BTC/ETH regime recovery' : null,
+      reclaimSettled ? null : reclaimHuman.next,
+      (selected.STRICT_ABSORB_CONFIRMED !== true && selected.ABSORB_NEXT_REQUIRED_CONDITION && selected.ABSORB_NEXT_REQUIRED_CONDITION !== 'none — strict absorb confirmed') ? ('absorb: ' + selected.ABSORB_NEXT_REQUIRED_CONDITION) : null,
+    ].filter(Boolean).join(' + ') || (selectedV1BlockedBy !== '--' ? selectedV1BlockedBy : 'none');
+    const opTelegram = selected.telegramEligible === true ? 'YES' : 'NO';
 
     focusHtml = `<div class="radar-focus-card">
+      <div class="radar-microstructure radar-operator-summary" style="border:1px solid var(--accent, #3b82f6); background: rgba(59,130,246,0.08);">
+        <div class="radar-microstructure__title">OPERATOR SUMMARY</div>
+        <div class="radar-microstructure__row radar-verdict-row"><span>Entry</span><b>${esc(opEntryVerdict)}</b></div>
+        <div class="radar-microstructure__row radar-verdict-row"><span>Absorb</span><b>${esc(opAbsorbVerdict)}</b></div>
+        <div class="radar-microstructure__row radar-verdict-row"><span>Reclaim</span><b>${esc(opReclaimVerdict)}</b></div>
+        <div class="radar-microstructure__row radar-verdict-row"><span>Next</span><b>${esc(opNext)}</b></div>
+        <div class="radar-microstructure__row radar-verdict-row"><span>Telegram</span><b class="${opTelegram === 'YES' ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(opTelegram)}</b></div>
+        ${regimeReasonText ? `<div class="radar-microstructure__row radar-verdict-row"><span>Regime</span><b>${esc(regimeReasonText)}</b></div>` : ''}
+      </div>
       <div class="radar-focus-title"><b>${esc(selected.symbol || '--')}</b> <span class="${_fleetRadarBadgeClass(selectedV1Status)}">${actLabel}</span></div>
       <div class="radar-focus-blocked"><span>Status</span><b>${esc(selectedV1Status)}</b></div>
       <div class="radar-focus-blocked"><span>Action</span><b>${esc(_fleetRadarV1Action(selected))}</b></div>
@@ -7474,17 +7582,35 @@ function _renderTradingRadar(radar, esc) {
       </div>
       <div class="radar-microstructure">
         <div class="radar-microstructure__title">Provider Status Panel</div>
-        <div class="radar-microstructure__row"><span>MICROSTRUCTURE_PROVIDER</span><b class="${provState === 'ONLINE' ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(provState)} (${esc(microDiag.provider || 'none')})</b></div>
-        <div class="radar-microstructure__row"><span>LAST_UPDATE</span><b>${esc(provLastUpdate)}</b></div>
-        <div class="radar-microstructure__row"><span>DATA_LATENCY_MS</span><b>${esc(provLatencyLabel)}</b></div>
-        <div class="radar-microstructure__row"><span>ORDER_BOOK_FEED</span><b>${esc(feedLabel)}</b></div>
-        <div class="radar-microstructure__row"><span>TRADES_FEED</span><b>${esc(feedLabel)}</b></div>
-        <div class="radar-microstructure__row"><span>OI_FEED</span><b>${esc(feedLabel)}</b></div>
-        <div class="radar-microstructure__row"><span>FUNDING_FEED</span><b>${esc(feedLabel)}</b></div>
-        <div class="radar-microstructure__row"><span>ABSORB_MODE</span><b class="${absorbMode === 'STRICT' ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(absorbMode)}</b></div>
+        <div class="radar-microstructure__row radar-verdict-row"><span>Provider</span><b class="${provState === 'ONLINE' ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(provState)}</b></div>
+        <div class="radar-microstructure__row radar-verdict-row"><span>Mode</span><b class="${absorbMode === 'STRICT' ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(absorbMode)}</b></div>
+        <div class="radar-microstructure__row radar-verdict-row"><span>Last update</span><b>${esc(provLastUpdate)}</b></div>
+        <div class="radar-microstructure__row radar-verdict-row"><span>Latency</span><b>${esc(provLatencyLabel)}</b></div>
+        <div class="radar-microstructure__row radar-verdict-row"><span>Feeds</span><b>order book ${esc(feedShort)}, trades ${esc(feedShort)}, OI ${esc(feedShort)}, funding ${esc(feedShort)}</b></div>
+        <div class="radar-raw-diagnostics" style="opacity:0.72; font-size:0.85em; margin-top:4px;">
+          <div class="radar-microstructure__row"><span>Raw diagnostics</span><b></b></div>
+          <div class="radar-microstructure__row"><span>MICROSTRUCTURE_PROVIDER</span><b class="${provState === 'ONLINE' ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(provState)} (${esc(microDiag.provider || 'none')})</b></div>
+          <div class="radar-microstructure__row"><span>LAST_UPDATE</span><b>${esc(provLastUpdate)}</b></div>
+          <div class="radar-microstructure__row"><span>DATA_LATENCY_MS</span><b>${esc(provLatencyLabel)}</b></div>
+          <div class="radar-microstructure__row"><span>ORDER_BOOK_FEED</span><b>${esc(feedLabel)}</b></div>
+          <div class="radar-microstructure__row"><span>TRADES_FEED</span><b>${esc(feedLabel)}</b></div>
+          <div class="radar-microstructure__row"><span>OI_FEED</span><b>${esc(feedLabel)}</b></div>
+          <div class="radar-microstructure__row"><span>FUNDING_FEED</span><b>${esc(feedLabel)}</b></div>
+          <div class="radar-microstructure__row"><span>ABSORB_MODE</span><b class="${absorbMode === 'STRICT' ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(absorbMode)}</b></div>
+        </div>
       </div>
       <div class="radar-microstructure">
         <div class="radar-microstructure__title">Absorb Diagnostics Panel</div>
+        <div class="radar-microstructure__row radar-verdict-row"><span>Verdict</span><b class="${strictConfirmedUi ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(opAbsorbVerdict)}</b></div>
+        <div class="radar-microstructure__row radar-verdict-row"><span>Mode</span><b class="${absorbMode === 'STRICT' ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(absorbMode)}</b></div>
+        <div class="radar-microstructure__row radar-verdict-row"><span>Strict status</span><b class="${strictConfirmedUi ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(selected.STRICT_ABSORB_STATUS || 'ABSORB_DATA_UNAVAILABLE')}</b></div>
+        <div class="radar-microstructure__row radar-verdict-row"><span>Proxy status</span><b>${esc(selected.PROXY_ABSORB_STATUS || 'ABSORB_DATA_UNAVAILABLE')}</b></div>
+        <div class="radar-microstructure__row radar-verdict-row"><span>Entry impact</span><b>${esc(selected.ENTRY_IMPACT || 'BLOCKED_NO_ABSORB')}</b></div>
+        <div class="radar-microstructure__row radar-verdict-row"><span>Next required condition</span><b>${esc(selected.ABSORB_NEXT_REQUIRED_CONDITION || '--')}</b></div>
+        ${absorbMode === 'PROXY' ? `<div class="radar-microstructure__note" style="padding:3px 8px; font-size:0.85em; color: var(--warn, #ffaa00);">Proxy evidence only — NOT confirmed absorption.</div>` : ''}
+        ${strictConfirmedUi ? '' : `<div class="radar-microstructure__note" style="padding:3px 8px; font-size:0.85em; color: var(--warn, #ffaa00);">Strict Absorb: unavailable — trusted rolling microstructure missing.</div>`}
+        <div class="radar-raw-diagnostics" style="opacity:0.72; font-size:0.85em; margin-top:4px;">
+        <div class="radar-microstructure__row"><span>Raw diagnostics</span><b></b></div>
         <div class="radar-microstructure__row"><span>STRICT Absorb Status</span><b class="${strictConfirmedUi ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(selected.STRICT_ABSORB_STATUS || 'ABSORB_DATA_UNAVAILABLE')}</b></div>
         <div class="radar-microstructure__row"><span>PROXY Absorb Status</span><b>${esc(selected.PROXY_ABSORB_STATUS || 'ABSORB_DATA_UNAVAILABLE')}${proxyPartial ? ' (proxy evidence — NOT a confirmed absorb)' : ''}</b></div>
         <div class="radar-microstructure__row"><span>STRICT Absorb Score</span><b>${esc(_fleetFmtRadarValue(selected.STRICT_ABSORB_SCORE, 0))}</b></div>
@@ -7500,9 +7626,18 @@ function _renderTradingRadar(radar, esc) {
         <div class="radar-microstructure__row"><span>Reject / Block Reason</span><b>${esc(selected.ABSORB_BLOCK_REASON || 'none')}</b></div>
         <div class="radar-microstructure__row"><span>Next Required Condition</span><b>${esc(selected.ABSORB_NEXT_REQUIRED_CONDITION || '--')}</b></div>
         <div class="radar-microstructure__row"><span>Entry Impact</span><b>${esc(selected.ENTRY_IMPACT || 'BLOCKED_NO_ABSORB')}</b></div>
+        </div>
       </div>
       <div class="radar-microstructure">
         <div class="radar-microstructure__title">Reclaim Diagnostics Panel</div>
+        <div class="radar-microstructure__row radar-verdict-row"><span>Verdict</span><b class="${reclaimConfirmedUi ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(reclaimHuman.verdict)}</b></div>
+        <div class="radar-microstructure__row radar-verdict-row"><span>Status</span><b class="${reclaimConfirmedUi ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(reclaimStatus)}</b></div>
+        <div class="radar-microstructure__row radar-verdict-row"><span>Score</span><b>${esc(_fleetFmtRadarValue(selected.RECLAIM_SCORE, 0))}/100</b></div>
+        <div class="radar-microstructure__row radar-verdict-row"><span>Level</span><b>${esc(_fleetFmtRadarPrice(selected.RECLAIM_LEVEL))}${reclaimZoneText !== '--' ? ` (${esc(reclaimZoneText)})` : ''}</b></div>
+        <div class="radar-microstructure__row radar-verdict-row"><span>Next required condition</span><b>${esc(reclaimHuman.next)}</b></div>
+        <div class="radar-microstructure__note" style="padding:3px 8px; font-size:0.85em; color: var(--warn, #ffaa00);">Reclaim: ${esc(reclaimHuman.verdict)} — ${esc(reclaimHuman.meaning)}</div>
+        <div class="radar-raw-diagnostics" style="opacity:0.72; font-size:0.85em; margin-top:4px;">
+        <div class="radar-microstructure__row"><span>Raw diagnostics</span><b></b></div>
         <div class="radar-microstructure__row"><span>RECLAIM_STATUS</span><b class="${reclaimConfirmedUi ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(reclaimStatus)}</b></div>
         <div class="radar-microstructure__row"><span>RECLAIM_SCORE</span><b>${esc(_fleetFmtRadarValue(selected.RECLAIM_SCORE, 0))}/100</b></div>
         <div class="radar-microstructure__row"><span>RECLAIM_CLASSIFICATION</span><b>${esc(selected.RECLAIM_CLASSIFICATION || 'NONE')}</b></div>
@@ -7516,6 +7651,7 @@ function _renderTradingRadar(radar, esc) {
         <div class="radar-microstructure__row"><span>FAILED_REASON</span><b>${esc(selected.RECLAIM_FAILED_REASON || 'none')}</b></div>
         <div class="radar-microstructure__row"><span>NEXT_REQUIRED_CONDITION</span><b>${esc(selected.RECLAIM_NEXT_REQUIRED_CONDITION || '--')}</b></div>
         <div class="radar-microstructure__row"><span>Reject / Block Reasons</span><div class="radar-chip-row">${chipList(selected.RECLAIM_REJECT_REASONS, 'radar-status-chip radar-status-chip--missing')}</div></div>
+        </div>
       </div>
       <div class="radar-next-trigger"><span>Next trigger</span><b>${esc(selected.nextRequiredConfirmation || 'none')}</b></div>
       <div class="radar-focus-levels">
