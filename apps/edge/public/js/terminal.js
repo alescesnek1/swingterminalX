@@ -7259,8 +7259,25 @@ function _fleetRadarEntryVerdict(c, status, blockedBy) {
   if (s === 'INVALIDATED') return 'NO ENTRY — invalidated / safety risk';
   if (s === 'CHASE_RISK') return 'NO ENTRY — chase risk / poor R/R';
   if (s === 'EXTENDED_ENTRY') return 'NO FULL ENTRY — price extended';
+  if (s === 'WATCH' || s === '') return 'WATCH ONLY — waiting for full setup confirmation';
   const why = (blockedBy && blockedBy !== '--') ? blockedBy : 'waiting for confirmation';
   return 'NO ENTRY — ' + why;
+}
+// Colour tone for a decision-card verdict head (reuses theme CSS vars). Green =
+// good/confirmed, red = blocked/failed, dim = no-data/not-started, amber = in-progress.
+function _fleetRadarVerdictTone(head) {
+  const h = String(head || '').toUpperCase();
+  if (h.indexOf('ENTRY READY') >= 0 || h === 'STRICT CONFIRMED' || h === 'CONFIRMED' || h === 'RETEST HELD') return 'var(--grn, #00d484)';
+  if (h.indexOf('NO ENTRY') >= 0 || h === 'RISK OFF' || h === 'REJECTED' || h === 'FAILED' || h === 'INVALIDATED') return 'var(--red, #ff3356)';
+  if (h === 'NO DATA' || h === 'STALE' || h === 'UNTRUSTED' || h === 'NO LEVEL FOUND' || h === 'NOT STARTED' || h.indexOf('WATCH ONLY') >= 0) return 'var(--txt3, #a0a0a0)';
+  return 'var(--amb, #ffb020)';
+}
+// Split a "HEAD — detail" verdict into its parts for card rendering.
+function _fleetRadarCardParts(text) {
+  const t = String(text == null ? '' : text);
+  const i = t.indexOf(' — ');
+  if (i < 0) return { head: t, detail: '' };
+  return { head: t.slice(0, i), detail: t.slice(i + 3) };
 }
 // Human-first Reclaim verdict/meaning/next for every RECLAIM_STATUS.
 function _fleetRadarReclaimHuman(status) {
@@ -7497,26 +7514,57 @@ function _renderTradingRadar(radar, esc) {
     const opEntryVerdict = _fleetRadarEntryVerdict(selected, selectedV1Status, selectedV1BlockedBy);
     const opAbsorbVerdict = _fleetRadarAbsorbVerdict(selected);
     const reclaimHuman = _fleetRadarReclaimHuman(reclaimStatus);
-    const opReclaimVerdict = `${reclaimHuman.verdict} — ${reclaimHuman.meaning}`;
     const regimeReasonText = (selected.marketRegimeDiagnostics && Array.isArray(selected.marketRegimeDiagnostics.reasons) && selected.marketRegimeDiagnostics.reasons.length)
       ? selected.marketRegimeDiagnostics.reasons.join(' / ') : null;
     const reclaimSettled = reclaimStatus === 'RECLAIM_RETEST_HOLD' || reclaimStatus === 'RECLAIM_CONFIRMED';
-    const opNext = [
-      (selectedV1Status === 'RISK_OFF_BLOCKED') ? 'BTC/ETH regime recovery' : null,
-      reclaimSettled ? null : reclaimHuman.next,
-      (selected.STRICT_ABSORB_CONFIRMED !== true && selected.ABSORB_NEXT_REQUIRED_CONDITION && selected.ABSORB_NEXT_REQUIRED_CONDITION !== 'none — strict absorb confirmed') ? ('absorb: ' + selected.ABSORB_NEXT_REQUIRED_CONDITION) : null,
-    ].filter(Boolean).join(' + ') || (selectedV1BlockedBy !== '--' ? selectedV1BlockedBy : 'none');
     const opTelegram = selected.telegramEligible === true ? 'YES' : 'NO';
+    // Phase C.2 — decision-first cards. One concise Next sentence (not concatenated
+    // debug fragments): pick the single most important required action.
+    const opNextConcise = (selectedV1Status === 'RISK_OFF_BLOCKED')
+      ? 'Wait for BTC/ETH regime to recover, then identify a reclaim level.'
+      : (selectedV1Status === 'INVALIDATED')
+        ? 'No entry — safety/fundamental risk active.'
+        : (!reclaimSettled)
+          ? reclaimHuman.next
+          : (selected.STRICT_ABSORB_CONFIRMED !== true)
+            ? 'Confirm absorption (needs trusted rolling microstructure).'
+            : (opEntryVerdict.indexOf('ENTRY READY') >= 0)
+              ? 'Conditions met — see entry zone, stop and size.'
+              : 'Confirm execution score and risk/reward.';
+    const entryParts = _fleetRadarCardParts(opEntryVerdict);
+    const absorbParts = _fleetRadarCardParts(opAbsorbVerdict);
+    const entryTone = _fleetRadarVerdictTone(entryParts.head);
+    const absorbTone = _fleetRadarVerdictTone(absorbParts.head);
+    const reclaimTone = _fleetRadarVerdictTone(reclaimHuman.verdict);
+    const cardBase = 'border-radius:8px; padding:9px 11px; background: rgba(255,255,255,0.03);';
+    const cardLabel = 'font-size:10px; letter-spacing:.09em; color:var(--txt3); text-transform:uppercase;';
+    const cardBig = 'font-size:16px; font-weight:700; line-height:1.2; margin-top:2px;';
+    const cardExpl = 'font-size:11px; color:var(--txt2); margin-top:3px;';
 
     focusHtml = `<div class="radar-focus-card">
-      <div class="radar-microstructure radar-operator-summary" style="border:1px solid var(--accent, #3b82f6); background: rgba(59,130,246,0.08);">
-        <div class="radar-microstructure__title">OPERATOR SUMMARY</div>
-        <div class="radar-microstructure__row radar-verdict-row"><span>Entry</span><b>${esc(opEntryVerdict)}</b></div>
-        <div class="radar-microstructure__row radar-verdict-row"><span>Absorb</span><b>${esc(opAbsorbVerdict)}</b></div>
-        <div class="radar-microstructure__row radar-verdict-row"><span>Reclaim</span><b>${esc(opReclaimVerdict)}</b></div>
-        <div class="radar-microstructure__row radar-verdict-row"><span>Next</span><b>${esc(opNext)}</b></div>
-        <div class="radar-microstructure__row radar-verdict-row"><span>Telegram</span><b class="${opTelegram === 'YES' ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(opTelegram)}</b></div>
-        ${regimeReasonText ? `<div class="radar-microstructure__row radar-verdict-row"><span>Regime</span><b>${esc(regimeReasonText)}</b></div>` : ''}
+      <div class="radar-operator-summary radar-decision-cards" style="display:flex; flex-direction:column; gap:8px; margin-bottom:10px;">
+        <div class="radar-decision-card radar-decision-card--entry" style="${cardBase} border:1px solid ${entryTone};">
+          <div style="${cardLabel}">Entry</div>
+          <div class="radar-decision-card__verdict" style="${cardBig} font-size:22px; color:${entryTone};">${esc(entryParts.head)}</div>
+          <div style="${cardExpl}">${esc(entryParts.detail || _fleetRadarV1Action(selected) || '—')}</div>
+          <div style="font-size:11px; color:var(--txt3); margin-top:5px;">Telegram: <b class="${opTelegram === 'YES' ? 'radar-micro-yes' : 'radar-micro-no'}">${opTelegram}</b>${regimeReasonText ? ` &middot; Regime: ${esc(regimeReasonText)}` : ''}</div>
+        </div>
+        <div class="radar-decision-cards__row" style="display:grid; grid-template-columns:repeat(3, 1fr); gap:8px;">
+          <div class="radar-decision-card radar-decision-card--absorb" style="${cardBase} border:1px solid var(--b2, #1a2540);">
+            <div style="${cardLabel}">Absorb</div>
+            <div class="radar-decision-card__verdict" style="${cardBig} color:${absorbTone};">${esc(absorbParts.head)}</div>
+            <div style="${cardExpl}">${esc(absorbParts.detail || (strictConfirmedUi ? 'confirmed absorption' : 'not confirmed'))}</div>
+          </div>
+          <div class="radar-decision-card radar-decision-card--reclaim" style="${cardBase} border:1px solid var(--b2, #1a2540);">
+            <div style="${cardLabel}">Reclaim</div>
+            <div class="radar-decision-card__verdict" style="${cardBig} color:${reclaimTone};">${esc(reclaimHuman.verdict)}</div>
+            <div style="${cardExpl}">${esc(reclaimHuman.meaning)}</div>
+          </div>
+          <div class="radar-decision-card radar-decision-card--next" style="${cardBase} border:1px solid var(--b2, #1a2540);">
+            <div style="${cardLabel}">Next</div>
+            <div style="font-size:12px; color:var(--txt); font-weight:600; line-height:1.3; margin-top:2px;">${esc(opNextConcise)}</div>
+          </div>
+        </div>
       </div>
       <div class="radar-focus-title"><b>${esc(selected.symbol || '--')}</b> <span class="${_fleetRadarBadgeClass(selectedV1Status)}">${actLabel}</span></div>
       <div class="radar-focus-blocked"><span>Status</span><b>${esc(selectedV1Status)}</b></div>
@@ -7601,15 +7649,15 @@ function _renderTradingRadar(radar, esc) {
       </div>
       <div class="radar-microstructure">
         <div class="radar-microstructure__title">Absorb Diagnostics Panel</div>
-        <div class="radar-microstructure__row radar-verdict-row"><span>Verdict</span><b class="${strictConfirmedUi ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(opAbsorbVerdict)}</b></div>
-        <div class="radar-microstructure__row radar-verdict-row"><span>Mode</span><b class="${absorbMode === 'STRICT' ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(absorbMode)}</b></div>
-        <div class="radar-microstructure__row radar-verdict-row"><span>Strict status</span><b class="${strictConfirmedUi ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(selected.STRICT_ABSORB_STATUS || 'ABSORB_DATA_UNAVAILABLE')}</b></div>
-        <div class="radar-microstructure__row radar-verdict-row"><span>Proxy status</span><b>${esc(selected.PROXY_ABSORB_STATUS || 'ABSORB_DATA_UNAVAILABLE')}</b></div>
-        <div class="radar-microstructure__row radar-verdict-row"><span>Entry impact</span><b>${esc(selected.ENTRY_IMPACT || 'BLOCKED_NO_ABSORB')}</b></div>
-        <div class="radar-microstructure__row radar-verdict-row"><span>Next required condition</span><b>${esc(selected.ABSORB_NEXT_REQUIRED_CONDITION || '--')}</b></div>
-        ${absorbMode === 'PROXY' ? `<div class="radar-microstructure__note" style="padding:3px 8px; font-size:0.85em; color: var(--warn, #ffaa00);">Proxy evidence only — NOT confirmed absorption.</div>` : ''}
-        ${strictConfirmedUi ? '' : `<div class="radar-microstructure__note" style="padding:3px 8px; font-size:0.85em; color: var(--warn, #ffaa00);">Strict Absorb: unavailable — trusted rolling microstructure missing.</div>`}
-        <div class="radar-raw-diagnostics" style="opacity:0.72; font-size:0.85em; margin-top:4px;">
+        <div class="radar-decision-block radar-decision-block--absorb" style="padding:7px 11px; border-left:3px solid ${absorbTone}; background: rgba(255,255,255,0.02); margin-bottom:6px;">
+          <div class="radar-decision-block__verdict" style="font-size:17px; font-weight:700; color:${absorbTone};">${esc(absorbParts.head)}</div>
+          <div style="font-size:12px; color:var(--txt2); margin-top:2px;">Confirmed absorption: <b class="${strictConfirmedUi ? 'radar-micro-yes' : 'radar-micro-no'}">${strictConfirmedUi ? 'YES' : 'NO'}</b></div>
+          <div style="font-size:11px; color:var(--txt3); margin-top:2px;">Entry impact: ${esc(selected.ENTRY_IMPACT || 'BLOCKED_NO_ABSORB')}</div>
+          <div style="font-size:11px; color:var(--txt3); margin-top:2px;">Next: ${esc(selected.ABSORB_NEXT_REQUIRED_CONDITION || '--')}</div>
+          ${absorbMode === 'PROXY' ? `<div style="font-size:11px; color: var(--warn, #ffaa00); margin-top:4px;">Proxy evidence only — NOT confirmed absorption.</div>` : ''}
+          ${strictConfirmedUi ? '' : `<div style="font-size:11px; color: var(--warn, #ffaa00); margin-top:2px;">Strict absorption unavailable — trusted rolling microstructure missing.</div>`}
+        </div>
+        <div class="radar-raw-diagnostics" style="opacity:0.7; font-size:0.85em; margin-top:4px;">
         <div class="radar-microstructure__row"><span>Raw diagnostics</span><b></b></div>
         <div class="radar-microstructure__row"><span>STRICT Absorb Status</span><b class="${strictConfirmedUi ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(selected.STRICT_ABSORB_STATUS || 'ABSORB_DATA_UNAVAILABLE')}</b></div>
         <div class="radar-microstructure__row"><span>PROXY Absorb Status</span><b>${esc(selected.PROXY_ABSORB_STATUS || 'ABSORB_DATA_UNAVAILABLE')}${proxyPartial ? ' (proxy evidence — NOT a confirmed absorb)' : ''}</b></div>
@@ -7630,13 +7678,13 @@ function _renderTradingRadar(radar, esc) {
       </div>
       <div class="radar-microstructure">
         <div class="radar-microstructure__title">Reclaim Diagnostics Panel</div>
-        <div class="radar-microstructure__row radar-verdict-row"><span>Verdict</span><b class="${reclaimConfirmedUi ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(reclaimHuman.verdict)}</b></div>
-        <div class="radar-microstructure__row radar-verdict-row"><span>Status</span><b class="${reclaimConfirmedUi ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(reclaimStatus)}</b></div>
-        <div class="radar-microstructure__row radar-verdict-row"><span>Score</span><b>${esc(_fleetFmtRadarValue(selected.RECLAIM_SCORE, 0))}/100</b></div>
-        <div class="radar-microstructure__row radar-verdict-row"><span>Level</span><b>${esc(_fleetFmtRadarPrice(selected.RECLAIM_LEVEL))}${reclaimZoneText !== '--' ? ` (${esc(reclaimZoneText)})` : ''}</b></div>
-        <div class="radar-microstructure__row radar-verdict-row"><span>Next required condition</span><b>${esc(reclaimHuman.next)}</b></div>
-        <div class="radar-microstructure__note" style="padding:3px 8px; font-size:0.85em; color: var(--warn, #ffaa00);">Reclaim: ${esc(reclaimHuman.verdict)} — ${esc(reclaimHuman.meaning)}</div>
-        <div class="radar-raw-diagnostics" style="opacity:0.72; font-size:0.85em; margin-top:4px;">
+        <div class="radar-decision-block radar-decision-block--reclaim" style="padding:7px 11px; border-left:3px solid ${reclaimTone}; background: rgba(255,255,255,0.02); margin-bottom:6px;">
+          <div class="radar-decision-block__verdict" style="font-size:17px; font-weight:700; color:${reclaimTone};">${esc(reclaimHuman.verdict)}</div>
+          <div style="font-size:12px; color:var(--txt2); margin-top:2px;">${esc(reclaimHuman.meaning)}</div>
+          <div style="font-size:11px; color:var(--txt3); margin-top:2px;">Next: ${esc(reclaimHuman.next)}</div>
+          <div style="font-size:11px; color:var(--txt3); margin-top:2px;">Score ${esc(_fleetFmtRadarValue(selected.RECLAIM_SCORE, 0))}/100${reclaimZoneText !== '--' ? ` &middot; Level ${esc(_fleetFmtRadarPrice(selected.RECLAIM_LEVEL))} (${esc(reclaimZoneText)})` : ''}</div>
+        </div>
+        <div class="radar-raw-diagnostics" style="opacity:0.7; font-size:0.85em; margin-top:4px;">
         <div class="radar-microstructure__row"><span>Raw diagnostics</span><b></b></div>
         <div class="radar-microstructure__row"><span>RECLAIM_STATUS</span><b class="${reclaimConfirmedUi ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(reclaimStatus)}</b></div>
         <div class="radar-microstructure__row"><span>RECLAIM_SCORE</span><b>${esc(_fleetFmtRadarValue(selected.RECLAIM_SCORE, 0))}/100</b></div>

@@ -248,18 +248,68 @@ test('Phase C.1: Matrix Reclaim cell renders explicit compact labels', () => {
   assert.equal(reclaimCompact({}), 'NO DATA');
 });
 
-test('Phase C.1: focus candidate renders an Operator Summary with Entry/Absorb/Reclaim/Next/Telegram', () => {
-  assert.match(terminalJs, /OPERATOR SUMMARY/);
-  assert.match(terminalJs, /radar-operator-summary/);
-  assert.match(terminalJs, /<span>Entry<\/span><b>\$\{esc\(opEntryVerdict\)/);
-  assert.match(terminalJs, /<span>Absorb<\/span><b>\$\{esc\(opAbsorbVerdict\)/);
-  assert.match(terminalJs, /<span>Reclaim<\/span><b>\$\{esc\(opReclaimVerdict\)/);
-  assert.match(terminalJs, /<span>Next<\/span><b>\$\{esc\(opNext\)/);
-  assert.match(terminalJs, /<span>Telegram<\/span>/);
+test('Phase C.2: focus candidate renders a decision-card Operator Summary (Entry/Absorb/Reclaim/Next)', () => {
+  assert.match(terminalJs, /radar-operator-summary radar-decision-cards/);
+  assert.match(terminalJs, /radar-decision-card--entry/);
+  assert.match(terminalJs, /radar-decision-card--absorb/);
+  assert.match(terminalJs, /radar-decision-card--reclaim/);
+  assert.match(terminalJs, /radar-decision-card--next/);
   // Verdicts are derived from existing fields only.
   assert.match(terminalJs, /_fleetRadarEntryVerdict\(selected, selectedV1Status, selectedV1BlockedBy\)/);
   assert.match(terminalJs, /_fleetRadarAbsorbVerdict\(selected\)/);
   assert.match(terminalJs, /_fleetRadarReclaimHuman\(reclaimStatus\)/);
+  // The top summary is NO LONGER a full-width key/value table (label far-left,
+  // value far-right). The old row markup must be gone.
+  assert.doesNotMatch(terminalJs, /radar-operator-summary[^]*?<span>Entry<\/span><b>\$\{esc\(opEntryVerdict\)\}/);
+  assert.doesNotMatch(terminalJs, /<span>Next<\/span><b>\$\{esc\(opNext\)\}/);
+});
+
+test('Phase C.2: Entry card shows a plain verdict head + explanation + Telegram', () => {
+  assert.match(terminalJs, /const entryParts = _fleetRadarCardParts\(opEntryVerdict\)/);
+  assert.match(terminalJs, /radar-decision-card__verdict/);
+  assert.match(terminalJs, /\$\{esc\(entryParts\.head\)\}/);
+  assert.match(terminalJs, /\$\{esc\(entryParts\.detail/);
+  assert.match(terminalJs, /Telegram: <b class="\$\{opTelegram === 'YES'/);
+  // Entry verdict vocabulary is plain-English.
+  const entryVerdict = extractFn(terminalJs, '_fleetRadarEntryVerdict');
+  assert.equal(entryVerdict({}, 'RISK_OFF_BLOCKED', 'x'), 'NO ENTRY — market regime blocked');
+  assert.equal(entryVerdict({}, 'WATCH', '--'), 'WATCH ONLY — waiting for full setup confirmation');
+  assert.equal(entryVerdict({}, 'STANDARD_ENTRY_READY', '--'), 'ENTRY READY');
+});
+
+test('Phase C.2: Absorb card shows plain verdict head (not raw-only field dump)', () => {
+  assert.match(terminalJs, /const absorbParts = _fleetRadarCardParts\(opAbsorbVerdict\)/);
+  assert.match(terminalJs, /radar-decision-card--absorb[^]*?\$\{esc\(absorbParts\.head\)\}/);
+  const parts = extractFn(terminalJs, '_fleetRadarCardParts');
+  assert.deepEqual(parts('PROXY ONLY — not confirmed'), { head: 'PROXY ONLY', detail: 'not confirmed' });
+  assert.deepEqual(parts('ENTRY READY'), { head: 'ENTRY READY', detail: '' });
+});
+
+test('Phase C.2: Next card is one concise sentence, not concatenated debug fragments', () => {
+  assert.match(terminalJs, /radar-decision-card--next/);
+  assert.match(terminalJs, /const opNextConcise =/);
+  // The old " + "-joined concatenation is gone.
+  assert.doesNotMatch(terminalJs, /\.filter\(Boolean\)\.join\(' \+ '\)/);
+});
+
+test('Phase C.2: verdict tone helper colours good/blocked/dim verdicts distinctly', () => {
+  const tone = extractFn(terminalJs, '_fleetRadarVerdictTone');
+  assert.match(tone('ENTRY READY'), /--grn/);
+  assert.match(tone('STRICT CONFIRMED'), /--grn/);
+  assert.match(tone('RETEST HELD'), /--grn/);
+  assert.match(tone('NO ENTRY'), /--red/);
+  assert.match(tone('REJECTED'), /--red/);
+  assert.match(tone('NO LEVEL FOUND'), /--txt3/);
+  assert.match(tone('PROXY ONLY'), /--amb/);
+});
+
+test('Phase C.2: Absorb and Reclaim panels are decision-first (prominent block, raw dimmed)', () => {
+  assert.match(terminalJs, /radar-decision-block radar-decision-block--absorb/);
+  assert.match(terminalJs, /radar-decision-block radar-decision-block--reclaim/);
+  assert.match(terminalJs, /radar-decision-block__verdict/);
+  assert.match(terminalJs, /Confirmed absorption: <b/);
+  // Raw diagnostics still present but dimmed (opacity), and after the block.
+  assert.match(terminalJs, /radar-raw-diagnostics" style="opacity:0\.7/);
 });
 
 test('Phase C.1: reclaim level undefined renders human "NO LEVEL FOUND" text', () => {
@@ -279,7 +329,7 @@ test('Phase C.1: reclaim level undefined renders human "NO LEVEL FOUND" text', (
 
 test('Phase C.1: proxy absorb is explicitly labelled NOT confirmed absorption', () => {
   assert.match(terminalJs, /Proxy evidence only — NOT confirmed absorption/);
-  assert.match(terminalJs, /Strict Absorb: unavailable — trusted rolling microstructure missing/);
+  assert.match(terminalJs, /Strict absorption unavailable — trusted rolling microstructure missing/);
   const absorbVerdict = extractFn(terminalJs, '_fleetRadarAbsorbVerdict');
   assert.equal(absorbVerdict({ ABSORB_STATUS: 'ABSORB_PARTIAL_EVIDENCE' }), 'PROXY ONLY — not confirmed');
   assert.equal(absorbVerdict({ STRICT_ABSORB_CONFIRMED: true }), 'STRICT CONFIRMED');
@@ -292,7 +342,7 @@ test('Phase C.1: readability changes do not loosen Telegram or entry gating (dis
   // Entry verdict only ever reports ENTRY READY when STATUS already says ENTRY_READY.
   const entryVerdict = extractFn(terminalJs, '_fleetRadarEntryVerdict');
   assert.equal(entryVerdict({}, 'RISK_OFF_BLOCKED', 'x'), 'NO ENTRY — market regime blocked');
-  assert.equal(entryVerdict({}, 'WATCH', '--'), 'NO ENTRY — waiting for confirmation');
+  assert.equal(entryVerdict({}, 'WATCH', '--'), 'WATCH ONLY — waiting for full setup confirmation');
   assert.equal(entryVerdict({}, 'STANDARD_ENTRY_READY', '--'), 'ENTRY READY');
   // The existing fail-safe Telegram gate text on the focus card is unchanged.
   assert.match(terminalJs, /ENTRY_READY microstructure gates still apply/);
