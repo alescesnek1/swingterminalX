@@ -1044,6 +1044,8 @@ function buildRadarV1Output(market, regime, stageInfo, levels, safety) {
     RECLAIM_LEVEL: reclaimV2.RECLAIM_LEVEL,
     RECLAIM_LEVEL_ZONE: reclaimV2.RECLAIM_LEVEL_ZONE,
     RECLAIM_LEVEL_TYPE: reclaimV2.RECLAIM_LEVEL_TYPE,
+    RECLAIM_LEVEL_SOURCE: reclaimV2.RECLAIM_LEVEL_SOURCE,
+    RECLAIM_SOURCE_CONFIDENCE: reclaimV2.RECLAIM_SOURCE_CONFIDENCE,
     RECLAIM_TIMEFRAME: reclaimV2.RECLAIM_TIMEFRAME,
     DISTANCE_TO_RECLAIM_LEVEL: reclaimV2.DISTANCE_TO_RECLAIM_LEVEL,
     CLOSE_ABOVE_LEVEL: reclaimV2.CLOSE_ABOVE_LEVEL,
@@ -1054,7 +1056,8 @@ function buildRadarV1Output(market, regime, stageInfo, levels, safety) {
     RECLAIM_CLASSIFICATION: reclaimV2.RECLAIM_CLASSIFICATION,
     RECLAIM_LEVELS: reclaimV2.RECLAIM_LEVELS,
     RECLAIM_SOURCE_DATA_STATUS: reclaimV2.RECLAIM_SOURCE_DATA_STATUS,
-    RECLAIM_MISSING_SOURCE_FIELDS: reclaimV2.RECLAIM_MISSING_SOURCE_FIELDS,
+    RECLAIM_SOURCE_FIELDS_PRESENT: reclaimV2.RECLAIM_SOURCE_FIELDS_PRESENT,
+    RECLAIM_SOURCE_FIELDS_MISSING: reclaimV2.RECLAIM_SOURCE_FIELDS_MISSING,
     reclaimV2: { ...reclaimV2, legacyProxyScore: scores.RECLAIM_SCORE },
   };
 }
@@ -1581,6 +1584,9 @@ const RECLAIM_LEVEL_SOURCES = Object.freeze([
   { type: 'intraday base high', importance: 66, lostByNature: true, get: (m) => n(m.baseHigh ?? m.localHigh ?? m.priorBounceHigh) },
   { type: 'local pivot before breakdown', importance: 58, lostByNature: true, get: (m) => n(m.preBreakdownPivot ?? m.pivotHigh ?? m.localPivot) },
   { type: 'MA / trend zone', importance: 50, lostByNature: false, get: (m) => n(m.maResistance ?? m.ma50 ?? m.trendZone ?? m.emaZone) },
+  { type: 'entry zone high (fallback)', importance: 42, lostByNature: false, get: (m) => n(m.entryZone?.high ?? m.zone?.high ?? m.entry_zone_high) },
+  { type: '24h high (fallback)', importance: 32, lostByNature: false, get: (m) => n(m.high_24h ?? m.high24h) },
+  { type: '24h low (fallback)', importance: 26, lostByNature: false, get: (m) => n(m.low_24h ?? m.low24h) },
 ]);
 const RECLAIM_SOURCE_FIELD_NAMES = Object.freeze([
   'breakdownLevel', 'nearestBreakdownLevel', 'reclaimLevel', 'flushHigh',
@@ -1588,6 +1594,8 @@ const RECLAIM_SOURCE_FIELD_NAMES = Object.freeze([
   'nearestSupport', 'anchoredVwap', 'vwap', 'baseHigh', 'localHigh',
   'priorBounceHigh', 'preBreakdownPivot', 'pivotHigh', 'localPivot',
   'maResistance', 'ma50', 'trendZone', 'emaZone',
+  'entryZone', 'zone', 'entry_zone_high', 'high_24h', 'high24h',
+  'low_24h', 'low24h',
 ]);
 
 function reclaimTimeframeOf(m) {
@@ -1670,8 +1678,16 @@ function evaluateReclaimV2(market, regime, dataQuality) {
     });
   }
   const primary = levels[0] || null;
+  const missingSourceFields = RECLAIM_SOURCE_FIELD_NAMES.filter((k) => {
+    if (k === 'entryZone' || k === 'zone') return !m[k] || !microPresent(m[k].high);
+    return !microPresent(m[k]);
+  });
+  const presentSourceFields = RECLAIM_SOURCE_FIELD_NAMES.filter((k) => {
+    if (k === 'entryZone' || k === 'zone') return m[k] && microPresent(m[k].high);
+    return microPresent(m[k]);
+  });
+
   if (!primary) {
-    const missingSourceFields = RECLAIM_SOURCE_FIELD_NAMES.filter((k) => !microPresent(m[k]));
     const hasSourceData = missingSourceFields.length < RECLAIM_SOURCE_FIELD_NAMES.length;
     rejectReasons.push(hasSourceData ? 'no relevant reclaim level found' : 'RECLAIM_DATA_SOURCE_MISSING');
     return buildReclaimResult({
@@ -1681,10 +1697,10 @@ function evaluateReclaimV2(market, regime, dataQuality) {
       failedReason: null, rejectReasons,
       nextRequired: hasSourceData
         ? 'identify a valid breakdown / range / VWAP / base level to reclaim'
-        : 'scanner did not supply reclaim source fields: breakdownLevel, rangeLow, vwap, baseHigh',
+        : 'scanner did not supply reclaim source fields: breakdownLevel, rangeLow, vwap, baseHigh, high_24h, etc.',
       components: {},
       sourceDataStatus: hasSourceData ? 'NO_LEVEL_FOUND' : 'RECLAIM_DATA_SOURCE_MISSING',
-      missingSourceFields,
+      missingSourceFields, presentSourceFields,
     });
   }
 
@@ -1832,13 +1848,15 @@ function evaluateReclaimV2(market, regime, dataQuality) {
     status, score, confidence, timeframe, primary, levels,
     closeAbove: closeConfirmed, retestStatus, classification, tolPct,
     failedReason, rejectReasons: compactReasons(rejectReasons, 8), nextRequired, components,
+    sourceDataStatus: primary ? 'SOURCE_DATA_PRESENT' : 'NO_LEVEL_FOUND',
+    missingSourceFields, presentSourceFields,
   });
 }
 
 function buildReclaimResult({
   status, score, confidence, timeframe, primary, levels, closeAbove, retestStatus,
   classification, tolPct, failedReason, rejectReasons, nextRequired, components,
-  sourceDataStatus, missingSourceFields,
+  sourceDataStatus, missingSourceFields, presentSourceFields,
 }) {
   return {
     RECLAIM_STATUS: status,
@@ -1847,6 +1865,8 @@ function buildReclaimResult({
     RECLAIM_LEVEL: primary ? primary.level_price : null,
     RECLAIM_LEVEL_ZONE: primary ? { low: primary.level_zone_low, high: primary.level_zone_high } : null,
     RECLAIM_LEVEL_TYPE: primary ? primary.level_type : 'undefined',
+    RECLAIM_LEVEL_SOURCE: primary ? primary.source : 'undefined',
+    RECLAIM_SOURCE_CONFIDENCE: primary ? primary.importance_score : null,
     RECLAIM_TIMEFRAME: timeframe,
     DISTANCE_TO_RECLAIM_LEVEL: primary ? primary.distance_from_current_price : null,
     CLOSE_ABOVE_LEVEL: closeAbove === true,
@@ -1858,7 +1878,8 @@ function buildReclaimResult({
     RECLAIM_LEVELS: levels || [],
     RECLAIM_TOLERANCE_PCT: round(tolPct, 3),
     RECLAIM_SOURCE_DATA_STATUS: sourceDataStatus || (primary ? 'SOURCE_DATA_PRESENT' : 'NO_LEVEL_FOUND'),
-    RECLAIM_MISSING_SOURCE_FIELDS: missingSourceFields || [],
+    RECLAIM_SOURCE_FIELDS_PRESENT: presentSourceFields || [],
+    RECLAIM_SOURCE_FIELDS_MISSING: missingSourceFields || [],
     components: components || {},
   };
 }

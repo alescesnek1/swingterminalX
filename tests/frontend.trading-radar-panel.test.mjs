@@ -135,7 +135,7 @@ test('Phase C: focus panel renders a Reclaim Diagnostics Panel (never a bare Rec
   assert.match(terminalJs, /selected\.RECLAIM_SOURCE_DATA_STATUS/);
   assert.match(terminalJs, /selected\.RECLAIM_SCORE/);
   assert.match(terminalJs, /selected\.RECLAIM_REJECT_REASONS/);
-  assert.match(terminalJs, /selected\.RECLAIM_MISSING_SOURCE_FIELDS/);
+  assert.match(terminalJs, /selected\.RECLAIM_SOURCE_FIELDS_MISSING/);
   // Detected/confirmed/retest-hold are surfaced as an explicit status string, not
   // a boolean, so the UI can never collapse to "Reclaim: false" / blank.
   assert.match(terminalJs, /reclaimStatus = selected\.RECLAIM_STATUS \|\| 'RECLAIM_DATA_UNAVAILABLE'/);

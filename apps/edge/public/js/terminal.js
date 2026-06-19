@@ -7417,7 +7417,7 @@ function _renderTradingRadar(radar, esc) {
       <td>${pillStatus((cl.longFlush || {}).status)}</td>
       <td>${pillStatus((cl.stabilization || {}).status)}</td>
       <td>${(() => { const lbl = _fleetRadarAbsorbCompact(c); const tip = (c.ABSORB_BLOCK_REASON && c.ABSORB_BLOCK_REASON !== 'none') ? c.ABSORB_BLOCK_REASON : lbl; return `<span class="${_fleetRadarCompactClass(lbl)} radar-pill--text" title="${esc(tip)}">${esc(lbl)}</span>`; })()}</td>
-      <td>${(() => { const lbl = _fleetRadarReclaimCompact(c); const missing = Array.isArray(c.RECLAIM_MISSING_SOURCE_FIELDS) ? c.RECLAIM_MISSING_SOURCE_FIELDS.slice(0, 6).join(', ') : ''; const tip = c.RECLAIM_NEXT_REQUIRED_CONDITION || missing || lbl; return `<span class="${_fleetRadarCompactClass(lbl)} radar-pill--text" title="${esc(tip)}">${esc(lbl)}</span>`; })()}</td>
+      <td>${(() => { const lbl = _fleetRadarReclaimCompact(c); const missing = Array.isArray(c.RECLAIM_SOURCE_FIELDS_MISSING) ? c.RECLAIM_SOURCE_FIELDS_MISSING.slice(0, 6).join(', ') : ''; const tip = c.RECLAIM_NEXT_REQUIRED_CONDITION || missing || lbl; return `<span class="${_fleetRadarCompactClass(lbl)} radar-pill--text" title="${esc(tip)}">${esc(lbl)}</span>`; })()}</td>
       <td>${pillStatus((cl.marketRegime || {}).status)}</td>
       <td>${(() => { const lbl = _fleetRadarMatrixEntryLabel(c, v1Status); const setup = (cl.entryVariant || {}).type; const tip = setup && setup !== lbl ? `Setup signal: ${setup}; final entry: ${lbl}` : `Final entry: ${lbl}`; return `<span title="${esc(tip)}">${esc(lbl)}</span>`; })()}</td>
       <td class="radar-zone-td">${esc(zoneText(c.ENTRY_ZONE || c.entryZone))}</td>
@@ -7765,7 +7765,8 @@ function _renderTradingRadar(radar, esc) {
         <div class="radar-microstructure__row"><span>FAILED_REASON</span><b>${esc(selected.RECLAIM_FAILED_REASON || 'none')}</b></div>
         <div class="radar-microstructure__row"><span>NEXT_REQUIRED_CONDITION</span><b>${esc(selected.RECLAIM_NEXT_REQUIRED_CONDITION || '--')}</b></div>
         <div class="radar-microstructure__row"><span>Reject / Block Reasons</span><div class="radar-chip-row">${chipList(selected.RECLAIM_REJECT_REASONS, 'radar-status-chip radar-status-chip--missing')}</div></div>
-        <div class="radar-microstructure__row"><span>Missing Source Fields</span><div class="radar-chip-row">${chipList(selected.RECLAIM_MISSING_SOURCE_FIELDS, 'radar-status-chip radar-status-chip--missing')}</div></div>
+        <div class="radar-microstructure__row"><span>Present Source Fields</span><div class="radar-chip-row">${chipList(selected.RECLAIM_SOURCE_FIELDS_PRESENT, 'radar-status-chip radar-status-chip--neutral')}</div></div>
+        <div class="radar-microstructure__row"><span>Missing Source Fields</span><div class="radar-chip-row">${chipList(selected.RECLAIM_SOURCE_FIELDS_MISSING, 'radar-status-chip radar-status-chip--missing')}</div></div>
         </div>
       </div>
       <div class="radar-next-trigger"><span>Next trigger</span><b>${esc(selected.nextRequiredConfirmation || 'none')}</b></div>

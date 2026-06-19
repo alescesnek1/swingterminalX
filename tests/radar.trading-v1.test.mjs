@@ -382,7 +382,7 @@ test('Reclaim-2b: missing scanner source fields => explicit source-data-missing 
   assert.equal(c.RECLAIM_SOURCE_DATA_STATUS, 'RECLAIM_DATA_SOURCE_MISSING');
   assert.equal(c.RECLAIM_LEVEL, null);
   assert.ok(c.RECLAIM_REJECT_REASONS.includes('RECLAIM_DATA_SOURCE_MISSING'));
-  assert.ok(c.RECLAIM_MISSING_SOURCE_FIELDS.includes('breakdownLevel'));
+  assert.ok(c.RECLAIM_SOURCE_FIELDS_MISSING.includes('breakdownLevel'));
   assert.match(c.RECLAIM_NEXT_REQUIRED_CONDITION, /scanner did not supply reclaim source fields/i);
 });
 
@@ -503,3 +503,98 @@ test('Reclaim-14: current scanner-shaped rows with missing reclaim sources stay 
   assert.equal(c.ENTRY_TYPE, 'NONE');
   assert.equal(c.telegramEligible, false);
 });
+
+// ── Phase C.6: Reclaim source-field mapping guardrails ──────────────────────
+
+test('C6-1: stop/hardInvalidation/invalidationLevel must NOT produce reclaim source levels', () => {
+  // A market with ONLY stop/invalidation fields and price data — no structural levels.
+  // Reclaim must show NO RECLAIM DATA, not use the stop as a reclaim level.
+  const c = candidate([{
+    ...RB, symbol: 'STOPUSDT', bidPrice: 100, askPrice: 100.04, change24hPct: -8,
+    stop: 95, hardInvalidation: 90, invalidationLevel: 88,
+  }], 'STOPUSDT');
+  assert.equal(c.RECLAIM_STATUS, 'RECLAIM_LEVEL_UNDEFINED');
+  assert.equal(c.RECLAIM_SOURCE_DATA_STATUS, 'RECLAIM_DATA_SOURCE_MISSING');
+  assert.equal(c.RECLAIM_LEVEL, null);
+  // None of the levels should be sourced from stop/invalidation
+  for (const lvl of (c.RECLAIM_LEVELS || [])) {
+    assert.ok(!lvl.source.includes('invalidation'), `level source should not be invalidation: ${lvl.source}`);
+    assert.ok(!lvl.source.includes('stop'), `level source should not be stop: ${lvl.source}`);
+  }
+});
+
+test('C6-2: high_24h produces a low-confidence fallback source labelled as fallback', () => {
+  const c = candidate([{
+    ...RB, symbol: 'H24USDT', bidPrice: 100, askPrice: 100.04, change24hPct: -8,
+    high_24h: 105,
+  }], 'H24USDT');
+  // Should have a level, not NO RECLAIM DATA
+  assert.notEqual(c.RECLAIM_STATUS, 'RECLAIM_LEVEL_UNDEFINED');
+  assert.ok(c.RECLAIM_LEVEL > 0, 'reclaim level should be set');
+  // Source type must indicate fallback
+  assert.ok(c.RECLAIM_LEVEL_TYPE.includes('fallback'), `type should indicate fallback: ${c.RECLAIM_LEVEL_TYPE}`);
+  assert.ok(c.RECLAIM_LEVEL_SOURCE.includes('fallback'), `source should indicate fallback: ${c.RECLAIM_LEVEL_SOURCE}`);
+  // Importance / confidence must be low (≤ 35)
+  assert.ok(c.RECLAIM_SOURCE_CONFIDENCE <= 35, `source confidence should be <= 35: ${c.RECLAIM_SOURCE_CONFIDENCE}`);
+});
+
+test('C6-3: low_24h produces a low-confidence fallback source labelled as fallback', () => {
+  const c = candidate([{
+    ...RB, symbol: 'L24USDT', bidPrice: 100, askPrice: 100.04, change24hPct: -8,
+    low_24h: 92,
+  }], 'L24USDT');
+  assert.notEqual(c.RECLAIM_STATUS, 'RECLAIM_LEVEL_UNDEFINED');
+  assert.ok(c.RECLAIM_LEVEL > 0, 'reclaim level should be set');
+  assert.ok(c.RECLAIM_LEVEL_TYPE.includes('fallback'), `type should indicate fallback: ${c.RECLAIM_LEVEL_TYPE}`);
+  assert.ok(c.RECLAIM_SOURCE_CONFIDENCE <= 30, `source confidence should be <= 30: ${c.RECLAIM_SOURCE_CONFIDENCE}`);
+});
+
+test('C6-4: fallback reclaim sources do NOT unlock ENTRY_READY', () => {
+  // A candidate with ONLY fallback sources, even with reclaim-confirming signals
+  const c = candidate([{
+    ...RB, symbol: 'FBALLBUSDT', bidPrice: 105, askPrice: 105.04, change24hPct: -8,
+    high_24h: 104, reclaimConfirmed: true, vwapHeld: true, higherLowHeld: true, retestHeld: true,
+    volumeSpike: 2.5, rangeFormed: true,
+  }], 'FBALLBUSDT');
+  assert.notEqual(c.actionability, 'ENTRY_READY');
+  assert.notEqual(c.STATUS, 'ENTRY_READY');
+});
+
+test('C6-5: fallback reclaim sources do NOT send Telegram', () => {
+  const c = candidate([{
+    ...RB, symbol: 'FBTGUSDT', bidPrice: 105, askPrice: 105.04, change24hPct: -8,
+    high_24h: 104, reclaimConfirmed: true, vwapHeld: true, higherLowHeld: true,
+    retestHeld: true, volumeSpike: 2.5,
+  }], 'FBTGUSDT');
+  assert.equal(c.telegramEligible, false);
+});
+
+test('C6-6: fallback reclaim sources do NOT unlock AGGRESSIVE_ENTRY_READY', () => {
+  // Even with strict absorb data, fallback reclaim must not enable aggressive
+  const c = candidate([{
+    ...STRICT_RECLAIM,
+    symbol: 'FBAGUSDT',
+    // Remove all structural levels, keep only high_24h as fallback
+    breakdownLevel: undefined, reclaimLevel: undefined, flushHigh: undefined,
+    rangeLow: undefined, previousSupport: undefined, vwap: undefined,
+    baseHigh: undefined, preBreakdownPivot: undefined, maResistance: undefined,
+    high_24h: 104,
+  }], 'FBAGUSDT');
+  assert.notEqual(c.STATUS, 'AGGRESSIVE_ENTRY_READY');
+});
+
+test('C6-7: missing source fields still produce RECLAIM_DATA_SOURCE_MISSING when only stop/invalidation present', () => {
+  // With only stop/invalidation on the market object, no reclaim source fields match,
+  // so it must produce RECLAIM_DATA_SOURCE_MISSING
+  const c = candidate([{
+    ...RB, symbol: 'NORECL2USDT', bidPrice: 100, askPrice: 100.04, change24hPct: -8,
+    stop: 95, invalidationLevel: 88,
+    // Explicitly no structural or fallback fields
+  }], 'NORECL2USDT');
+  assert.equal(c.RECLAIM_STATUS, 'RECLAIM_LEVEL_UNDEFINED');
+  assert.equal(c.RECLAIM_SOURCE_DATA_STATUS, 'RECLAIM_DATA_SOURCE_MISSING');
+  assert.ok(c.RECLAIM_SOURCE_FIELDS_MISSING.includes('breakdownLevel'));
+  assert.equal(c.telegramEligible, false);
+  assert.notEqual(c.actionability, 'ENTRY_READY');
+});
+
