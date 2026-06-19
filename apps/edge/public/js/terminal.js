@@ -7566,7 +7566,37 @@ function _renderTradingRadar(radar, esc) {
           </div>
         </div>
       </div>
+      <!-- Phase C.3: compact, decision-first visible sections. All raw/technical
+           panels are moved into the collapsed "Advanced diagnostics" block below
+           so the operator reads state in one screen without scrolling debug rows. -->
       <div class="radar-focus-title"><b>${esc(selected.symbol || '--')}</b> <span class="${_fleetRadarBadgeClass(selectedV1Status)}">${actLabel}</span></div>
+      <div class="radar-why-next" style="border:1px solid var(--b2, #1a2540); border-radius:8px; padding:8px 11px; margin:6px 0 8px;">
+        <div style="${cardLabel}">Why blocked / what next</div>
+        <div style="font-size:12px; margin-top:3px;"><b style="color:var(--txt3);">Blocker:</b> ${esc(selectedV1BlockedBy === '--' ? 'none' : selectedV1BlockedBy)}</div>
+        <div style="font-size:12px;"><b style="color:var(--txt3);">Next:</b> ${esc(opNextConcise)}</div>
+        <div style="font-size:12px;"><b style="color:var(--txt3);">Missing:</b> ${esc((selected.missingData || selected.missingSignals || []).slice(0, 5).join(', ') || 'none')}</div>
+      </div>
+      <div class="radar-key-trade" style="border:1px solid var(--b2, #1a2540); border-radius:8px; padding:8px 11px; margin-bottom:8px;">
+        <div style="${cardLabel}">Key trade info</div>
+        <div style="font-size:12px; display:flex; flex-wrap:wrap; gap:4px 14px; margin-top:3px;">
+          <span><b style="color:var(--txt3);">Entry</b> ${esc(zoneText(selected.ENTRY_ZONE || selected.entryZone))}</span>
+          <span><b style="color:var(--txt3);">Stop</b> ${esc(_fleetFmtRadarPrice(selected.STOP_LOSS_LEVEL ?? selected.suggestedStop))}</span>
+          <span><b style="color:var(--txt3);">Inval</b> ${esc(_fleetFmtRadarPrice(selected.HARD_INVALIDATION ?? selected.invalidationLevel))}</span>
+          <span><b style="color:var(--txt3);">TP</b> ${esc((selected.TAKE_PROFIT_LEVELS || selected.takeProfitCheckpoints || []).map(tp => _fleetFmtRadarPrice(tp.level)).join(' / ') || '--')}</span>
+          <span><b style="color:var(--txt3);">TF</b> ${esc(selected.TIMEFRAME_CONTEXT || '--')}</span>
+          <span><b style="color:var(--txt3);">Telegram</b> <b class="${opTelegram === 'YES' ? 'radar-micro-yes' : 'radar-micro-no'}">${opTelegram}</b></span>
+        </div>
+      </div>
+      <div class="radar-compact-diagnostics" style="border:1px solid var(--b2, #1a2540); border-radius:8px; padding:8px 11px; margin-bottom:8px;">
+        <div style="${cardLabel}">Compact diagnostics</div>
+        <div style="font-size:12px; margin-top:3px;"><b style="color:${absorbTone};">Absorb:</b> ${esc(absorbParts.head)} — ${esc(absorbParts.detail || (strictConfirmedUi ? 'confirmed absorption' : 'not confirmed'))}</div>
+        <div style="font-size:12px;"><b style="color:${reclaimTone};">Reclaim:</b> ${esc(reclaimHuman.verdict)} — ${esc(reclaimHuman.meaning)}</div>
+        <div style="font-size:12px;"><b style="color:var(--txt3);">Provider:</b> ${esc(provState)} · mode ${esc(absorbMode)} · strict ${strictConfirmedUi ? 'available' : 'unavailable'}</div>
+      </div>
+      <div class="radar-focus-blocked"><span>Reason</span><b>${esc((selected.REASON || selected.reasons || []).join(' | ') || '--')}</b></div>
+      <div class="radar-focus-blocked"><span>Invalidation</span><b>${esc(selected.INVALIDATION || '--')}</b></div>
+      <details class="radar-advanced-diagnostics" style="margin-top:8px;">
+        <summary style="cursor:pointer; font-size:11px; letter-spacing:.06em; color:var(--txt2); text-transform:uppercase; padding:5px 0;">Advanced diagnostics (raw &mdash; click to expand)</summary>
       <div class="radar-focus-blocked"><span>Status</span><b>${esc(selectedV1Status)}</b></div>
       <div class="radar-focus-blocked"><span>Action</span><b>${esc(_fleetRadarV1Action(selected))}</b></div>
       <div class="radar-focus-blocked"><span>Blocked by</span><b>${esc(selectedV1BlockedBy === '--' ? 'none' : selectedV1BlockedBy)}</b></div>
@@ -7713,6 +7743,7 @@ function _renderTradingRadar(radar, esc) {
       <div class="radar-next-trigger"><span>TP zones</span><b>${esc((selected.TAKE_PROFIT_LEVELS || selected.takeProfitCheckpoints || []).map(tp => `${tp.label || 'TP'} ${_fleetFmtRadarPrice(tp.level)}`).join(' / ') || '--')}</b></div>
       <div class="radar-focus-blocked"><span>Reason</span><b>${esc((selected.REASON || selected.reasons || []).join(' | ') || '--')}</b></div>
       <div class="radar-focus-blocked"><span>Invalidation</span><b>${esc(selected.INVALIDATION || '--')}</b></div>
+      </details>
     </div>`;
   } else {
     focusHtml = '<div class="fleet-empty radar-focus-card">No selected setup. Click a row to focus.</div>';

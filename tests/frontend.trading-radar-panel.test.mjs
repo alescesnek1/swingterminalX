@@ -348,6 +348,51 @@ test('Phase C.1: readability changes do not loosen Telegram or entry gating (dis
   assert.match(terminalJs, /ENTRY_READY microstructure gates still apply/);
 });
 
+test('Phase C.3: focus detail has a compact Why-blocked/What-next section', () => {
+  assert.match(terminalJs, /radar-why-next/);
+  assert.match(terminalJs, /Why blocked \/ what next/);
+  assert.match(terminalJs, /<b style="color:var\(--txt3\);">Blocker:<\/b>/);
+  assert.match(terminalJs, /<b style="color:var\(--txt3\);">Next:<\/b> \$\{esc\(opNextConcise\)/);
+  assert.match(terminalJs, /<b style="color:var\(--txt3\);">Missing:<\/b>/);
+});
+
+test('Phase C.3: focus detail has compact Key trade info and Compact diagnostics sections', () => {
+  assert.match(terminalJs, /radar-key-trade/);
+  assert.match(terminalJs, /Key trade info/);
+  assert.match(terminalJs, /radar-compact-diagnostics/);
+  assert.match(terminalJs, /<b style="color:\$\{absorbTone\};">Absorb:<\/b>/);
+  assert.match(terminalJs, /<b style="color:\$\{reclaimTone\};">Reclaim:<\/b>/);
+});
+
+test('Phase C.3: an Advanced diagnostics collapsible (collapsed by default) exists', () => {
+  assert.match(terminalJs, /<details class="radar-advanced-diagnostics"/);
+  assert.match(terminalJs, /Advanced diagnostics/);
+  // <details> with no `open` attribute is collapsed by default.
+  assert.doesNotMatch(terminalJs, /<details class="radar-advanced-diagnostics"[^>]*\sopen/);
+});
+
+test('Phase C.3: raw diagnostics live INSIDE the Advanced collapsible, after compact sections', () => {
+  const adv = terminalJs.indexOf('radar-advanced-diagnostics');
+  const advClose = terminalJs.indexOf('</details>', adv);
+  assert.ok(adv > 0 && advClose > adv, 'advanced details block must exist and close');
+  // Raw, technical panels must appear AFTER the <details> opens (i.e. collapsed).
+  for (const raw of ['Score Breakdown', 'Microstructure readiness', 'MICROSTRUCTURE_PROVIDER', 'STRICT Absorb Score', 'RECLAIM_CLASSIFICATION']) {
+    const at = terminalJs.indexOf(raw, adv);
+    assert.ok(at > adv && at < advClose, `${raw} must be inside the Advanced details block`);
+  }
+});
+
+test('Phase C.3: compact decision sections render BEFORE the raw Advanced block', () => {
+  const why = terminalJs.indexOf('radar-why-next');
+  const key = terminalJs.indexOf('radar-key-trade');
+  const compact = terminalJs.indexOf('radar-compact-diagnostics');
+  const adv = terminalJs.indexOf('radar-advanced-diagnostics');
+  const scoreRaw = terminalJs.indexOf('Score Breakdown');
+  assert.ok(why > 0 && key > why && compact > key, 'compact sections in order');
+  assert.ok(adv > compact, 'advanced block comes after compact sections');
+  assert.ok(scoreRaw > adv, 'raw Score Breakdown is not rendered before compact sections');
+});
+
 test('UI renders heatmap/data before Live Feed so operator sees market context earlier', () => {
   assert.ok(indexHtml.indexOf("sv('heatmap'") < indexHtml.indexOf("sv('livefeed'"));
   const refreshBody = terminalJs.slice(terminalJs.indexOf('async function doRefresh()'));
