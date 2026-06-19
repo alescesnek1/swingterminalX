@@ -326,3 +326,139 @@ test('N: breadth collapse triggers RISK_OFF_BLOCKED despite score > 45 and diagn
   assert.equal(c.MARKET_REGIME_SCORE, 48);
   assert.equal(c.marketRegimeDiagnostics.hardBlockReason, 'breadth collapse');
 });
+
+// ── Phase C: Reclaim v2 structured price-structure diagnostics ───────────────
+// RECLAIM IS NOT ABSORB. These fixtures carry NO trusted microstructure so they
+// also prove Reclaim evaluates (and confirms) without an order-flow provider.
+const RB = {
+  status: 'TRADING', quoteAsset: 'USDT', quoteVolume24h: 250e6, spreadPct: 0.03,
+  atrPct: 4, volumeSpike: 1.5, ...SAFE_META,
+};
+const R_NOT_STARTED = { ...RB, symbol: 'RNOTUSDT', bidPrice: 100, askPrice: 100.04, breakdownLevel: 110, change24hPct: -8 };
+const R_ATTEMPT = { ...RB, symbol: 'RATTUSDT', bidPrice: 100, askPrice: 100.04, breakdownLevel: 100, change24hPct: -8 };
+const R_DETECTED = { ...RB, symbol: 'RDETUSDT', bidPrice: 100, askPrice: 100.04, breakdownLevel: 98, change24hPct: -8 };
+const R_CONFIRMED_NR = { ...RB, symbol: 'RCNRUSDT', bidPrice: 100, askPrice: 100.04, breakdownLevel: 98, reclaimConfirmed: true, change24hPct: -8 };
+const R_RETEST_HOLD = { ...RB, symbol: 'RRHUSDT', bidPrice: 100, askPrice: 100.04, breakdownLevel: 98, reclaimConfirmed: true, retestHeld: true, higherLowHeld: true, change24hPct: -8 };
+const R_FAILED = { ...RB, symbol: 'RFAILUSDT', bidPrice: 100, askPrice: 100.04, breakdownLevel: 98, reclaimConfirmed: true, reclaimLost: true, change24hPct: -8 };
+const R_LEVEL_UNDEFINED = { ...RB, symbol: 'RUNDUSDT', bidPrice: 100, askPrice: 100.04, change24hPct: -8 };
+
+// Strict-absorb + reclaim-confirmed fixture (full trusted microstructure) used to
+// prove gates still apply even when both Absorb and Reclaim are confirmed.
+const STRICT_RECLAIM = {
+  symbol: 'STRICTUSDT', baseAsset: 'STR', quoteAsset: 'USDT', status: 'TRADING',
+  quoteVolume24h: 250e6, bidPrice: 100, askPrice: 100.04, spreadPct: 0.05,
+  change24hPct: -12, change12hPct: -8, change4hPct: 2, change1hPct: 1.2,
+  volumeSpike: 2.5, atrPct: 4, longLiquidationSpike: 2.1, openInterestChangePct: -7,
+  marketSellRatio: 0.54, fundingRate: -0.01, wickRecoveryPct: 50, noNewLowMinutes: 40,
+  rangeFormed: true, sellAggressionFading: true, reclaimConfirmed: true, vwapHeld: true,
+  higherLowHeld: true, higherLow: 98, vwap: 100, flushLow: 92, breakdownLevel: 98,
+  rangeHigh: 100, nearestSupply: 108, nextSupply: 114, meanReversionTarget: 120,
+  depthUsdWithin1Pct: 2e6, depthUsd: 2e6, bidDepthRebuildPct: 14, marketBuyVolumeDominance: 0.6,
+  shortLiquidationSpike: 1.5, retestHeld: true, absorptionScore: 82, supportRetested: true,
+  aggressiveSellsFailed: true, deltaImprovementPct: 1.2, cumulativeDelta: 100, takerBuySellRatio: 1.4,
+  ...SAFE_META,
+};
+
+test('Reclaim-1: evaluates and confirms without a trusted microstructure provider', () => {
+  const c = candidate([R_CONFIRMED_NR], 'RCNRUSDT');
+  assert.equal(c.microstructureTrusted, false);
+  assert.notEqual(c.RECLAIM_STATUS, 'RECLAIM_DATA_UNAVAILABLE');
+  assert.equal(c.RECLAIM_STATUS, 'RECLAIM_CONFIRMED_NO_RETEST');
+  assert.ok(c.RECLAIM_SCORE > 0);
+});
+
+test('Reclaim-2: no relevant level => RECLAIM_LEVEL_UNDEFINED with a reason', () => {
+  const c = candidate([R_LEVEL_UNDEFINED], 'RUNDUSDT');
+  assert.equal(c.RECLAIM_STATUS, 'RECLAIM_LEVEL_UNDEFINED');
+  assert.equal(c.RECLAIM_LEVEL, null);
+  assert.ok(c.RECLAIM_REJECT_REASONS.includes('no relevant reclaim level found'));
+});
+
+test('Reclaim-3: price below the zone => RECLAIM_NOT_STARTED', () => {
+  const c = candidate([R_NOT_STARTED], 'RNOTUSDT');
+  assert.equal(c.RECLAIM_STATUS, 'RECLAIM_NOT_STARTED');
+  assert.equal(c.CLOSE_ABOVE_LEVEL, false);
+});
+
+test('Reclaim-4: price near/inside the zone => RECLAIM_ATTEMPT', () => {
+  const c = candidate([R_ATTEMPT], 'RATTUSDT');
+  assert.equal(c.RECLAIM_STATUS, 'RECLAIM_ATTEMPT');
+});
+
+test('Reclaim-5: above the zone without close/hold => RECLAIM_DETECTED', () => {
+  const c = candidate([R_DETECTED], 'RDETUSDT');
+  assert.equal(c.RECLAIM_STATUS, 'RECLAIM_DETECTED');
+  assert.equal(c.CLOSE_ABOVE_LEVEL, false);
+});
+
+test('Reclaim-6: close/hold above zone without retest => RECLAIM_CONFIRMED_NO_RETEST', () => {
+  const c = candidate([R_CONFIRMED_NR], 'RCNRUSDT');
+  assert.ok(['RECLAIM_CONFIRMED', 'RECLAIM_CONFIRMED_NO_RETEST'].includes(c.RECLAIM_STATUS));
+  assert.equal(c.RECLAIM_STATUS, 'RECLAIM_CONFIRMED_NO_RETEST');
+  assert.equal(c.CLOSE_ABOVE_LEVEL, true);
+  assert.equal(c.RETEST_STATUS, 'not yet tested');
+});
+
+test('Reclaim-7: confirmed reclaim with a held retest => RECLAIM_RETEST_HOLD', () => {
+  const c = candidate([R_RETEST_HOLD], 'RRHUSDT');
+  assert.equal(c.RECLAIM_STATUS, 'RECLAIM_RETEST_HOLD');
+  assert.equal(c.RETEST_STATUS, 'held');
+  assert.equal(c.RECLAIM_CLASSIFICATION, 'STANDARD_RECLAIM');
+});
+
+test('Reclaim-8: reclaim then loss of the zone => RECLAIM_FAILED with reason', () => {
+  const c = candidate([R_FAILED], 'RFAILUSDT');
+  assert.equal(c.RECLAIM_STATUS, 'RECLAIM_FAILED');
+  assert.ok(c.RECLAIM_FAILED_REASON && c.RECLAIM_FAILED_REASON.length > 0);
+});
+
+test('Reclaim-9: a missing retest does not force the score to zero', () => {
+  const c = candidate([R_CONFIRMED_NR], 'RCNRUSDT');
+  assert.equal(c.RECLAIM_STATUS, 'RECLAIM_CONFIRMED_NO_RETEST');
+  assert.ok(c.RECLAIM_SCORE >= 50, `score=${c.RECLAIM_SCORE}`);
+  assert.ok(c.RECLAIM_REJECT_REASONS.includes('no retest yet'));
+});
+
+test('Reclaim-10: reclaim does not require microstructure and never unlocks aggressive entry alone', () => {
+  const c = candidate([R_RETEST_HOLD], 'RRHUSDT');
+  assert.equal(c.RECLAIM_STATUS, 'RECLAIM_RETEST_HOLD');
+  assert.equal(c.microstructureTrusted, false);
+  assert.notEqual(c.STATUS, 'AGGRESSIVE_ENTRY_READY');
+  assert.equal(c.telegramEligible, false);
+});
+
+test('Reclaim-11: reclaim + proxy absorb only yields a non-aggressive, non-strict path', () => {
+  const c = candidate([R_RETEST_HOLD], 'RRHUSDT');
+  assert.equal(c.ABSORB_MODE, 'PROXY');
+  assert.notEqual(c.STRICT_ABSORB_CONFIRMED, true);
+  assert.notEqual(c.STATUS, 'AGGRESSIVE_ENTRY_READY');
+  assert.notEqual(c.ENTRY_IMPACT, 'STRICT_CONFIRMED_AGGRESSIVE_ALLOWED_IF_ALL_GATES_PASS');
+});
+
+test('Reclaim-12: reclaim + strict absorb confirmed still requires all existing gates', () => {
+  // Both Absorb (strict) and Reclaim confirm, but a hard regime block must still
+  // prevent any aggressive/standard entry — proving Reclaim never bypasses gates.
+  const c = candidate([], 'STRICTUSDT', {
+    markets: [
+      { ...BTC, change24hPct: -5 },
+      { ...ETH, change24hPct: -6 },
+      STRICT_RECLAIM,
+    ],
+  });
+  assert.equal(c.STRICT_ABSORB_CONFIRMED, true);
+  assert.ok(['RECLAIM_CONFIRMED', 'RECLAIM_CONFIRMED_NO_RETEST', 'RECLAIM_RETEST_HOLD'].includes(c.RECLAIM_STATUS));
+  assert.equal(c.STATUS, 'RISK_OFF_BLOCKED');
+  assert.notEqual(c.STATUS, 'AGGRESSIVE_ENTRY_READY');
+});
+
+test('Reclaim-13: reclaim funnel exposes snapshot counters separate from absorb funnel', () => {
+  const state = stateFor([R_RETEST_HOLD, R_FAILED, R_DETECTED]);
+  assert.ok(state.reclaimFunnel, 'reclaimFunnel exists');
+  assert.equal(state.reclaimFunnel.rollingWindow, 'snapshot-only');
+  assert.ok(state.reclaimFunnel.reclaimRetestHeld >= 1);
+  assert.ok(state.reclaimFunnel.reclaimFailed >= 1);
+  assert.ok(state.reclaimFunnel.reclaimLevelIdentified >= 3);
+  // Funnel is wired into the pipeline alongside (but distinct from) absorbFunnel.
+  assert.ok(state.pipeline.reclaimFunnel);
+  assert.notEqual(state.reclaimFunnel, state.absorbFunnel);
+});

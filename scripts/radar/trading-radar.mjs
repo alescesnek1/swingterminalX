@@ -835,6 +835,11 @@ function buildRadarV1Output(market, regime, stageInfo, levels, safety) {
   // it shares the single-source dataQuality.microstructureTrusted gate. On its own
   // it changes nothing; the aggressive-entry branch below only TIGHTENS using it.
   const absorbV2 = evaluateAbsorbV2(market, regime, dataQuality);
+  // Reclaim v2 (Phase C): pure, additive price-structure reclaim diagnostics.
+  // RECLAIM IS NOT ABSORB. Evaluated WITHOUT a trusted microstructure provider.
+  // It feeds NO gate here — it never loosens ENTRY_READY, never unlocks
+  // aggressive entry, and is kept strictly separate from absorbV2.
+  const reclaimV2 = evaluateReclaimV2(market, regime, dataQuality);
   const structuralStopExists = !!(levels && levels.suggestedStop && levels.stopReference);
   const tpZonesExist = !!(levels && Array.isArray(levels.takeProfitCheckpoints) && levels.takeProfitCheckpoints.length >= 3);
   const hasCriticalRisk = safety.safetyStatus === 'DANGER'
@@ -1028,6 +1033,27 @@ function buildRadarV1Output(market, regime, stageInfo, levels, safety) {
       stayedReason: blockedReason,
     },
     ...scores,
+    // Reclaim v2 structured output (Phase C). Intentionally placed AFTER ...scores
+    // so the spec's required RECLAIM_SCORE output field is the structured v2
+    // score. The internal routing score that ...scores carries is preserved for
+    // traceability on reclaimV2.legacyProxyScore and still drives the (unchanged)
+    // stage routing above — Reclaim v2 itself feeds no gate.
+    RECLAIM_STATUS: reclaimV2.RECLAIM_STATUS,
+    RECLAIM_SCORE: reclaimV2.RECLAIM_SCORE,
+    RECLAIM_CONFIDENCE: reclaimV2.RECLAIM_CONFIDENCE,
+    RECLAIM_LEVEL: reclaimV2.RECLAIM_LEVEL,
+    RECLAIM_LEVEL_ZONE: reclaimV2.RECLAIM_LEVEL_ZONE,
+    RECLAIM_LEVEL_TYPE: reclaimV2.RECLAIM_LEVEL_TYPE,
+    RECLAIM_TIMEFRAME: reclaimV2.RECLAIM_TIMEFRAME,
+    DISTANCE_TO_RECLAIM_LEVEL: reclaimV2.DISTANCE_TO_RECLAIM_LEVEL,
+    CLOSE_ABOVE_LEVEL: reclaimV2.CLOSE_ABOVE_LEVEL,
+    RETEST_STATUS: reclaimV2.RETEST_STATUS,
+    RECLAIM_FAILED_REASON: reclaimV2.RECLAIM_FAILED_REASON,
+    RECLAIM_NEXT_REQUIRED_CONDITION: reclaimV2.RECLAIM_NEXT_REQUIRED_CONDITION,
+    RECLAIM_REJECT_REASONS: reclaimV2.RECLAIM_REJECT_REASONS,
+    RECLAIM_CLASSIFICATION: reclaimV2.RECLAIM_CLASSIFICATION,
+    RECLAIM_LEVELS: reclaimV2.RECLAIM_LEVELS,
+    reclaimV2: { ...reclaimV2, legacyProxyScore: scores.RECLAIM_SCORE },
   };
 }
 
@@ -1509,6 +1535,316 @@ function evaluateAbsorbV2(market, regime, dataQuality) {
   };
 }
 
+// ── Reclaim v2: structured price-structure reclaim diagnostics (Phase C) ─────
+// RECLAIM IS NOT ABSORB. Absorb is order-flow / execution evidence (above).
+// Reclaim is PRICE-STRUCTURE evidence that price regained an important level
+// after a dump. The two are evaluated independently and never mixed.
+//
+// Contract:
+//   - PURE + ADDITIVE. evaluateReclaimV2 changes no score, stage, gate,
+//     ENTRY_READY status, or Telegram eligibility. It only surfaces structured
+//     RECLAIM_* diagnostics so the UI never renders a bare "Reclaim: false".
+//   - Evaluates WITHOUT a trusted microstructure provider — it reads candle /
+//     level / structure fields only. Trusted microstructure may RAISE the
+//     confidence field, but is NEVER required to evaluate or to CONFIRM.
+//   - Reclaim ALONE never unlocks an aggressive absorption entry: nothing here
+//     feeds the aggressive gate (that still requires STRICT_ABSORB_CONFIRMED +
+//     every existing setup/execution/RR/regime/data/safety/Telegram gate).
+//   - Never fakes a reclaim: a stronger structural status is always floored by
+//     the RECLAIM_SCORE thresholds, so the status can only be downgraded, never
+//     inflated, relative to the measured score.
+const RECLAIM_WEIGHTS = Object.freeze({
+  levelImportance: 20,
+  closeAboveLevelOrZone: 25,
+  timeHeldAboveLevel: 15,
+  retestHeld: 20,
+  volumeConfirmation: 10,
+  marketRegimeSupport: 10,
+});
+const RECLAIM_ATTEMPT_MIN = 35;
+const RECLAIM_DETECTED_MIN = 50;
+const RECLAIM_CONFIRMED_MIN = 65;
+const RECLAIM_RETEST_HOLD_MIN = 75;
+
+// Reclaim level candidates in spec priority order (highest priority first). Each
+// reads only a REAL structural field; an absent field is skipped (never
+// invented). `lostByNature` marks levels that are breakdown/support structures
+// (lost during a dump by definition) vs. moving references (VWAP/MA).
+const RECLAIM_LEVEL_SOURCES = Object.freeze([
+  { type: 'nearest breakdown level', importance: 96, lostByNature: true, get: (m) => n(m.breakdownLevel ?? m.nearestBreakdownLevel) },
+  { type: 'reclaim level (system)', importance: 90, lostByNature: true, get: (m) => n(m.reclaimLevel) },
+  { type: 'flush candle high', importance: 86, lostByNature: true, get: (m) => n(m.flushHigh ?? m.flushCandleHigh ?? m.panicHigh) },
+  { type: 'previous range low / support', importance: 80, lostByNature: true, get: (m) => n(m.rangeLow ?? m.previousSupport ?? m.nearestSupport) },
+  { type: 'VWAP / anchored VWAP', importance: 74, lostByNature: false, get: (m) => n(m.anchoredVwap ?? m.vwap) },
+  { type: 'intraday base high', importance: 66, lostByNature: true, get: (m) => n(m.baseHigh ?? m.localHigh ?? m.priorBounceHigh) },
+  { type: 'local pivot before breakdown', importance: 58, lostByNature: true, get: (m) => n(m.preBreakdownPivot ?? m.pivotHigh ?? m.localPivot) },
+  { type: 'MA / trend zone', importance: 50, lostByNature: false, get: (m) => n(m.maResistance ?? m.ma50 ?? m.trendZone ?? m.emaZone) },
+]);
+
+function reclaimTimeframeOf(m) {
+  const explicit = String(m.reclaimTimeframe || m.timeframe || '').toUpperCase().replace(/\s+/g, '');
+  if (['1D', '4H', '1H', '15M'].includes(explicit)) return explicit;
+  const ctx = String(m.timeframeContext || '').toUpperCase();
+  // Prefer the SETUP timeframe (the level that matters for reclaim) over the
+  // execution timeframe also mentioned in a combined context string.
+  if (ctx.includes('1D') || ctx.includes('DAILY')) return '1D';
+  if (ctx.includes('4H')) return '4H';
+  if (ctx.includes('1H')) return '1H';
+  if (ctx.includes('15M') || ctx.includes('15MIN')) return '15M';
+  return '1D';
+}
+
+function evaluateReclaimV2(market, regime, dataQuality) {
+  const m = market || {};
+  const dq = dataQuality || {};
+  const reg = regime || evaluateMarketRegime([]);
+  const px = m.mid || midPrice(m) || n(m.lastPrice ?? m.price);
+  const timeframe = reclaimTimeframeOf(m);
+
+  // ── Level selection (spec priority order) ── pick the first present level as
+  // the primary; expose ALL present levels with metadata. One important level is
+  // enough — we never require reclaiming every level.
+  const c24 = n(m.change24hPct ?? m.priceChangePercent ?? m.diagnostics?.change24hPct, 0);
+  const c1 = n(m.change1hPct ?? m.diagnostics?.change1hPct);
+  const c4 = n(m.change4hPct ?? m.diagnostics?.change4hPct);
+  const atrPct = n(m.atrPct ?? m.realizedVolatilityPct);
+  const spreadPct = microPresent(m.spreadPct) ? Number(m.spreadPct) : null;
+  const wickPct = n(m.wickRecoveryPct);
+  const dumped = c24 <= -4 || (c4 != null && c4 <= -3);
+
+  // Tolerance zone (NOT an exact tick): ATR + spread aware, timeframe scaled,
+  // with a fixed-percentage fallback when volatility data is unavailable.
+  const tfTol = { '1D': 0.40, '4H': 0.30, '1H': 0.22, '15M': 0.16 }[timeframe] || 0.35;
+  let tolPct = (atrPct != null && atrPct > 0) ? atrPct * tfTol : null;
+  if (spreadPct != null && spreadPct > 0) tolPct = (tolPct ?? 0) + spreadPct;
+  if (!(tolPct > 0)) tolPct = 0.6; // fixed fallback (% of price)
+  tolPct = Math.min(Math.max(tolPct, 0.15), 5);
+
+  const levels = [];
+  for (const src of RECLAIM_LEVEL_SOURCES) {
+    const price = src.get(m);
+    if (!(price > 0)) continue;
+    const zoneLow = round(price * (1 - tolPct / 100), 8);
+    const zoneHigh = round(price * (1 + tolPct / 100), 8);
+    const distancePct = px > 0 ? round(((px - price) / price) * 100, 3) : null;
+    const reclaimedThisLevel = px > 0 && px > zoneHigh;
+    levels.push({
+      level_price: round(price, 8),
+      level_zone_low: zoneLow,
+      level_zone_high: zoneHigh,
+      level_type: src.type,
+      timeframe,
+      source: src.type,
+      importance_score: src.importance,
+      distance_from_current_price: distancePct,
+      was_lost_during_dump: src.lostByNature ? dumped : (dumped && px > 0 && price > px),
+      has_been_reclaimed: reclaimedThisLevel,
+      retest_status: 'n/a',
+      confidence: src.importance,
+    });
+  }
+
+  const rejectReasons = [];
+  let failedReason = null;
+  let nextRequired = null;
+
+  // ── Data / level availability gates ──
+  if (!(px > 0)) {
+    rejectReasons.push('stale OHLCV / VWAP data');
+    return buildReclaimResult({
+      status: 'RECLAIM_DATA_UNAVAILABLE', score: 0, confidence: 0, timeframe,
+      primary: null, levels, closeAbove: false, retestStatus: 'unknown',
+      classification: 'NONE', tolPct,
+      failedReason: null, rejectReasons: ['data unavailable'],
+      nextRequired: 'fresh OHLCV / price + at least one reclaim level',
+      components: {},
+    });
+  }
+  const primary = levels[0] || null;
+  if (!primary) {
+    rejectReasons.push('no relevant reclaim level found');
+    return buildReclaimResult({
+      status: 'RECLAIM_LEVEL_UNDEFINED', score: 0, confidence: 0, timeframe,
+      primary: null, levels, closeAbove: false, retestStatus: 'undefined',
+      classification: 'NONE', tolPct,
+      failedReason: null, rejectReasons,
+      nextRequired: 'identify a breakdown / range / VWAP / base level to reclaim',
+      components: {},
+    });
+  }
+
+  const zoneLow = primary.level_zone_low;
+  const zoneHigh = primary.level_zone_high;
+  const distancePct = primary.distance_from_current_price;
+  const aboveZone = px > zoneHigh;
+  const inZone = px >= zoneLow && px <= zoneHigh;
+  const belowZone = px < zoneLow;
+
+  // ── Confirmation signals (price-structure only; no order flow required) ──
+  const wickOnly = m.wickOnlyReclaim === true || m.reclaimWickOnly === true;
+  const hasConfirmSignal = m.reclaimConfirmed === true || m.vwapReclaimed === true
+    || m.rangeHighReclaimed === true || m.closeAboveLevel === true
+    || m.dailyCloseAboveZone === true || m.reclaimHeld === true;
+  const heldMinutes = n(m.timeAboveLevelMinutes ?? m.holdAboveMinutes ?? m.noNewLowMinutes);
+  const tfHoldMin = { '1D': 240, '4H': 120, '1H': 45, '15M': 20 }[timeframe] || 60;
+  const heldAbove = m.heldAboveLevel === true || m.higherLowHeld === true
+    || m.vwapHeld === true || (heldMinutes != null && heldMinutes >= tfHoldMin);
+  // Timeframe-aware close confirmation. 1D/4H: a close above the zone confirms.
+  // 1H/15M: stricter — require a non-wick close AND a hold/higher-low, never a
+  // wick-only tag.
+  let closeConfirmed;
+  if (timeframe === '1H' || timeframe === '15M') {
+    closeConfirmed = hasConfirmSignal && !wickOnly && (heldAbove || m.closeAboveLevel === true);
+  } else {
+    closeConfirmed = hasConfirmSignal && !wickOnly;
+  }
+
+  const retestHeld = m.retestHeld === true || m.reclaimRetestHeld === true
+    || (m.higherLowHeld === true && hasConfirmSignal);
+  const retestFailed = m.retestFailed === true || m.reclaimRetestFailed === true;
+  const retestTested = retestHeld || retestFailed || m.retestTested === true || m.retestDone === true;
+  const lostAfterReclaim = m.reclaimLost === true || m.vwapLost === true
+    || m.reclaimedThenLost === true || (retestFailed && belowZone);
+
+  // ── Volume + regime support ──
+  const volSpike = n(m.volumeSpike, 0);
+  const volumeConfirmed = m.reclaimVolumeConfirmed === true || volSpike >= 1.2
+    || n(m.spotVolumeConfirmPct, 0) > 1;
+  const regimeOk = !reg.blocksMeanReversion && n(reg.score, 55) >= 50;
+
+  // ── RECLAIM_SCORE (0–100). Missing retest only zeroes ITS component — it
+  // never zeroes the total. ──
+  const components = {
+    levelImportance: round(RECLAIM_WEIGHTS.levelImportance * (primary.importance_score / 100), 1),
+    closeAboveLevelOrZone: closeConfirmed ? RECLAIM_WEIGHTS.closeAboveLevelOrZone
+      : aboveZone ? round(RECLAIM_WEIGHTS.closeAboveLevelOrZone * 0.5, 1) : 0,
+    timeHeldAboveLevel: heldAbove ? RECLAIM_WEIGHTS.timeHeldAboveLevel
+      : aboveZone ? round(RECLAIM_WEIGHTS.timeHeldAboveLevel * 0.45, 1) : 0,
+    retestHeld: retestHeld ? RECLAIM_WEIGHTS.retestHeld : 0,
+    volumeConfirmation: volumeConfirmed ? RECLAIM_WEIGHTS.volumeConfirmation : 0,
+    marketRegimeSupport: regimeOk ? RECLAIM_WEIGHTS.marketRegimeSupport : 0,
+  };
+  let score = clamp(Object.values(components).reduce((a, b) => a + b, 0));
+
+  // ── Structural status machine (spec decision logic) ──
+  let status;
+  if (lostAfterReclaim) {
+    status = 'RECLAIM_FAILED';
+    failedReason = retestFailed ? 'retest failed' : 'price reclaimed then lost the zone';
+  } else if (hasConfirmSignal) {
+    if (retestHeld) status = 'RECLAIM_RETEST_HOLD';
+    else if (retestTested) status = 'RECLAIM_CONFIRMED';
+    else status = 'RECLAIM_CONFIRMED_NO_RETEST';
+  } else if (aboveZone) {
+    status = 'RECLAIM_DETECTED';
+  } else if (inZone) {
+    status = 'RECLAIM_ATTEMPT';
+  } else {
+    status = 'RECLAIM_NOT_STARTED';
+  }
+
+  // ── Honesty floor: a stronger status is only allowed if the score supports
+  // it. This can only DOWNGRADE — it never inflates a reclaim. ──
+  if (status === 'RECLAIM_RETEST_HOLD' && score < RECLAIM_RETEST_HOLD_MIN) {
+    status = 'RECLAIM_CONFIRMED';
+  }
+  if ((status === 'RECLAIM_CONFIRMED' || status === 'RECLAIM_CONFIRMED_NO_RETEST') && score < RECLAIM_CONFIRMED_MIN) {
+    status = aboveZone ? 'RECLAIM_DETECTED' : inZone ? 'RECLAIM_ATTEMPT' : 'RECLAIM_NOT_STARTED';
+  }
+  if (status === 'RECLAIM_DETECTED' && score < RECLAIM_DETECTED_MIN) {
+    status = (inZone || aboveZone) ? 'RECLAIM_ATTEMPT' : 'RECLAIM_NOT_STARTED';
+  }
+
+  // ── Retest status string ──
+  let retestStatus;
+  if (retestHeld) retestStatus = 'held';
+  else if (retestFailed) retestStatus = 'failed';
+  else if (status === 'RECLAIM_CONFIRMED_NO_RETEST') retestStatus = 'not yet tested';
+  else if (aboveZone || inZone) retestStatus = 'pending';
+  else retestStatus = 'not yet tested';
+  if (primary) primary.retest_status = retestStatus;
+  for (const lvl of levels) if (lvl.has_been_reclaimed) lvl.retest_status = retestStatus;
+
+  // ── Classification: EARLY / STANDARD / LATE / CHASE / NONE ──
+  const reclaimedNow = ['RECLAIM_DETECTED', 'RECLAIM_CONFIRMED', 'RECLAIM_CONFIRMED_NO_RETEST', 'RECLAIM_RETEST_HOLD'].includes(status);
+  const extendThreshold = Math.max(3, (atrPct != null && atrPct > 0 ? atrPct : 3) * 1.2);
+  const extended = distancePct != null && distancePct > extendThreshold;
+  const ranHot = (c1 != null && c1 > 4) || (c4 != null && c4 > 8);
+  let classification = 'NONE';
+  if (reclaimedNow) {
+    if (retestHeld) classification = 'STANDARD_RECLAIM';
+    else if (extended && ranHot) classification = 'CHASE_RECLAIM';
+    else if (extended) classification = 'LATE_RECLAIM';
+    else classification = 'EARLY_RECLAIM';
+  }
+
+  // ── Reject / block reasons (descriptive; gate nothing) ──
+  if (status === 'RECLAIM_NOT_STARTED') rejectReasons.push('price did not enter reclaim zone');
+  if (status === 'RECLAIM_ATTEMPT') rejectReasons.push('no confirmed close/hold above zone yet');
+  if (status === 'RECLAIM_DETECTED' && wickOnly) rejectReasons.push('wick only, no close above level');
+  if (status === 'RECLAIM_DETECTED' && !closeConfirmed) rejectReasons.push('above zone but no confirmed close/hold yet');
+  if (status === 'RECLAIM_CONFIRMED_NO_RETEST') rejectReasons.push('no retest yet'); // NOT a final reject
+  if (!volumeConfirmed && reclaimedNow) rejectReasons.push('volume confirmation missing');
+  if (reg.blocksMeanReversion) rejectReasons.push('market regime blocked');
+  if (extended && reclaimedNow) rejectReasons.push('reclaim detected but entry already extended');
+  if (classification === 'CHASE_RECLAIM') rejectReasons.push('risk/reward too weak after reclaim');
+
+  // ── Next required condition ──
+  if (status === 'RECLAIM_FAILED') {
+    nextRequired = 'wait for a fresh reclaim attempt and a new higher low';
+  } else if (status === 'RECLAIM_NOT_STARTED') {
+    nextRequired = `price must reach the reclaim zone (${zoneLow}–${zoneHigh})`;
+  } else if (status === 'RECLAIM_ATTEMPT') {
+    nextRequired = `close/hold above ${zoneHigh} on the ${timeframe} timeframe`;
+  } else if (status === 'RECLAIM_DETECTED') {
+    nextRequired = `confirm with a ${timeframe} close above ${zoneHigh} or a held higher low`;
+  } else if (status === 'RECLAIM_CONFIRMED_NO_RETEST') {
+    nextRequired = 'WAIT_FOR_RETEST — retest the reclaimed zone and hold as support';
+  } else if (status === 'RECLAIM_CONFIRMED') {
+    nextRequired = 'retest hold or execution score / RR alignment';
+  } else if (status === 'RECLAIM_RETEST_HOLD') {
+    nextRequired = 'execution score and risk/reward alignment';
+  } else {
+    nextRequired = 'identify a relevant reclaim level';
+  }
+
+  // Trusted microstructure is OPTIONAL: it may lift confidence, but Reclaim is
+  // fully evaluated above without it. Never required.
+  let confidence = score;
+  if (dq.microstructureTrusted === true && reclaimedNow) confidence = clamp(score + 5);
+
+  return buildReclaimResult({
+    status, score, confidence, timeframe, primary, levels,
+    closeAbove: closeConfirmed, retestStatus, classification, tolPct,
+    failedReason, rejectReasons: compactReasons(rejectReasons, 8), nextRequired, components,
+  });
+}
+
+function buildReclaimResult({
+  status, score, confidence, timeframe, primary, levels, closeAbove, retestStatus,
+  classification, tolPct, failedReason, rejectReasons, nextRequired, components,
+}) {
+  return {
+    RECLAIM_STATUS: status,
+    RECLAIM_SCORE: round(score, 0),
+    RECLAIM_CONFIDENCE: round(confidence, 0),
+    RECLAIM_LEVEL: primary ? primary.level_price : null,
+    RECLAIM_LEVEL_ZONE: primary ? { low: primary.level_zone_low, high: primary.level_zone_high } : null,
+    RECLAIM_LEVEL_TYPE: primary ? primary.level_type : 'undefined',
+    RECLAIM_TIMEFRAME: timeframe,
+    DISTANCE_TO_RECLAIM_LEVEL: primary ? primary.distance_from_current_price : null,
+    CLOSE_ABOVE_LEVEL: closeAbove === true,
+    RETEST_STATUS: retestStatus,
+    RECLAIM_FAILED_REASON: failedReason,
+    RECLAIM_NEXT_REQUIRED_CONDITION: nextRequired,
+    RECLAIM_REJECT_REASONS: rejectReasons || [],
+    RECLAIM_CLASSIFICATION: classification,
+    RECLAIM_LEVELS: levels || [],
+    RECLAIM_TOLERANCE_PCT: round(tolPct, 3),
+    components: components || {},
+  };
+}
+
 function missingForMarket(m) {
   const miss = [];
   if (m.depthUsd == null) miss.push('orderBookDepthWithin1Pct');
@@ -1614,6 +1950,50 @@ function buildAbsorbFunnel(candidates = [], universeSize = 0) {
     else if (br === 'market regime blocked') f.blockedByMarketRegime++;
     else if (br === 'spread too wide' || br === 'slippage too high') f.blockedBySpreadLiquidity++;
     else if (typeof br === 'string' && br.startsWith('missing ')) f.blockedByMissingFields++;
+  }
+  return f;
+}
+
+// Phase C: current-snapshot Reclaim funnel counters. Pure aggregation over the
+// already-evaluated candidates — derives nothing new and changes no gate. Kept
+// separate from the Absorb funnel (Reclaim is NOT Absorb). Durable 24h/7d
+// rolling aggregation is intentionally left as a TODO (it needs a persistence
+// layer; doing it inline would be riskier than this snapshot view).
+function buildReclaimFunnel(candidates = [], universeSize = 0) {
+  const f = {
+    coinsScanned: Number(universeSize) || (candidates ? candidates.length : 0),
+    dislocationConfirmed: 0,
+    longFlushConfirmed: 0,
+    stabilizationDetected: 0,
+    reclaimLevelIdentified: 0,
+    reclaimAttempt: 0,
+    reclaimDetected: 0,
+    reclaimConfirmed: 0,
+    reclaimRetestHeld: 0,
+    reclaimFailed: 0,
+    entryBlockedByMissingRetest: 0,
+    entryBlockedByWeakRR: 0,
+    entryBlockedByMarketRegime: 0,
+    entryBlockedByLateChase: 0,
+    // TODO(durable): rolling 24h / 7d aggregation requires persistence.
+    rollingWindow: 'snapshot-only',
+  };
+  for (const c of candidates || []) {
+    if (!c) continue;
+    if (c.STATUS === 'DISLOCATION_CONFIRMED') f.dislocationConfirmed++;
+    if (c.STATUS === 'LONG_FLUSH_CONFIRMED') f.longFlushConfirmed++;
+    if (c.STATUS === 'STABILIZATION' || c.STATUS === 'WAIT_FOR_RECLAIM') f.stabilizationDetected++;
+    const rs = c.RECLAIM_STATUS;
+    if (rs && rs !== 'RECLAIM_LEVEL_UNDEFINED' && rs !== 'RECLAIM_DATA_UNAVAILABLE') f.reclaimLevelIdentified++;
+    if (rs === 'RECLAIM_ATTEMPT') f.reclaimAttempt++;
+    if (rs === 'RECLAIM_DETECTED') f.reclaimDetected++;
+    if (rs === 'RECLAIM_CONFIRMED' || rs === 'RECLAIM_CONFIRMED_NO_RETEST') f.reclaimConfirmed++;
+    if (rs === 'RECLAIM_RETEST_HOLD') f.reclaimRetestHeld++;
+    if (rs === 'RECLAIM_FAILED') f.reclaimFailed++;
+    if (rs === 'RECLAIM_CONFIRMED_NO_RETEST') f.entryBlockedByMissingRetest++;
+    if (c.RECLAIM_CLASSIFICATION === 'CHASE_RECLAIM') f.entryBlockedByWeakRR++;
+    if (c.RECLAIM_CLASSIFICATION === 'LATE_RECLAIM' || c.RECLAIM_CLASSIFICATION === 'CHASE_RECLAIM') f.entryBlockedByLateChase++;
+    if (Array.isArray(c.RECLAIM_REJECT_REASONS) && c.RECLAIM_REJECT_REASONS.includes('market regime blocked')) f.entryBlockedByMarketRegime++;
   }
   return f;
 }
@@ -1962,6 +2342,8 @@ export function evaluateTradingRadar({
     state.pipeline = buildPipeline(candidates, universe.length);
     state.absorbFunnel = buildAbsorbFunnel(candidates, universe.length);
     state.pipeline.absorbFunnel = state.absorbFunnel;
+    state.reclaimFunnel = buildReclaimFunnel(candidates, universe.length);
+    state.pipeline.reclaimFunnel = state.reclaimFunnel;
     state.candidatesByStage = { ...state.pipeline };
     state.missingSignals = Array.from(allMissing).sort();
     state.dataCompleteness = completeness(state.missingSignals);

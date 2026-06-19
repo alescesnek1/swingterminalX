@@ -7400,6 +7400,14 @@ function _renderTradingRadar(radar, esc) {
     const avComp = av.components || {};
     const proxyPartial = selected.PROXY_ABSORB_STATUS === 'ABSORB_PARTIAL_EVIDENCE';
     const strictConfirmedUi = selected.STRICT_ABSORB_CONFIRMED === true;
+    // Phase C — Reclaim Diagnostics Panel. RECLAIM IS NOT ABSORB: price-structure
+    // evidence rendered separately. Never shown as a bare "Reclaim: false"/blank.
+    const rv = selected.reclaimV2 || {};
+    const reclaimStatus = selected.RECLAIM_STATUS || 'RECLAIM_DATA_UNAVAILABLE';
+    const reclaimZone = selected.RECLAIM_LEVEL_ZONE;
+    const reclaimZoneText = (reclaimZone && reclaimZone.low != null && reclaimZone.high != null)
+      ? `${_fleetFmtRadarPrice(reclaimZone.low)} – ${_fleetFmtRadarPrice(reclaimZone.high)}` : '--';
+    const reclaimConfirmedUi = reclaimStatus === 'RECLAIM_CONFIRMED' || reclaimStatus === 'RECLAIM_CONFIRMED_NO_RETEST' || reclaimStatus === 'RECLAIM_RETEST_HOLD';
 
     focusHtml = `<div class="radar-focus-card">
       <div class="radar-focus-title"><b>${esc(selected.symbol || '--')}</b> <span class="${_fleetRadarBadgeClass(selectedV1Status)}">${actLabel}</span></div>
@@ -7492,6 +7500,22 @@ function _renderTradingRadar(radar, esc) {
         <div class="radar-microstructure__row"><span>Reject / Block Reason</span><b>${esc(selected.ABSORB_BLOCK_REASON || 'none')}</b></div>
         <div class="radar-microstructure__row"><span>Next Required Condition</span><b>${esc(selected.ABSORB_NEXT_REQUIRED_CONDITION || '--')}</b></div>
         <div class="radar-microstructure__row"><span>Entry Impact</span><b>${esc(selected.ENTRY_IMPACT || 'BLOCKED_NO_ABSORB')}</b></div>
+      </div>
+      <div class="radar-microstructure">
+        <div class="radar-microstructure__title">Reclaim Diagnostics Panel</div>
+        <div class="radar-microstructure__row"><span>RECLAIM_STATUS</span><b class="${reclaimConfirmedUi ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(reclaimStatus)}</b></div>
+        <div class="radar-microstructure__row"><span>RECLAIM_SCORE</span><b>${esc(_fleetFmtRadarValue(selected.RECLAIM_SCORE, 0))}/100</b></div>
+        <div class="radar-microstructure__row"><span>RECLAIM_CLASSIFICATION</span><b>${esc(selected.RECLAIM_CLASSIFICATION || 'NONE')}</b></div>
+        <div class="radar-microstructure__row"><span>RECLAIM_LEVEL</span><b>${esc(_fleetFmtRadarPrice(selected.RECLAIM_LEVEL))}</b></div>
+        <div class="radar-microstructure__row"><span>RECLAIM_LEVEL_ZONE</span><b>${esc(reclaimZoneText)}</b></div>
+        <div class="radar-microstructure__row"><span>RECLAIM_LEVEL_TYPE</span><b>${esc(selected.RECLAIM_LEVEL_TYPE || 'undefined')}</b></div>
+        <div class="radar-microstructure__row"><span>TIMEFRAME</span><b>${esc(selected.RECLAIM_TIMEFRAME || '--')}</b></div>
+        <div class="radar-microstructure__row"><span>DISTANCE_TO_RECLAIM_LEVEL</span><b>${esc(selected.DISTANCE_TO_RECLAIM_LEVEL != null ? `${_fleetFmtRadarValue(selected.DISTANCE_TO_RECLAIM_LEVEL, 2)}%` : '--')}</b></div>
+        <div class="radar-microstructure__row"><span>CLOSE_ABOVE_LEVEL</span><b class="${selected.CLOSE_ABOVE_LEVEL ? 'radar-micro-yes' : 'radar-micro-no'}">${selected.CLOSE_ABOVE_LEVEL ? 'yes' : 'no'}</b></div>
+        <div class="radar-microstructure__row"><span>RETEST_STATUS</span><b>${esc(selected.RETEST_STATUS || 'unknown')}</b></div>
+        <div class="radar-microstructure__row"><span>FAILED_REASON</span><b>${esc(selected.RECLAIM_FAILED_REASON || 'none')}</b></div>
+        <div class="radar-microstructure__row"><span>NEXT_REQUIRED_CONDITION</span><b>${esc(selected.RECLAIM_NEXT_REQUIRED_CONDITION || '--')}</b></div>
+        <div class="radar-microstructure__row"><span>Reject / Block Reasons</span><div class="radar-chip-row">${chipList(selected.RECLAIM_REJECT_REASONS, 'radar-status-chip radar-status-chip--missing')}</div></div>
       </div>
       <div class="radar-next-trigger"><span>Next trigger</span><b>${esc(selected.nextRequiredConfirmation || 'none')}</b></div>
       <div class="radar-focus-levels">

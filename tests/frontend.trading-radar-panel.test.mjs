@@ -117,6 +117,27 @@ test('Phase B: focus panel renders Provider Status and Absorb Diagnostics panels
   assert.match(terminalJs, /proxy evidence — NOT a confirmed absorb/);
 });
 
+test('Phase C: focus panel renders a Reclaim Diagnostics Panel (never a bare Reclaim:false)', () => {
+  // RECLAIM IS NOT ABSORB — rendered in its own panel with all required fields.
+  assert.match(terminalJs, /Reclaim Diagnostics Panel/);
+  assert.match(terminalJs, /RECLAIM_STATUS/);
+  assert.match(terminalJs, /RECLAIM_SCORE/);
+  assert.match(terminalJs, /RECLAIM_CLASSIFICATION/);
+  assert.match(terminalJs, /RECLAIM_LEVEL_ZONE/);
+  assert.match(terminalJs, /RECLAIM_LEVEL_TYPE/);
+  assert.match(terminalJs, /DISTANCE_TO_RECLAIM_LEVEL/);
+  assert.match(terminalJs, /CLOSE_ABOVE_LEVEL/);
+  assert.match(terminalJs, /RETEST_STATUS/);
+  assert.match(terminalJs, /FAILED_REASON/);
+  assert.match(terminalJs, /NEXT_REQUIRED_CONDITION/);
+  assert.match(terminalJs, /selected\.RECLAIM_STATUS/);
+  assert.match(terminalJs, /selected\.RECLAIM_SCORE/);
+  assert.match(terminalJs, /selected\.RECLAIM_REJECT_REASONS/);
+  // Detected/confirmed/retest-hold are surfaced as an explicit status string, not
+  // a boolean, so the UI can never collapse to "Reclaim: false" / blank.
+  assert.match(terminalJs, /reclaimStatus = selected\.RECLAIM_STATUS \|\| 'RECLAIM_DATA_UNAVAILABLE'/);
+});
+
 test('Phase B: absorption checklist row shows explicit Absorb v2 state, never a bare label', () => {
   // The absorption row prefers the explicit Absorb v2 displayReason.
   assert.match(terminalJs, /k === 'absorption' && item\.displayReason/);

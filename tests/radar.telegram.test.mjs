@@ -158,6 +158,53 @@ test('sendRadarEntryReadyTelegram blocks legacy and unqualified candidates', asy
   }
 });
 
+test('Phase C: Reclaim alone (no confirmed ENTRY_READY) never sends Telegram', async () => {
+  const state = normalizeRadarTelegramAlertState();
+  // A strong reclaim that is NOT a confirmed ENTRY_READY (price-structure only).
+  const reclaimOnly = {
+    ...ENTRY, symbol: 'RCLUSDT',
+    STATUS: 'RECLAIM_DETECTED', stage: 'RECLAIM_DETECTED', actionability: 'NEAR_ENTRY',
+    telegramEligible: false, allRadarConditionsPassed: false,
+    RECLAIM_STATUS: 'RECLAIM_CONFIRMED', RECLAIM_SCORE: 88,
+    ABSORB_MODE: 'PROXY', STRICT_ABSORB_CONFIRMED: false,
+  };
+  assert.equal(isConfirmedRadarEntryReady(reclaimOnly), false);
+  assert.equal(selectRadarEntryAlerts({ entryReady: [reclaimOnly] }, state, NOW).length, 0);
+  const res = await sendRadarEntryReadyTelegram(reclaimOnly, state, 'fake', 'fake');
+  assert.equal(res.ok, false);
+  assert.equal(res.code, TELEGRAM_CODES.SKIPPED_NOT_ENTRY_READY);
+});
+
+test('Phase C: Reclaim + Proxy Absorb does not send an Absorb-confirmation Telegram', async () => {
+  const state = normalizeRadarTelegramAlertState();
+  // Reclaim confirmed AND proxy absorb partial evidence, but conditions not
+  // passed (proxy can never satisfy the strict gate). Must not alert.
+  const reclaimProxy = {
+    ...ENTRY, symbol: 'RPXUSDT',
+    actionability: 'NEAR_ENTRY', telegramEligible: false, allRadarConditionsPassed: false,
+    RECLAIM_STATUS: 'RECLAIM_RETEST_HOLD', RECLAIM_SCORE: 90,
+    ABSORB_MODE: 'PROXY', PROXY_ABSORB_STATUS: 'ABSORB_PARTIAL_EVIDENCE', STRICT_ABSORB_CONFIRMED: false,
+  };
+  assert.equal(isConfirmedRadarEntryReady(reclaimProxy), false);
+  const res = await sendRadarEntryReadyTelegram(reclaimProxy, state, 'fake', 'fake');
+  assert.equal(res.ok, false);
+});
+
+test('Phase C: aggressive/entry Telegram still requires confirmed gates, not reclaim+absorb flags', async () => {
+  const state = normalizeRadarTelegramAlertState();
+  // Even labelled AGGRESSIVE_ENTRY_READY with strict absorb + reclaim confirmed,
+  // failing the radar conditions gate must block the alert — the reclaim/absorb
+  // flags alone never create Telegram eligibility.
+  const ungated = {
+    ...ENTRY, symbol: 'AGGUSDT', STATUS: 'AGGRESSIVE_ENTRY_READY', stage: 'ENTRY_READY',
+    actionability: 'ENTRY_READY', allRadarConditionsPassed: false, allConditionsPassed: false,
+    RECLAIM_STATUS: 'RECLAIM_RETEST_HOLD', STRICT_ABSORB_CONFIRMED: true, ABSORB_MODE: 'STRICT',
+  };
+  const res = await sendRadarEntryReadyTelegram(ungated, state, 'fake', 'fake');
+  assert.equal(res.ok, false);
+  assert.equal(res.reason, 'radar_conditions_not_passed');
+});
+
 test('Valid ENTRY_READY sends exactly once and duplicate is deduped', async () => {
   const originalFetch = globalThis.fetch;
   let sends = 0;
