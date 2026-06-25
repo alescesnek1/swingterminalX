@@ -477,3 +477,10 @@ test('Phase E0.1: UI infers rolling producer missing from production-like missin
   assert.match(terminalJs, /const rollingProducerMissingReason = 'Rolling absorption producer not running; static depth\/funding alone cannot confirm Absorb\.';/);
   assert.match(terminalJs, /const producerReasonText = selected\.absorbStrictUnavailableReason[\s\S]+?\|\| \(\(isStaticOnly && \(untrustedStatic \|\| hasMissingRollingFields\)\) \? rollingProducerMissingReason : 'none'\);/);
 });
+
+test('Phase E2a: UI renders Computed structural source present natively and safely', () => {
+  assert.match(terminalJs, /const rCategory = rPrimary && rPrimary\.category \? rPrimary\.category : '';/);
+  assert.match(terminalJs, /const hasComputed = rCategory === 'computed_structural';/);
+  assert.match(terminalJs, /<b style="color:var\(--txt3\);">Computed structural source present:<\/b> \$\{hasComputed \? 'yes' : 'no'\}/);
+  assert.match(terminalJs, /const hasExplicit = rCategory === 'explicit' \|\| \(rCategory === '' && rPrimary && !isFallback\);/);
+});

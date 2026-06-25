@@ -1587,26 +1587,39 @@ const RECLAIM_RETEST_HOLD_MIN = 75;
 // invented). `lostByNature` marks levels that are breakdown/support structures
 // (lost during a dump by definition) vs. moving references (VWAP/MA).
 const RECLAIM_LEVEL_SOURCES = Object.freeze([
-  { type: 'nearest breakdown level', importance: 96, lostByNature: true, get: (m) => n(m.breakdownLevel ?? m.nearestBreakdownLevel) },
-  { type: 'reclaim level (system)', importance: 90, lostByNature: true, get: (m) => n(m.reclaimLevel) },
-  { type: 'flush candle high', importance: 86, lostByNature: true, get: (m) => n(m.flushHigh ?? m.flushCandleHigh ?? m.panicHigh) },
-  { type: 'previous range low / support', importance: 80, lostByNature: true, get: (m) => n(m.rangeLow ?? m.previousSupport ?? m.nearestSupport) },
-  { type: 'VWAP / anchored VWAP', importance: 74, lostByNature: false, get: (m) => n(m.anchoredVwap ?? m.vwap) },
-  { type: 'intraday base high', importance: 66, lostByNature: true, get: (m) => n(m.baseHigh ?? m.localHigh ?? m.priorBounceHigh) },
-  { type: 'local pivot before breakdown', importance: 58, lostByNature: true, get: (m) => n(m.preBreakdownPivot ?? m.pivotHigh ?? m.localPivot) },
-  { type: 'MA / trend zone', importance: 50, lostByNature: false, get: (m) => n(m.maResistance ?? m.ma50 ?? m.trendZone ?? m.emaZone) },
-  { type: 'entry zone high (fallback)', importance: 42, lostByNature: false, get: (m) => n(m.entryZone?.high ?? m.zone?.high ?? m.entry_zone_high) },
-  { type: '24h high (fallback)', importance: 32, lostByNature: false, get: (m) => n(m.high_24h ?? m.high24h) },
-  { type: '24h low (fallback)', importance: 26, lostByNature: false, get: (m) => n(m.low_24h ?? m.low24h) },
+  // 1. Explicit structural fields
+  { type: 'reclaim level (system)', importance: 96, category: 'explicit', lostByNature: true, get: (m) => n(m.reclaimLevel) },
+  { type: 'nearest breakdown level', importance: 94, category: 'explicit', lostByNature: true, get: (m) => n(m.breakdownLevel ?? m.nearestBreakdownLevel) },
+  { type: 'lost support level', importance: 92, category: 'explicit', lostByNature: true, get: (m) => n(m.lostSupportLevel ?? m.brokenSupportLevel) },
+
+  // 2. Computed structural fields
+  { type: 'computed reclaim level', importance: 88, category: 'computed_structural', lostByNature: true, get: (m) => n(m.computedReclaimLevel) },
+  { type: 'computed breakdown level', importance: 86, category: 'computed_structural', lostByNature: true, get: (m) => n(m.computedBreakdownLevel) },
+  { type: 'computed lost support', importance: 84, category: 'computed_structural', lostByNature: true, get: (m) => n(m.computedLostSupportLevel) },
+  { type: 'computed flush candle high', importance: 82, category: 'computed_structural', lostByNature: true, get: (m) => n(m.computedFlushHigh) },
+
+  // Secondary Explicit structural fields
+  { type: 'flush candle high', importance: 80, category: 'explicit', lostByNature: true, get: (m) => n(m.flushHigh ?? m.flushCandleHigh ?? m.panicHigh) },
+  { type: 'previous range low / support', importance: 78, category: 'explicit', lostByNature: true, get: (m) => n(m.rangeLow ?? m.previousSupport ?? m.nearestSupport) },
+  { type: 'intraday base high', importance: 76, category: 'explicit', lostByNature: true, get: (m) => n(m.baseHigh ?? m.localHigh ?? m.priorBounceHigh) },
+  { type: 'local pivot before breakdown', importance: 74, category: 'explicit', lostByNature: true, get: (m) => n(m.preBreakdownPivot ?? m.pivotHigh ?? m.localPivot) },
+  { type: 'entry zone high (fallback)', importance: 70, category: 'explicit', lostByNature: false, get: (m) => n(m.entryZone?.high ?? m.zone?.high ?? m.entry_zone_high) },
+
+  // 3. Optional context only (not exact structural reclaim)
+  // Removed vwap, anchoredVwap, maResistance, ma50, trendZone, emaZone per E2a rules 
+  // to prevent them from ever becoming primary structural reclaim sources.
+
+  // 4. Low-confidence fallback
+  { type: '24h high (fallback)', importance: 32, category: 'fallback_24h', lostByNature: false, get: (m) => n(m.high_24h ?? m.high24h) },
+  { type: '24h low (fallback)', importance: 26, category: 'fallback_24h', lostByNature: false, get: (m) => n(m.low_24h ?? m.low24h) },
 ]);
 const RECLAIM_SOURCE_FIELD_NAMES = Object.freeze([
-  'breakdownLevel', 'nearestBreakdownLevel', 'reclaimLevel', 'flushHigh',
-  'flushCandleHigh', 'panicHigh', 'rangeLow', 'previousSupport',
-  'nearestSupport', 'anchoredVwap', 'vwap', 'baseHigh', 'localHigh',
-  'priorBounceHigh', 'preBreakdownPivot', 'pivotHigh', 'localPivot',
-  'maResistance', 'ma50', 'trendZone', 'emaZone',
-  'entryZone', 'zone', 'entry_zone_high', 'high_24h', 'high24h',
-  'low_24h', 'low24h',
+  'reclaimLevel', 'breakdownLevel', 'nearestBreakdownLevel', 'lostSupportLevel', 'brokenSupportLevel',
+  'computedReclaimLevel', 'computedBreakdownLevel', 'computedLostSupportLevel', 'computedFlushHigh',
+  'flushHigh', 'flushCandleHigh', 'panicHigh', 'rangeLow', 'previousSupport', 'nearestSupport',
+  'anchoredVwap', 'vwap', 'baseHigh', 'localHigh', 'priorBounceHigh', 'preBreakdownPivot',
+  'pivotHigh', 'localPivot', 'maResistance', 'ma50', 'trendZone', 'emaZone',
+  'entryZone', 'zone', 'entry_zone_high', 'high_24h', 'high24h', 'low_24h', 'low24h',
 ]);
 
 function reclaimTimeframeOf(m) {
@@ -1661,6 +1674,7 @@ function evaluateReclaimV2(market, regime, dataQuality) {
       level_zone_low: zoneLow,
       level_zone_high: zoneHigh,
       level_type: src.type,
+      category: src.category,
       timeframe,
       source: src.type,
       importance_score: src.importance,

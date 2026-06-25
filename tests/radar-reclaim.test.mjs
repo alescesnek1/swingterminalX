@@ -49,3 +49,44 @@ test('2: Missing explicit reclaim source is visible and gracefully handled', () 
   assert.ok(rv.missingSourceFields.includes('high_24h'));
   assert.equal(c.telegramEligible, false);
 });
+
+test('3: Phase E2a: computedBreakdownLevel outranks high_24h and is correctly categorized', () => {
+  const m = {
+    symbol: 'COMPUTEDUSDT', baseAsset: 'COMPUTED', quoteAsset: 'USDT', status: 'TRADING',
+    quoteVolume24h: 250e6, bidPrice: 1.83, askPrice: 1.84, change24hPct: -9.5, signal: 'SHORT',
+    high_24h: 2.134, computedBreakdownLevel: 1.95, current_price: 1.83,
+    stopLoss: 2.2, invalidationLevel: 2.3
+  };
+  const { c } = candidateFor('COMPUTEDUSDT', [m]);
+  const rv = c.reclaimV2;
+  assert.ok(rv.primary);
+  assert.equal(rv.primary.level_price, 1.95, 'computedBreakdownLevel should outrank high_24h');
+  assert.equal(rv.primary.category, 'computed_structural', 'category must be computed_structural');
+  assert.equal(rv.primary.source, 'computed breakdown level');
+  assert.ok(!rv.missingSourceFields.includes('computedBreakdownLevel'));
+  assert.ok(rv.presentSourceFields.includes('computedBreakdownLevel'));
+});
+
+test('4: Phase E2a: explicit breakdownLevel outranks computedBreakdownLevel', () => {
+  const m = {
+    symbol: 'EXPLUSDT', baseAsset: 'EXPL', quoteAsset: 'USDT', status: 'TRADING',
+    quoteVolume24h: 250e6, bidPrice: 1.83, askPrice: 1.84, change24hPct: -9.5, signal: 'SHORT',
+    high_24h: 2.134, computedBreakdownLevel: 1.95, breakdownLevel: 1.90
+  };
+  const { c } = candidateFor('EXPLUSDT', [m]);
+  const rv = c.reclaimV2;
+  assert.ok(rv.primary);
+  assert.equal(rv.primary.level_price, 1.90, 'explicit breakdownLevel should outrank computedBreakdownLevel');
+  assert.equal(rv.primary.category, 'explicit');
+});
+
+test('5: Phase E2a: current price, stop, and invalidation aliases never become source', () => {
+  const m = {
+    symbol: 'BANNEDUSDT', baseAsset: 'BANNED', quoteAsset: 'USDT', status: 'TRADING',
+    quoteVolume24h: 250e6, bidPrice: 1.83, askPrice: 1.84, change24hPct: -9.5, signal: 'SHORT',
+    current_price: 1.83, stopLoss: 2.2, stop: 2.2, hardInvalidation: 2.3, invalidationLevel: 2.3
+  };
+  const { c } = candidateFor('BANNEDUSDT', [m]);
+  const rv = c.reclaimV2;
+  assert.equal(rv.primary, null, 'banned fields must never be parsed as primary reclaim levels');
+});

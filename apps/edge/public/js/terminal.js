@@ -7637,8 +7637,10 @@ function _renderTradingRadar(radar, esc) {
 
     const rPrimary = rv.primary || null;
     const rSource = rPrimary && rPrimary.source ? rPrimary.source : '';
-    const isFallback = rSource.indexOf('fallback') !== -1;
-    const hasExplicit = rPrimary && !isFallback;
+    const rCategory = rPrimary && rPrimary.category ? rPrimary.category : '';
+    const isFallback = rCategory === 'fallback_24h' || (rCategory === '' && rSource.indexOf('fallback') !== -1);
+    const hasExplicit = rCategory === 'explicit' || (rCategory === '' && rPrimary && !isFallback);
+    const hasComputed = rCategory === 'computed_structural';
     const px = selected.mid || selected.lastPrice || selected.price || '--';
     const zLow = rPrimary && rPrimary.level_zone_low != null ? _fleetFmtRadarPrice(rPrimary.level_zone_low) : '--';
     const zHigh = rPrimary && rPrimary.level_zone_high != null ? _fleetFmtRadarPrice(rPrimary.level_zone_high) : '--';
@@ -7699,6 +7701,7 @@ function _renderTradingRadar(radar, esc) {
         <div style="font-size:12px;"><b style="color:var(--txt3);">Static-only snapshot:</b> ${isStaticOnly ? 'yes' : 'no'}</div>
         <div style="font-size:12px;"><b style="color:var(--txt3);">Trusted:</b> ${selected.staticMicrostructureTrusted ? 'yes' : 'no'}</div>
         <div style="font-size:12px; margin-top:4px;"><b style="color:var(--txt3);">Explicit source present:</b> ${hasExplicit ? 'yes' : 'no'}</div>
+        <div style="font-size:12px;"><b style="color:var(--txt3);">Computed structural source present:</b> ${hasComputed ? 'yes' : 'no'}</div>
         <div style="font-size:12px;"><b style="color:var(--txt3);">Fallback source used:</b> ${isFallback ? `yes (${esc(rSource)})` : 'no'}</div>
         <div style="font-size:12px;"><b style="color:var(--txt3);">Missing source fields:</b> ${esc((rv.missingSourceFields || []).slice(0, 5).join(', ') || 'none')}</div>
         <div style="font-size:12px;"><b style="color:var(--txt3);">Current price vs reclaim zone:</b> ${_fleetFmtRadarPrice(px)} vs zone ${zLow} - ${zHigh}</div>

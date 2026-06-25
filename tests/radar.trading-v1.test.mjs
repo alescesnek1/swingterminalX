@@ -34,6 +34,7 @@ const EARLY_REVERSAL = {
   sellAggressionFading: true, reclaimConfirmed: true, vwapHeld: true,
   higherLowHeld: true, higherLow: 98, vwap: 100, flushLow: 92,
   rangeHigh: 100, nearestSupply: 108, nextSupply: 114, meanReversionTarget: 120,
+  computedBreakdownLevel: 100,
   ...SAFE_META,
 };
 
@@ -598,6 +599,24 @@ test('C6-7: missing source fields still produce RECLAIM_DATA_SOURCE_MISSING when
   assert.notEqual(c.actionability, 'ENTRY_READY');
 });
 
+test('C6-8: computed structural reclaim sources do NOT unlock ENTRY_READY', () => {
+  const c = candidate([{
+    ...RB, symbol: 'COMPREQ1USDT', bidPrice: 105, askPrice: 105.04, change24hPct: -8,
+    computedBreakdownLevel: 104, reclaimConfirmed: true, vwapHeld: true, higherLowHeld: true, retestHeld: true,
+    volumeSpike: 2.5, rangeFormed: true,
+  }], 'COMPREQ1USDT');
+  assert.notEqual(c.actionability, 'ENTRY_READY');
+  assert.notEqual(c.STATUS, 'ENTRY_READY');
+});
+
+test('C6-9: computed structural reclaim sources do NOT send Telegram', () => {
+  const c = candidate([{
+    ...RB, symbol: 'COMPREQ2USDT', bidPrice: 105, askPrice: 105.04, change24hPct: -8,
+    computedBreakdownLevel: 104, reclaimConfirmed: true, vwapHeld: true, higherLowHeld: true,
+    retestHeld: true, volumeSpike: 2.5,
+  }], 'COMPREQ2USDT');
+  assert.equal(c.telegramEligible, false);
+});
 
 test('C6-8: scanner-shaped live rows propagate high_24h/low_24h into Reclaim diagnostics', () => {
   const state = evaluateTradingRadar({
@@ -628,9 +647,12 @@ test('C6-9: structural reclaim sources outrank 24h fallback sources', () => {
     breakdownLevel: 98, high_24h: 106, low_24h: 91,
   }], 'RANKUSDT');
   assert.equal(c.RECLAIM_LEVEL_SOURCE, 'nearest breakdown level');
-  assert.equal(c.RECLAIM_SOURCE_CONFIDENCE, 96);
+  assert.ok(c.reclaimV2 && c.reclaimV2.primary);
+  assert.equal(c.reclaimV2.primary.category, 'explicit');
+  assert.equal(c.reclaimV2.primary.level_price, 98);
   assert.ok(c.RECLAIM_SOURCE_FIELDS_PRESENT.includes('breakdownLevel'));
   assert.ok(c.RECLAIM_LEVELS.some((lvl) => lvl.source === '24h high (fallback)'));
+  assert.notEqual(c.actionability, 'ENTRY_READY');
 });
 
 test('C6-10: current price aliases do not count as reclaim source fields', () => {
