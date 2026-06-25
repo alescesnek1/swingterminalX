@@ -47,6 +47,10 @@ test('Trading RADAR frontend sends 500 scanner rows with detected field mapping'
   assert.match(terminalJs, /symbol\/base\/pair/);
   assert.match(terminalJs, /h24/);
   assert.match(terminalJs, /volume/);
+  assert.match(terminalJs, /reclaim\.high_24h/);
+  assert.match(terminalJs, /high_24h: _radarFiniteOrNull/);
+  assert.match(terminalJs, /low_24h: _radarFiniteOrNull/);
+  assert.match(terminalJs, /breakdownLevel: _radarFiniteOrNull/);
 });
 
 test('Trading RADAR UI defaults to top 20 and exposes working filter chips', () => {

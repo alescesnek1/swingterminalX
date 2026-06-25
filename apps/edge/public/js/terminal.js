@@ -3784,6 +3784,10 @@ function _radarDetectScannerFields(rows) {
     ['hot', has(['_mom.hotScore', 'hot'])],
     ['tags/labels/markers', sig && Array.isArray(sig.tags) ? '_sig.tags' : has(['tags', 'labels', 'markers'])],
     ['price', has(['current_price', 'price', 'lastPrice'])],
+    ['reclaim.high_24h', has(['high_24h', 'high24h'])],
+    ['reclaim.low_24h', has(['low_24h', 'low24h'])],
+    ['reclaim.entryZone', has(['entryZone', 'zone', 'entry_zone_high'])],
+    ['reclaim.structure', has(['breakdownLevel', 'nearestBreakdownLevel', 'flushHigh', 'flushCandleHigh', 'panicHigh', 'rangeLow', 'previousSupport', 'nearestSupport', 'anchoredVwap', 'vwap', 'baseHigh', 'localHigh', 'preBreakdownPivot', 'pivotHigh', 'localPivot'])],
   ];
   return detected.map(([label, key]) => `${label}:${key || 'missing'}`);
 }
@@ -3823,7 +3827,35 @@ function pushScannerContextToRadar() {
         exploitRisk: !!(d && d.exploitRisk),
         delistingRisk: !!(d && d.delistingRisk),
         newsRisk: d && d.newsRisk ? String(d.newsRisk) : null,
-        safetySource: d && d.safetySource ? String(d.safetySource) : null
+        safetySource: d && d.safetySource ? String(d.safetySource) : null,
+        breakdownLevel: _radarFiniteOrNull(d && d.breakdownLevel),
+        nearestBreakdownLevel: _radarFiniteOrNull(d && d.nearestBreakdownLevel),
+        reclaimLevel: _radarFiniteOrNull(d && d.reclaimLevel),
+        flushHigh: _radarFiniteOrNull(d && d.flushHigh),
+        flushCandleHigh: _radarFiniteOrNull(d && d.flushCandleHigh),
+        panicHigh: _radarFiniteOrNull(d && d.panicHigh),
+        rangeLow: _radarFiniteOrNull(d && d.rangeLow),
+        previousSupport: _radarFiniteOrNull(d && d.previousSupport),
+        nearestSupport: _radarFiniteOrNull(d && d.nearestSupport),
+        anchoredVwap: _radarFiniteOrNull(d && d.anchoredVwap),
+        vwap: _radarFiniteOrNull(d && d.vwap),
+        baseHigh: _radarFiniteOrNull(d && d.baseHigh),
+        localHigh: _radarFiniteOrNull(d && d.localHigh),
+        priorBounceHigh: _radarFiniteOrNull(d && d.priorBounceHigh),
+        preBreakdownPivot: _radarFiniteOrNull(d && d.preBreakdownPivot),
+        pivotHigh: _radarFiniteOrNull(d && d.pivotHigh),
+        localPivot: _radarFiniteOrNull(d && d.localPivot),
+        maResistance: _radarFiniteOrNull(d && d.maResistance),
+        ma50: _radarFiniteOrNull(d && d.ma50),
+        trendZone: _radarFiniteOrNull(d && d.trendZone),
+        emaZone: _radarFiniteOrNull(d && d.emaZone),
+        entryZone: d && d.entryZone && typeof d.entryZone === 'object' ? d.entryZone : null,
+        zone: d && d.zone && typeof d.zone === 'object' ? d.zone : null,
+        entry_zone_high: _radarFiniteOrNull(d && d.entry_zone_high),
+        high_24h: _radarFiniteOrNull(d && d.high_24h),
+        high24h: _radarFiniteOrNull(d && d.high24h),
+        low_24h: _radarFiniteOrNull(d && d.low_24h),
+        low24h: _radarFiniteOrNull(d && d.low24h)
       };
     });
 

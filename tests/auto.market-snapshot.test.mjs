@@ -69,9 +69,9 @@ function fakeBinanceFetch(calls) {
     }
     if (u.includes('ticker/24hr')) {
       return { ok: true, json: async () => ([
-        { symbol: 'BTCUSDC', priceChangePercent: '5.0', quoteVolume: '10000000', volume: '100' },
-        { symbol: 'ETHUSDC', priceChangePercent: '-1.0', quoteVolume: '5000000', volume: '1000' },
-        { symbol: 'DOGEUSDT', priceChangePercent: '1.0', quoteVolume: '2000000', volume: '9999' },
+        { symbol: 'BTCUSDC', priceChangePercent: '5.0', quoteVolume: '10000000', volume: '100', highPrice: '106', lowPrice: '91' },
+        { symbol: 'ETHUSDC', priceChangePercent: '-1.0', quoteVolume: '5000000', volume: '1000', highPrice: '12', lowPrice: '9' },
+        { symbol: 'DOGEUSDT', priceChangePercent: '1.0', quoteVolume: '2000000', volume: '9999', highPrice: '0.2', lowPrice: '0.1' },
         { symbol: 'ETHBTC', priceChangePercent: '0.5', quoteVolume: '300', volume: '10' },
         { symbol: 'BADUSDC', priceChangePercent: '0', quoteVolume: '123', volume: '1' },
       ]) };
@@ -121,6 +121,8 @@ test('snapshot output is sanitized, TRADING + stable-quote only, volume-sorted a
     assert.equal(btc.status, 'TRADING');
     assert.equal(btc.quoteVolume, 10000000);
     assert.equal(btc.priceChangePercent, 5);
+    assert.equal(btc.high_24h, 106);
+    assert.equal(btc.low_24h, 91);
     assert.equal(btc.bidPrice, 100);
     assert.equal(btc.askPrice, 101);
     assert.equal(btc.spreadPct, 1);
