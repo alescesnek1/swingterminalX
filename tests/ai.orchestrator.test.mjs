@@ -77,7 +77,7 @@ const orch = await import(MODURL);
 
 function reset() {
   for (const k of Object.keys(ENV)) delete ENV[k];
-  ENV.GEMINI_API_KEY = 'AIzaSECRETKEY1234567890abcdef';
+  ENV.GEMINI_API_KEY = 'test-gemini-api-key';
   fetchCalls.length = 0;
   fetchHandler = null;
 }
@@ -204,9 +204,9 @@ test('runMarketBriefing shares buildModelChain + grounding recovery', async () =
 
 test('sanitizeProviderBody never leaks the API key', () => {
   reset();
-  const leaky = 'GET https://x/models/y:generateContent?key=AIzaSECRETKEY1234567890abcdef failed; {"key":"AIzaSECRETKEY1234567890abcdef"}';
+  const leaky = 'GET https://x/models/y:generateContent?key=test-gemini-api-key failed; {"key":"test-gemini-api-key"}';
   const clean = orch.sanitizeProviderBody(leaky);
-  assert.doesNotMatch(clean, /AIzaSECRETKEY1234567890abcdef/);
+  assert.doesNotMatch(clean, /test-gemini-api-key/);
   assert.doesNotMatch(clean, /key=AIza/);
 });
 
