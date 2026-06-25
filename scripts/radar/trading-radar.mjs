@@ -8,7 +8,7 @@
 // and returns advisory candidates and exit guidance only.
 
 import { buildSafetyDiagnostics, evaluateKnownSafety, classifyMarketSafety } from '../safety/chain-safety.mjs';
-
+import { matchCoinGeckoTrendingToMarketSymbol } from '../market/coingecko-highlights.mjs';
 const WEIRD_BASE_RE = /(UP|DOWN|BULL|BEAR)$|\d+(L|S)$/;
 const QUOTES = new Set(['USDC', 'USDT']);
 
@@ -2269,8 +2269,43 @@ export function evaluateTradingRadar({
       const distanceToEntryReadyScore = entryReadyV1
         ? 100
         : Math.min(stageInfo.distanceToEntryReadyScore, 97);
+        
+      // Phase D1c: CoinGecko trending attention metadata injection
+      let attentionMetadata = {};
+      const cgCtx = scannerContext.coingeckoTrending;
+      if (
+        cgCtx &&
+        cgCtx.source === 'coingecko' &&
+        cgCtx.kind === 'trending' &&
+        cgCtx.stale === false &&
+        !cgCtx.unavailableReason &&
+        Array.isArray(cgCtx.items)
+      ) {
+        let bestMatch = null;
+        for (const item of cgCtx.items) {
+          if (!Number.isFinite(item.rank) || item.rank <= 0) continue;
+          
+          const matchResult = matchCoinGeckoTrendingToMarketSymbol(item, m.symbol);
+          if (matchResult && matchResult.matched) {
+            if (!bestMatch || item.rank < bestMatch.rank) {
+              bestMatch = { item, matchResult };
+            }
+          }
+        }
+        if (bestMatch) {
+          attentionMetadata = {
+            ATTENTION_SOURCE: 'coingecko',
+            ATTENTION_KIND: 'trending',
+            ATTENTION_RANK: bestMatch.item.rank,
+            ATTENTION_LABEL: `CG #${bestMatch.item.rank}`,
+            ATTENTION_MATCH_CONFIDENCE: bestMatch.matchResult.confidence
+          };
+        }
+      }
+
       return {
         symbol: m.symbol,
+        ...attentionMetadata,
         stage: stageInfo.stage,
         actionability: effectiveActionability,
         distanceToEntryReadyScore,
