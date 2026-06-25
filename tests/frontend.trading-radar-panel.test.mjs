@@ -460,3 +460,12 @@ test('Phase D1b: UI renders CoinGecko attention chip correctly based on metadata
   
   assert.ok(renderList.includes('title="CoinGecko trending context only"'), 'Must have correct tooltip');
 });
+
+test('Phase E0: UI explicitly handles missing flow and Reclaim fallbacks safely without crashing', () => {
+  assert.match(terminalJs, /absorbStrictUnavailableCode === 'ABSORB_ROLLING_FLOW_MISSING'/);
+  assert.match(terminalJs, /rolling flow producer missing/);
+  assert.match(terminalJs, /const rSource = rPrimary && rPrimary\.source \? rPrimary\.source : ''/);
+  assert.match(terminalJs, /rSource\.indexOf\('fallback'\)/);
+  assert.match(terminalJs, /rv\.missingSourceFields/);
+  assert.match(terminalJs, /rv\.primary \|\| null/);
+});

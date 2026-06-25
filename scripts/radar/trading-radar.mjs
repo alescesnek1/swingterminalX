@@ -1512,6 +1512,11 @@ function evaluateAbsorbV2(market, regime, dataQuality) {
       ? 'INFORMATIONAL_ONLY_NO_AGGRESSIVE_ENTRY'
       : 'BLOCKED_NO_ABSORB';
 
+  const absorbStrictUnavailableCode = (!trustedRolling && dq.hasStaticMicrostructure && !dq.hasRollingMicrostructure) 
+    ? 'ABSORB_ROLLING_FLOW_MISSING' : null;
+  const absorbStrictUnavailableReason = absorbStrictUnavailableCode === 'ABSORB_ROLLING_FLOW_MISSING'
+    ? 'Rolling absorption producer not running; static depth/funding alone cannot confirm Absorb.' : null;
+
   return {
     ABSORB_STATUS: absorbStatus,
     ABSORB_MODE: mode,
@@ -1528,6 +1533,12 @@ function evaluateAbsorbV2(market, regime, dataQuality) {
     ABSORB_NEXT_REQUIRED_CONDITION: nextRequired,
     ENTRY_IMPACT: entryImpact,
     STRICT_ABSORB_CONFIRMED: strictConfirmed,
+    absorbStrictUnavailableCode,
+    absorbStrictUnavailableReason,
+    hasStaticMicrostructure: dq.hasStaticMicrostructure,
+    hasRollingMicrostructure: dq.hasRollingMicrostructure,
+    staticMicrostructureTrusted: dq.staticMicrostructureTrusted,
+    microstructureStale: m.microstructureStale === true,
     // Component sub-scores for the Absorb Diagnostics Panel (read-only display).
     components: {
       sellPressureScore: strict.aggressiveSellsFailed.pass ? STRICT_ABSORB_WEIGHTS.aggressiveSellsFailed : 0,
@@ -1880,6 +1891,9 @@ function buildReclaimResult({
     RECLAIM_SOURCE_DATA_STATUS: sourceDataStatus || (primary ? 'SOURCE_DATA_PRESENT' : 'NO_LEVEL_FOUND'),
     RECLAIM_SOURCE_FIELDS_PRESENT: presentSourceFields || [],
     RECLAIM_SOURCE_FIELDS_MISSING: missingSourceFields || [],
+    missingSourceFields: missingSourceFields || [],
+    presentSourceFields: presentSourceFields || [],
+    primary: primary || null,
     components: components || {},
   };
 }

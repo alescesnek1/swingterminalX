@@ -7291,6 +7291,7 @@ function _fleetRadarAbsorbVerdict(c) {
   const strict = c.STRICT_ABSORB_STATUS || '';
   const proxy = c.PROXY_ABSORB_STATUS || '';
   const mode = c.ABSORB_MODE || '';
+  if (c.absorbStrictUnavailableCode === 'ABSORB_ROLLING_FLOW_MISSING') return 'NO STRICT DATA — rolling flow producer missing';
   if (strict === 'ABSORB_DATA_UNAVAILABLE' && proxy === 'ABSORB_REJECTED') return 'NO STRICT DATA — proxy rejected';
   if (strict === 'ABSORB_DATA_UNAVAILABLE' && proxy === 'ABSORB_PARTIAL_EVIDENCE') return 'PROXY ONLY — strict unavailable, not confirmed';
   if (strict === 'ABSORB_DATA_UNAVAILABLE' && proxy === 'ABSORB_WATCH') return 'PROXY — strict unavailable, not confirmed';
@@ -7614,6 +7615,19 @@ function _renderTradingRadar(radar, esc) {
     const cardBig = 'font-size:16px; font-weight:700; line-height:1.2; margin-top:2px;';
     const cardExpl = 'font-size:11px; color:var(--txt2); margin-top:3px;';
 
+    // Phase E0: Explicit diagnostic preparation
+    const strictStatusText = selected.STRICT_ABSORB_STATUS === 'ABSORB_DATA_STALE' ? 'STALE'
+      : selected.STRICT_ABSORB_STATUS === 'ABSORB_PROVIDER_UNTRUSTED' ? 'UNTRUSTED'
+      : selected.STRICT_ABSORB_STATUS === 'ABSORB_DATA_UNAVAILABLE' ? 'MISSING' : selected.STRICT_ABSORB_STATUS;
+    const isStaticOnly = selected.hasStaticMicrostructure && !selected.hasRollingMicrostructure;
+    const rPrimary = rv.primary || null;
+    const rSource = rPrimary && rPrimary.source ? rPrimary.source : '';
+    const isFallback = rSource.indexOf('fallback') !== -1;
+    const hasExplicit = rPrimary && !isFallback;
+    const px = selected.mid || selected.lastPrice || selected.price || '--';
+    const zLow = rPrimary && rPrimary.level_zone_low != null ? _fleetFmtRadarPrice(rPrimary.level_zone_low) : '--';
+    const zHigh = rPrimary && rPrimary.level_zone_high != null ? _fleetFmtRadarPrice(rPrimary.level_zone_high) : '--';
+
     focusHtml = `<div class="radar-focus-card">
       <div class="radar-operator-summary radar-decision-cards" style="display:flex; flex-direction:column; gap:8px; margin-bottom:10px;">
         <div class="radar-decision-card radar-decision-card--entry" style="${cardBase} border:1px solid ${entryTone};">
@@ -7665,6 +7679,14 @@ function _renderTradingRadar(radar, esc) {
         <div style="font-size:12px; margin-top:3px;"><b style="color:${absorbTone};">Absorb:</b> ${esc(absorbParts.head)} — ${esc(absorbParts.detail || (strictConfirmedUi ? 'confirmed absorption' : 'not confirmed'))}</div>
         <div style="font-size:12px;"><b style="color:${reclaimTone};">Reclaim:</b> ${esc(reclaimHuman.verdict)} — ${esc(reclaimHuman.meaning)}</div>
         <div style="font-size:12px;"><b style="color:var(--txt3);">Provider:</b> ${esc(provState)} · mode ${esc(absorbMode)} · strict ${strictConfirmedUi ? 'available' : 'unavailable'}</div>
+        <div style="font-size:12px; margin-top:4px;"><b style="color:var(--txt3);">Strict status:</b> ${esc(strictStatusText)}</div>
+        <div style="font-size:12px;"><b style="color:var(--txt3);">Producer reason:</b> ${esc(selected.absorbStrictUnavailableReason || 'none')}</div>
+        <div style="font-size:12px;"><b style="color:var(--txt3);">Static-only snapshot:</b> ${isStaticOnly ? 'yes' : 'no'}</div>
+        <div style="font-size:12px;"><b style="color:var(--txt3);">Trusted:</b> ${selected.staticMicrostructureTrusted ? 'yes' : 'no'}</div>
+        <div style="font-size:12px; margin-top:4px;"><b style="color:var(--txt3);">Explicit source present:</b> ${hasExplicit ? 'yes' : 'no'}</div>
+        <div style="font-size:12px;"><b style="color:var(--txt3);">Fallback source used:</b> ${isFallback ? `yes (${esc(rSource)})` : 'no'}</div>
+        <div style="font-size:12px;"><b style="color:var(--txt3);">Missing source fields:</b> ${esc((rv.missingSourceFields || []).slice(0, 5).join(', ') || 'none')}</div>
+        <div style="font-size:12px;"><b style="color:var(--txt3);">Current price vs reclaim zone:</b> ${_fleetFmtRadarPrice(px)} vs zone ${zLow} - ${zHigh}</div>
       </div>
       <div class="radar-focus-blocked"><span>Reason</span><b>${esc((selected.REASON || selected.reasons || []).join(' | ') || '--')}</b></div>
       <div class="radar-focus-blocked"><span>Invalidation</span><b>${esc(selected.INVALIDATION || '--')}</b></div>
