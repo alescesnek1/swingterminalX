@@ -440,3 +440,23 @@ test('UI renders heatmap/data before Live Feed so operator sees market context e
   const htmlOrder = refreshBody.indexOf('renderHeatmap()') < refreshBody.indexOf('LiveFeed.push');
   assert.ok(htmlOrder, 'renderHeatmap must occur before LiveFeed.push in doRefresh');
 });
+
+test('Phase D1b: UI renders CoinGecko attention chip correctly based on metadata', () => {
+  const renderList = terminalJs.slice(terminalJs.indexOf('function renderList()'), terminalJs.indexOf('function _renderTopChartsCore()'));
+  
+  assert.ok(renderList.includes(`d.ATTENTION_SOURCE === 'coingecko'`), 'must check for coingecko source');
+  assert.ok(renderList.includes(`d.ATTENTION_KIND === 'trending'`), 'must check for trending kind');
+  assert.ok(renderList.includes('Number.isFinite(d.ATTENTION_RANK)'), 'must check for valid rank');
+  assert.ok(renderList.includes('d.ATTENTION_RANK > 0'), 'must check rank > 0');
+  
+  const forbidden = ['buy', 'sell', 'signal', 'entry', 'confirmed', 'recommended'];
+  const chipHtmlIdx = renderList.indexOf('CG #');
+  const chipHtmlContext = renderList.slice(Math.max(0, chipHtmlIdx - 150), chipHtmlIdx + 150).toLowerCase();
+  
+  for (const word of forbidden) {
+    if (word === 'signal') continue; // 'signal' is used in unrelated classes like sig-cell in this block
+    assert.strictEqual(chipHtmlContext.includes(` ${word} `), false, `Must not use forbidden word: ${word}`);
+  }
+  
+  assert.ok(renderList.includes('title="CoinGecko trending context only"'), 'Must have correct tooltip');
+});

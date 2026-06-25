@@ -2058,9 +2058,15 @@ function renderList() {
       // on every renderList() call, a WebSocket-driven innerHTML rebuild
       // re-locks each cell to its exact X — zero layout drift.
       const cs = (k) => _colStyle(k);
+      
+      let attChip = '';
+      if (d.ATTENTION_SOURCE === 'coingecko' && d.ATTENTION_KIND === 'trending' && Number.isFinite(d.ATTENTION_RANK) && d.ATTENTION_RANK > 0) {
+        attChip = `<span class="exch-badge" title="CoinGecko trending context only" style="background:var(--bg3);color:var(--txt2);margin-left:4px;">CG #${_esc(String(d.ATTENTION_RANK))}</span>`;
+      }
+
       const cellHTML = {
         rank:   `<span data-col="rank" class="rn" style="${cs('rank')}">${start + i + 1}</span>`,
-        coin:   `<div data-col="coin" class="coin-cell" style="${cs('coin')}"><span class="csym">${escSym}${exchBadge}</span><span class="cnm">${escName}</span></div>`,
+        coin:   `<div data-col="coin" class="coin-cell" style="${cs('coin')}"><span class="csym">${escSym}${exchBadge}${attChip}</span><span class="cnm">${escName}</span></div>`,
         signal: `<span data-col="signal" class="sig-cell" style="${cs('signal')}">${signalMarkup(s)}${divTag}${snipTag}</span>`,
         safety: `<span data-col="safety" class="sig-cell" style="${cs('safety')}">${safetyMarkup(d)}</span>`,
         score:  `<span data-col="score" data-cell="score" class="tr" style="${cs('score')}color:${s.score>=6?'var(--grn)':'var(--txt2)'}"><b>${s.score}/10</b></span>`,
