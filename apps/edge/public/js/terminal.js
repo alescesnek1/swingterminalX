@@ -7291,7 +7291,14 @@ function _fleetRadarAbsorbVerdict(c) {
   const strict = c.STRICT_ABSORB_STATUS || '';
   const proxy = c.PROXY_ABSORB_STATUS || '';
   const mode = c.ABSORB_MODE || '';
-  if (c.absorbStrictUnavailableCode === 'ABSORB_ROLLING_FLOW_MISSING') return 'NO STRICT DATA — rolling flow producer missing';
+  const staticOnlySnapshot = c.hasStaticMicrostructure === true && c.hasRollingMicrostructure !== true;
+  const untrustedStatic = c.staticMicrostructureTrusted !== true;
+  const hasMissingRollingFields = Array.isArray(c.missingAbsorptionFields) && c.missingAbsorptionFields.length > 0;
+  
+  if (c.absorbStrictUnavailableCode === 'ABSORB_ROLLING_FLOW_MISSING' || (staticOnlySnapshot && (untrustedStatic || hasMissingRollingFields))) {
+    return 'NO STRICT DATA — rolling flow producer missing';
+  }
+  
   if (strict === 'ABSORB_DATA_UNAVAILABLE' && proxy === 'ABSORB_REJECTED') return 'NO STRICT DATA — proxy rejected';
   if (strict === 'ABSORB_DATA_UNAVAILABLE' && proxy === 'ABSORB_PARTIAL_EVIDENCE') return 'PROXY ONLY — strict unavailable, not confirmed';
   if (strict === 'ABSORB_DATA_UNAVAILABLE' && proxy === 'ABSORB_WATCH') return 'PROXY — strict unavailable, not confirmed';
@@ -7619,7 +7626,15 @@ function _renderTradingRadar(radar, esc) {
     const strictStatusText = selected.STRICT_ABSORB_STATUS === 'ABSORB_DATA_STALE' ? 'STALE'
       : selected.STRICT_ABSORB_STATUS === 'ABSORB_PROVIDER_UNTRUSTED' ? 'UNTRUSTED'
       : selected.STRICT_ABSORB_STATUS === 'ABSORB_DATA_UNAVAILABLE' ? 'MISSING' : selected.STRICT_ABSORB_STATUS;
-    const isStaticOnly = selected.hasStaticMicrostructure && !selected.hasRollingMicrostructure;
+      
+    const isStaticOnly = selected.hasStaticMicrostructure === true && selected.hasRollingMicrostructure !== true;
+    const untrustedStatic = selected.staticMicrostructureTrusted !== true;
+    const hasMissingRollingFields = Array.isArray(selected.missingAbsorptionFields) && selected.missingAbsorptionFields.length > 0;
+    const rollingProducerMissingReason = 'Rolling absorption producer not running; static depth/funding alone cannot confirm Absorb.';
+    const producerReasonText = selected.absorbStrictUnavailableReason
+      || selected.absorptionBlockedReason
+      || ((isStaticOnly && (untrustedStatic || hasMissingRollingFields)) ? rollingProducerMissingReason : 'none');
+
     const rPrimary = rv.primary || null;
     const rSource = rPrimary && rPrimary.source ? rPrimary.source : '';
     const isFallback = rSource.indexOf('fallback') !== -1;
@@ -7680,7 +7695,7 @@ function _renderTradingRadar(radar, esc) {
         <div style="font-size:12px;"><b style="color:${reclaimTone};">Reclaim:</b> ${esc(reclaimHuman.verdict)} — ${esc(reclaimHuman.meaning)}</div>
         <div style="font-size:12px;"><b style="color:var(--txt3);">Provider:</b> ${esc(provState)} · mode ${esc(absorbMode)} · strict ${strictConfirmedUi ? 'available' : 'unavailable'}</div>
         <div style="font-size:12px; margin-top:4px;"><b style="color:var(--txt3);">Strict status:</b> ${esc(strictStatusText)}</div>
-        <div style="font-size:12px;"><b style="color:var(--txt3);">Producer reason:</b> ${esc(selected.absorbStrictUnavailableReason || 'none')}</div>
+        <div style="font-size:12px;"><b style="color:var(--txt3);">Producer reason:</b> ${esc(producerReasonText)}</div>
         <div style="font-size:12px;"><b style="color:var(--txt3);">Static-only snapshot:</b> ${isStaticOnly ? 'yes' : 'no'}</div>
         <div style="font-size:12px;"><b style="color:var(--txt3);">Trusted:</b> ${selected.staticMicrostructureTrusted ? 'yes' : 'no'}</div>
         <div style="font-size:12px; margin-top:4px;"><b style="color:var(--txt3);">Explicit source present:</b> ${hasExplicit ? 'yes' : 'no'}</div>

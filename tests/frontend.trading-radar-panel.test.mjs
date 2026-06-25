@@ -469,3 +469,11 @@ test('Phase E0: UI explicitly handles missing flow and Reclaim fallbacks safely 
   assert.match(terminalJs, /rv\.missingSourceFields/);
   assert.match(terminalJs, /rv\.primary \|\| null/);
 });
+
+test('Phase E0.1: UI infers rolling producer missing from production-like missing backend fields', () => {
+  assert.match(terminalJs, /const isStaticOnly = selected\.hasStaticMicrostructure === true && selected\.hasRollingMicrostructure !== true;/);
+  assert.match(terminalJs, /const untrustedStatic = selected\.staticMicrostructureTrusted !== true;/);
+  assert.match(terminalJs, /const hasMissingRollingFields = Array\.isArray\(selected\.missingAbsorptionFields\) && selected\.missingAbsorptionFields\.length > 0;/);
+  assert.match(terminalJs, /const rollingProducerMissingReason = 'Rolling absorption producer not running; static depth\/funding alone cannot confirm Absorb\.';/);
+  assert.match(terminalJs, /const producerReasonText = selected\.absorbStrictUnavailableReason[\s\S]+?\|\| \(\(isStaticOnly && \(untrustedStatic \|\| hasMissingRollingFields\)\) \? rollingProducerMissingReason : 'none'\);/);
+});
