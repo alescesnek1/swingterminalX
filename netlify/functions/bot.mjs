@@ -1982,6 +1982,35 @@ const RADAR_MICRO_BOOLEAN_FIELDS = Object.freeze([
   'liquidationLowRetested',
 ]);
 
+const RADAR_RECLAIM_NUMERIC_FIELDS = Object.freeze([
+  'breakdownLevel',
+  'nearestBreakdownLevel',
+  'reclaimLevel',
+  'flushHigh',
+  'flushCandleHigh',
+  'panicHigh',
+  'rangeLow',
+  'previousSupport',
+  'nearestSupport',
+  'anchoredVwap',
+  'vwap',
+  'baseHigh',
+  'localHigh',
+  'priorBounceHigh',
+  'preBreakdownPivot',
+  'pivotHigh',
+  'localPivot',
+  'maResistance',
+  'ma50',
+  'trendZone',
+  'emaZone',
+  'entry_zone_high',
+  'high_24h',
+  'high24h',
+  'low_24h',
+  'low24h',
+]);
+const RADAR_RECLAIM_ZONE_FIELDS = Object.freeze(['entryZone', 'zone']);
 function normalizeFiniteNumber(v) {
   if (v == null || v === '') return null; // never let null/'' become Number 0
   const x = Number(v);
@@ -2013,6 +2042,26 @@ function normalizeRadarMicrostructure(src) {
   return out;
 }
 
+function normalizeRadarReclaimSources(src) {
+  const out = {};
+  if (!src || typeof src !== 'object') return out;
+  for (const key of RADAR_RECLAIM_NUMERIC_FIELDS) {
+    const v = normalizeFiniteNumber(src[key]);
+    if (v != null) out[key] = v;
+  }
+  for (const key of RADAR_RECLAIM_ZONE_FIELDS) {
+    const z = src[key];
+    if (!z || typeof z !== 'object' || Array.isArray(z)) continue;
+    const high = normalizeFiniteNumber(z.high);
+    const low = normalizeFiniteNumber(z.low);
+    if (high != null || low != null) out[key] = {
+      ...(low != null ? { low } : {}),
+      ...(high != null ? { high } : {}),
+    };
+  }
+  return out;
+}
+
 function sanitizeSnapshotMarket(m) {
   if (!m || typeof m !== 'object' || !m.symbol) return null;
   const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
@@ -2029,6 +2078,8 @@ function sanitizeSnapshotMarket(m) {
     spreadPct: num(m.spreadPct),
     priceChangePercent: num(m.priceChangePercent),
     source: AUTO_MARKET_SNAPSHOT_SOURCE,
+    // Optional price-structure reclaim source fields (omitted keys stay UNKNOWN).
+    ...normalizeRadarReclaimSources(m),
     // Optional microstructure pass-through (omitted keys stay UNKNOWN downstream).
     ...normalizeRadarMicrostructure(m),
   };
@@ -2092,13 +2143,22 @@ function radarMarketsFromSnapshot(snapshot) {
   const base = marketsFromSnapshot(snapshot);
   if (!snapshot || !Array.isArray(snapshot.markets)) return base;
   const microBySymbol = new Map();
+  const reclaimBySymbol = new Map();
   for (const row of snapshot.markets) {
     if (!row || !row.symbol) continue;
-    microBySymbol.set(String(row.symbol).toUpperCase(), normalizeRadarMicrostructure(row));
+    const symbol = String(row.symbol).toUpperCase();
+    microBySymbol.set(symbol, normalizeRadarMicrostructure(row));
+    reclaimBySymbol.set(symbol, normalizeRadarReclaimSources(row));
   }
   return base.map((m) => {
-    const micro = microBySymbol.get(String(m.symbol || '').toUpperCase());
-    return micro && Object.keys(micro).length ? { ...m, ...micro } : m;
+    const symbol = String(m.symbol || '').toUpperCase();
+    const micro = microBySymbol.get(symbol);
+    const reclaim = reclaimBySymbol.get(symbol);
+    return {
+      ...m,
+      ...(reclaim && Object.keys(reclaim).length ? reclaim : {}),
+      ...(micro && Object.keys(micro).length ? micro : {}),
+    };
   });
 }
 
@@ -3230,7 +3290,8 @@ async function handleFleetBrowser(req, base, segments, identity, body) {
         exploitRisk: c.exploitRisk === true,
         delistingRisk: c.delistingRisk === true,
         newsRisk: c.newsRisk ? String(c.newsRisk).slice(0, 20) : null,
-        safetySource: c.safetySource ? String(c.safetySource).slice(0, 40) : null
+        safetySource: c.safetySource ? String(c.safetySource).slice(0, 40) : null,
+        ...normalizeRadarReclaimSources(c),
       };
     }).filter(Boolean);
 

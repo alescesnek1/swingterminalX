@@ -2071,6 +2071,22 @@ function radarStatus(state) {
   if (state.dataFreshnessMs != null && state.dataFreshnessMs > 120000) return 'STALE';
   return 'SCANNING';
 }
+const SCANNER_RECLAIM_SOURCE_KEYS = Object.freeze([
+  'breakdownLevel', 'nearestBreakdownLevel', 'reclaimLevel', 'flushHigh',
+  'flushCandleHigh', 'panicHigh', 'rangeLow', 'previousSupport',
+  'nearestSupport', 'anchoredVwap', 'vwap', 'baseHigh', 'localHigh',
+  'priorBounceHigh', 'preBreakdownPivot', 'pivotHigh', 'localPivot',
+  'maResistance', 'ma50', 'trendZone', 'emaZone', 'entryZone', 'zone',
+  'entry_zone_high', 'high_24h', 'high24h', 'low_24h', 'low24h',
+]);
+
+function copyScannerReclaimSources(target, source) {
+  if (!target || !source || typeof source !== 'object') return target;
+  for (const k of SCANNER_RECLAIM_SOURCE_KEYS) {
+    if (source[k] !== undefined && target[k] === undefined) target[k] = source[k];
+  }
+  return target;
+}
 
 export function evaluateTradingRadar({
   markets = [],
@@ -2141,6 +2157,7 @@ export function evaluateTradingRadar({
           overlay[k] = sc[k];
         }
       }
+      copyScannerReclaimSources(overlay, sc);
       return { ...m, ...overlay };
     });
 
@@ -2186,6 +2203,7 @@ export function evaluateTradingRadar({
                 newCandidate[k] = sc[k];
               }
             }
+            copyScannerReclaimSources(newCandidate, sc);
             mergedMarkets.push(newCandidate);
          }
        }

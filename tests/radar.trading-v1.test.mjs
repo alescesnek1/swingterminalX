@@ -598,3 +598,49 @@ test('C6-7: missing source fields still produce RECLAIM_DATA_SOURCE_MISSING when
   assert.notEqual(c.actionability, 'ENTRY_READY');
 });
 
+
+test('C6-8: scanner-shaped live rows propagate high_24h/low_24h into Reclaim diagnostics', () => {
+  const state = evaluateTradingRadar({
+    markets: [BTC, ETH],
+    scannerCandidates: [{
+      symbol: 'LIVEH24USDT', price: 100, volume: 90_000_000,
+      c24: -8, c12: -5, c4: -1, c1: 0.2,
+      score: 72, signal: 'FLUSH', high_24h: 106, low_24h: 91,
+      source: 'scanner-live-shape', ...SAFE_META,
+    }],
+    source: 'scanner-shaped-fixture',
+    now: NOW,
+  });
+  const c = state.candidates.find((x) => x.symbol === 'LIVEH24USDT');
+  assert.ok(c, 'scanner-shaped candidate should be evaluated');
+  assert.equal(c.RECLAIM_SOURCE_DATA_STATUS, 'SOURCE_DATA_PRESENT');
+  assert.equal(c.RECLAIM_LEVEL_SOURCE, '24h high (fallback)');
+  assert.equal(c.RECLAIM_SOURCE_CONFIDENCE, 32);
+  assert.ok(c.RECLAIM_SOURCE_FIELDS_PRESENT.includes('high_24h'));
+  assert.ok(c.RECLAIM_SOURCE_FIELDS_PRESENT.includes('low_24h'));
+  assert.notEqual(c.actionability, 'ENTRY_READY');
+  assert.equal(c.telegramEligible, false);
+});
+
+test('C6-9: structural reclaim sources outrank 24h fallback sources', () => {
+  const c = candidate([{
+    ...RB, symbol: 'RANKUSDT', bidPrice: 100, askPrice: 100.04, change24hPct: -8,
+    breakdownLevel: 98, high_24h: 106, low_24h: 91,
+  }], 'RANKUSDT');
+  assert.equal(c.RECLAIM_LEVEL_SOURCE, 'nearest breakdown level');
+  assert.equal(c.RECLAIM_SOURCE_CONFIDENCE, 96);
+  assert.ok(c.RECLAIM_SOURCE_FIELDS_PRESENT.includes('breakdownLevel'));
+  assert.ok(c.RECLAIM_LEVELS.some((lvl) => lvl.source === '24h high (fallback)'));
+});
+
+test('C6-10: current price aliases do not count as reclaim source fields', () => {
+  const c = candidate([{
+    ...RB, symbol: 'PXONLYUSDT', bidPrice: 100, askPrice: 100.04, lastPrice: 100.02,
+    price: 100.02, currentPrice: 100.02, change24hPct: -8,
+  }], 'PXONLYUSDT');
+  assert.equal(c.RECLAIM_STATUS, 'RECLAIM_LEVEL_UNDEFINED');
+  assert.equal(c.RECLAIM_SOURCE_DATA_STATUS, 'RECLAIM_DATA_SOURCE_MISSING');
+  assert.equal(c.RECLAIM_LEVEL, null);
+  assert.equal(c.RECLAIM_SOURCE_FIELDS_PRESENT.includes('price'), false);
+  assert.equal(c.RECLAIM_SOURCE_FIELDS_PRESENT.includes('currentPrice'), false);
+});

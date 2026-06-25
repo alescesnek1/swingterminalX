@@ -42,6 +42,7 @@ test('snapshot sanitizer preserves valid microstructure, normalizes string boole
     markets: [{
       symbol: 'ABCUSDC', baseAsset: 'ABC', quoteAsset: 'USDC', status: 'TRADING',
       quoteVolume: 5e8, bidPrice: 100, askPrice: 100.02, lastPrice: 100, spreadPct: 0.02, priceChangePercent: -7,
+      high_24h: 106, low_24h: 91,
       // Valid numerics (incl. a genuine measured 0 that must be preserved):
       orderBookDepthWithin1Pct: 1_500_000, depthUsdWithin1Pct: 1_500_000,
       openInterestChangePct: -6.5, fundingRate: 0, longLiquidationSpike: 2.1, shortLiquidationSpike: 0,
@@ -81,6 +82,15 @@ test('snapshot sanitizer preserves valid microstructure, normalizes string boole
   assert.equal(m.distanceToSupportPct, 0.4);
   assert.equal(m.marketBuyVolumeDominance, 0.58);
   assert.equal(m.buyVolumeDominance, 0.57);
+  assert.equal(m.high_24h, 106);
+  assert.equal(m.low_24h, 91);
+
+  const c = fleet.tradingRadar.candidates.find((x) => x.symbol === 'ABCUSDC');
+  assert.ok(c, 'RADAR candidate generated from sanitized snapshot');
+  assert.equal(c.RECLAIM_SOURCE_DATA_STATUS, 'SOURCE_DATA_PRESENT');
+  assert.equal(c.RECLAIM_LEVEL_SOURCE, '24h high (fallback)');
+  assert.ok(c.RECLAIM_SOURCE_FIELDS_PRESENT.includes('high_24h'));
+  assert.ok(c.RECLAIM_SOURCE_FIELDS_PRESENT.includes('low_24h'));
 
   // Booleans: real + string-normalized.
   assert.equal(m.bidAbsorption, true);
