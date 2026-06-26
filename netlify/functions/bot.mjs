@@ -2216,6 +2216,7 @@ async function refreshTradingRadarFromFleet(fleet, nowMs = Date.now()) {
     now: nowMs,
     positions: radarPositionContexts(fleet),
     selectedSymbol: fleet && fleet.tradingRadar && fleet.tradingRadar.selected && fleet.tradingRadar.selected.symbol,
+    klinesSnapshot: fleet && fleet.radarKlinesSnapshot ? fleet.radarKlinesSnapshot : null,
   });
   if (!snapshot || !Array.isArray(snapshot.markets) || snapshot.markets.length === 0) {
     radar.missingSignals = Array.from(new Set([...(radar.missingSignals || []), 'public market snapshot'])).sort();

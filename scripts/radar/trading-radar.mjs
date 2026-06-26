@@ -9,6 +9,8 @@
 
 import { buildSafetyDiagnostics, evaluateKnownSafety, classifyMarketSafety } from '../safety/chain-safety.mjs';
 import { matchCoinGeckoTrendingToMarketSymbol } from '../market/coingecko-highlights.mjs';
+import { computeStructuralReclaimLevels } from './structural-reclaim.mjs';
+import { getFreshClosedKlinesForSymbol } from './klines-snapshot.mjs';
 const WEIRD_BASE_RE = /(UP|DOWN|BULL|BEAR)$|\d+(L|S)$/;
 const QUOTES = new Set(['USDC', 'USDT']);
 
@@ -2116,6 +2118,33 @@ function copyScannerReclaimSources(target, source) {
   return target;
 }
 
+function safeKlinesSymbolFromCandidate(candidate = {}) {
+  if (!candidate || typeof candidate !== 'object') return null;
+  const stablePair = (value) => {
+    const symbol = String(value ?? '').trim().toUpperCase();
+    if (!/^[A-Z0-9]{1,24}$/.test(symbol)) return null;
+    return /^[A-Z0-9]{2,24}(USDT|USDC)$/.test(symbol) ? symbol : null;
+  };
+  for (const key of ['futures_pair', 'futuresPair', 'pair', 'symbol']) {
+    const symbol = stablePair(candidate[key]);
+    if (symbol) return symbol;
+  }
+  if (candidate.base && candidate.quote) {
+    const quote = String(candidate.quote).toUpperCase();
+    if (quote === 'USDT' || quote === 'USDC') return stablePair(`${candidate.base}${quote}`);
+  }
+  return null;
+}
+
+function withComputedStructuralReclaim(market, klinesSnapshot, nowMs = Date.now()) {
+  const symbol = safeKlinesSymbolFromCandidate(market);
+  if (!symbol) return market;
+  const candles = getFreshClosedKlinesForSymbol(klinesSnapshot, symbol, { minCandles: 30, nowMs });
+  if (!candles) return market;
+  const computed = computeStructuralReclaimLevels(candles, { timeframe: klinesSnapshot && klinesSnapshot.timeframe || '1h' });
+  if (!computed) return market;
+  return { ...market, ...computed, computedStructuralKlinesSymbol: symbol };
+}
 export function evaluateTradingRadar({
   markets = [],
   scannerCandidates = [],
@@ -2127,6 +2156,7 @@ export function evaluateTradingRadar({
   selectedSymbol = null,
   filters = {},
   scannerContext = {},
+  klinesSnapshot = null,
 } = {}) {
   const nowIso = new Date(now).toISOString();
   const state = defaultTradingRadarState(nowIso);
@@ -2237,7 +2267,8 @@ export function evaluateTradingRadar({
        }
     }
 
-    const { universe, diagnostics, missingSignals } = buildRadarUniverse(mergedMarkets, { filters });
+    const marketsWithKlines = mergedMarkets.map((m) => withComputedStructuralReclaim(m, klinesSnapshot, now));
+    const { universe, diagnostics, missingSignals } = buildRadarUniverse(marketsWithKlines, { filters });
     const regime = evaluateMarketRegime(mergedMarkets);
     const allMissing = new Set(missingSignals);
     const safetyResults = [];
@@ -2333,6 +2364,17 @@ export function evaluateTradingRadar({
 
       return {
         symbol: m.symbol,
+        computedBreakdownLevel: m.computedBreakdownLevel,
+        computedReclaimLevel: m.computedReclaimLevel,
+        computedLostSupportLevel: m.computedLostSupportLevel,
+        computedFlushHigh: m.computedFlushHigh,
+        computedStructuralSource: m.computedStructuralSource,
+        computedStructuralTimeframe: m.computedStructuralTimeframe,
+        computedStructuralConfidence: m.computedStructuralConfidence,
+        computedStructuralReason: m.computedStructuralReason,
+        sourceCandleIndex: m.sourceCandleIndex,
+        breakdownCandleIndex: m.breakdownCandleIndex,
+        computedStructuralKlinesSymbol: m.computedStructuralKlinesSymbol,
         ...attentionMetadata,
         stage: stageInfo.stage,
         actionability: effectiveActionability,
@@ -2403,6 +2445,7 @@ export function evaluateTradingRadar({
           quoteVolume: round(m.quoteVolume, 0),
           depthUsd: round(m.depthUsd, 0),
           missingSignals: missingForMarket(m).slice(0, 8),
+          computedStructuralSourcePresent: Boolean(m.computedStructuralSource),
           hasStaticMicrostructure: microDiag.hasStaticMicrostructure,
           hasRollingMicrostructure: microDiag.hasRollingMicrostructure,
           missingAbsorptionFields: microDiag.missingAbsorptionFields,

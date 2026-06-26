@@ -666,3 +666,98 @@ test('C6-10: current price aliases do not count as reclaim source fields', () =>
   assert.equal(c.RECLAIM_SOURCE_FIELDS_PRESENT.includes('price'), false);
   assert.equal(c.RECLAIM_SOURCE_FIELDS_PRESENT.includes('currentPrice'), false);
 });
+
+// -- E2b-3 klines-to-Reclaim integration ------------------------------------
+function structuralKlines(now = NOW) {
+  const start = now - 50 * 60 * 60 * 1000;
+  const out = [];
+  for (let i = 0; i < 40; i += 1) {
+    const openTime = start + i * 60 * 60 * 1000;
+    let open = 100, close = 100, high = 101, low = 99, volume = 1000;
+    if (i === 15) { low = 90; close = 92; }
+    else if (i === 14 || i === 16) { low = 95; }
+    else if (i === 13 || i === 17) { low = 96; }
+    else if (i === 12 || i === 18) { low = 97; }
+    if (i === 25) { open = 95; close = 85; low = 84; high = 96; volume = 2500; }
+    out.push({ openTime, open, high, low, close, volume, closeTime: openTime + 60 * 60 * 1000 - 1 });
+  }
+  return out;
+}
+
+function freshKlinesSnapshot(symbol = 'KLINEUSDT', now = NOW) {
+  return {
+    timeframe: '1h',
+    updatedAtMs: now - 1000,
+    data: { [symbol]: structuralKlines(now) },
+  };
+}
+
+const KLINE_BASE = {
+  symbol: 'KLINEUSDT', baseAsset: 'KLINE', quoteAsset: 'USDT', status: 'TRADING',
+  quoteVolume24h: 250e6, bidPrice: 100, askPrice: 100.04, spreadPct: 0.03,
+  depthUsdWithin1Pct: 1_500_000, depthUsd: 1_500_000,
+  change24hPct: -9, change4hPct: 1.5, change1hPct: 0.8,
+  volumeSpike: 2, atrPct: 4, wickRecoveryPct: 45, noNewLowMinutes: 60,
+  rangeFormed: true, sellAggressionFading: true,
+  nearestSupply: 108, nextSupply: 114, meanReversionTarget: 120,
+  ...SAFE_META,
+};
+
+test('E2b-3: candidate with fresh klines receives computed structural fields', () => {
+  const c = candidate([KLINE_BASE], 'KLINEUSDT', { klinesSnapshot: freshKlinesSnapshot() });
+  assert.equal(c.computedBreakdownLevel, 90);
+  assert.equal(c.computedReclaimLevel, 90);
+  assert.equal(c.computedLostSupportLevel, 90);
+  assert.equal(c.computedStructuralSource, 'closed-candle-swing-low');
+  assert.equal(c.computedStructuralTimeframe, '1h');
+});
+
+test('E2b-3: computed structural source present is surfaced in diagnostics/output', () => {
+  const c = candidate([KLINE_BASE], 'KLINEUSDT', { klinesSnapshot: freshKlinesSnapshot() });
+  assert.equal(c.diagnostics.computedStructuralSourcePresent, true);
+  assert.ok(c.RECLAIM_LEVELS.some((lvl) => lvl.category === 'computed_structural'));
+});
+
+test('E2b-3: fallback 24h is not primary when computed structural exists', () => {
+  const c = candidate([{ ...KLINE_BASE, high_24h: 150 }], 'KLINEUSDT', { klinesSnapshot: freshKlinesSnapshot() });
+  assert.equal(c.RECLAIM_LEVEL_SOURCE, 'computed reclaim level');
+  assert.equal(c.reclaimV2.primary.category, 'computed_structural');
+  assert.ok(c.RECLAIM_LEVELS.some((lvl) => lvl.source === '24h high (fallback)'));
+});
+
+test('E2b-3: stale klines do not count', () => {
+  const stale = { ...freshKlinesSnapshot(), updatedAtMs: NOW - 3 * 60 * 60 * 1000 };
+  const c = candidate([KLINE_BASE], 'KLINEUSDT', { klinesSnapshot: stale });
+  assert.equal(c.computedStructuralSource, undefined);
+  assert.equal(c.diagnostics.computedStructuralSourcePresent, false);
+});
+
+test('E2b-3: missing klines do not count', () => {
+  const c = candidate([KLINE_BASE], 'KLINEUSDT', { klinesSnapshot: { timeframe: '1h', updatedAtMs: NOW - 1000, data: {} } });
+  assert.equal(c.computedStructuralSource, undefined);
+  assert.equal(c.diagnostics.computedStructuralSourcePresent, false);
+});
+
+test('E2b-3: explicit source still outranks computed source', () => {
+  const c = candidate([{ ...KLINE_BASE, breakdownLevel: 98 }], 'KLINEUSDT', { klinesSnapshot: freshKlinesSnapshot() });
+  assert.equal(c.RECLAIM_LEVEL, 98);
+  assert.equal(c.reclaimV2.primary.category, 'explicit');
+  assert.equal(c.RECLAIM_LEVEL_SOURCE, 'nearest breakdown level');
+});
+
+test('E2b-3: stop/currentPrice/invalidation/entry never become reclaim source', () => {
+  const c = candidate([{
+    ...KLINE_BASE,
+    symbol: 'NOKLINEUSDT', currentPrice: 100, entry: 100, stopLoss: 90,
+    hardInvalidation: 89, invalidationLevel: 88,
+  }], 'NOKLINEUSDT');
+  assert.ok(!c.RECLAIM_LEVELS.some((lvl) => /stop|invalidation|current|entry/i.test(lvl.source)));
+  assert.notEqual(c.RECLAIM_LEVEL_SOURCE, 'stop');
+});
+
+test('E2b-3: computed source alone does not unlock ENTRY_READY or Telegram', () => {
+  const c = candidate([KLINE_BASE], 'KLINEUSDT', { klinesSnapshot: freshKlinesSnapshot() });
+  assert.notEqual(c.actionability, 'ENTRY_READY');
+  assert.notEqual(c.STATUS, 'ENTRY_READY');
+  assert.equal(c.telegramEligible, false);
+});
