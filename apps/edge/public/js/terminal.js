@@ -3045,6 +3045,8 @@ function _applyViewDisplay(target, v) {
   } else if (name === 'calendar') {
     target.style.height = 'calc(100vh - 85px)';
     target.style.overflow = 'hidden';
+  } else if (name === 'gecko') {
+    target.style.display = 'block';
   }
 }
 
@@ -3087,6 +3089,13 @@ function sv(v, el) {
   });
   if (activeViewName === 'cockpit') requestAnimationFrame(() => {
     try { renderCockpit(); } catch (e) { console.warn('[Cockpit] render failed:', e && e.message); }
+  });
+  if (activeViewName === 'gecko') requestAnimationFrame(() => {
+    try {
+      if (typeof window.fetchGeckoHighlights === 'function') {
+        window.fetchGeckoHighlights(false);
+      }
+    } catch(e) {}
   });
   if (activeViewName === 'calendar') requestAnimationFrame(() => {
     try { renderCalendar(); } catch(e){}

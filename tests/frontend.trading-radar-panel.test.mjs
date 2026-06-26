@@ -480,3 +480,13 @@ test('Phase E2a: UI renders Computed structural source present natively and safe
   assert.match(terminalJs, /<b style="color:var\(--txt3\);">Computed structural source present:<\/b> \$\{hasComputed \? 'yes' : 'no'\}/);
   assert.match(terminalJs, /const hasExplicit = rCategory === 'explicit' \|\| \(rCategory === '' && rPrimary && !isFallback\);/);
 });
+
+test('GECKO UI rendering, view switching, and data fetching are correctly hooked up', () => {
+  assert.match(indexHtml, /onclick="sv\('gecko',this\)"[^>]*>GECKO/);
+  assert.match(indexHtml, /id="v-gecko"/);
+  assert.match(terminalJs, /name === 'gecko'/);
+  assert.match(terminalJs, /target\.style\.display = 'block'/);
+  assert.match(terminalJs, /if \(activeViewName === 'gecko'\)/);
+  assert.match(terminalJs, /window\.fetchGeckoHighlights/);
+  assert.match(terminalJs, /\/api\/coingecko-highlights/);
+});
