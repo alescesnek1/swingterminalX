@@ -485,12 +485,31 @@ test('GECKO UI rendering, view switching, and data fetching are correctly hooked
   // HTML: GECKO tab and view container exist
   assert.match(indexHtml, /onclick="sv\('gecko',this\)"[^>]*>GECKO/);
   assert.match(indexHtml, /id="v-gecko"/);
+  assert.match(indexHtml, /COINGECKO HIGHLIGHTS/);
+  assert.match(indexHtml, /gecko-container/);
+  assert.match(indexHtml, /gecko-grid/);
   // General display fix: _applyViewDisplay uses setProperty with !important
   assert.match(terminalJs, /target\.style\.setProperty\('display', flex \? 'flex' : 'block', 'important'\)/);
   // Hide loop uses setProperty with !important
   assert.match(terminalJs, /x\.style\.setProperty\('display', 'none', 'important'\)/);
   // GECKO fetch hook exists in sv()
   assert.match(terminalJs, /if \(activeViewName === 'gecko'\)/);
+  // Fetch and render functions
   assert.match(terminalJs, /window\.fetchGeckoHighlights/);
   assert.match(terminalJs, /\/api\/coingecko-highlights/);
+  assert.match(terminalJs, /window\.renderGeckoHighlights/);
+  // Card/grid layout classes
+  assert.match(terminalJs, /gecko-card/);
+  assert.match(terminalJs, /gecko-card__head/);
+  assert.match(terminalJs, /gecko-row/);
+  assert.match(terminalJs, /gecko-grid/);
+  // Section ordering
+  assert.match(terminalJs, /_geckoSortSections/);
+  assert.match(terminalJs, /_geckoSectionOrder/);
+  // Junk row filtering
+  assert.match(terminalJs, /_geckoIsValidItem/);
+  // Missing data dash helper
+  assert.match(terminalJs, /_geckoDash/);
+  // Degraded empty state
+  assert.match(terminalJs, /CoinGecko highlights unavailable or empty/);
 });

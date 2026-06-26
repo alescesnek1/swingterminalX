@@ -11106,12 +11106,46 @@ class LocalPaperBot {
 const paperBotInstance = new LocalPaperBot();
 window.paperBotInstance = paperBotInstance;
 
-
 // ============================================================================
 // COINGECKO HIGHLIGHTS (READ-ONLY)
 // ============================================================================
 let _geckoData = null;
 let _geckoFilter = 'all';
+
+// Priority order for sections — important ones first.
+const _geckoSectionOrder = [
+  'trending_coins', 'top_gainers', 'top_losers', 'new_coins',
+  'highest_volume', 'incoming_token_unlocks', 'most_viewed',
+  'price_change_since_ath', 'most_voted_coins', 'upcoming_coins',
+  'trending_categories'
+];
+
+function _geckoSortSections(sections) {
+  const order = new Map(_geckoSectionOrder.map((k, i) => [k, i]));
+  return [...sections].sort((a, b) => {
+    const ia = order.has(a.key) ? order.get(a.key) : 999;
+    const ib = order.has(b.key) ? order.get(b.key) : 999;
+    return ia - ib;
+  });
+}
+
+// Filter out junk rows: empty name, emoji-only, single char, navigation noise.
+function _geckoIsValidItem(item) {
+  if (!item || !item.name) return false;
+  const n = String(item.name).trim();
+  if (n.length < 2) return false;
+  // Reject emoji-only strings (basic heuristic)
+  if (/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE00}-\u{FE0F}\s]+$/u.test(n)) return false;
+  // Reject obvious nav noise
+  const lower = n.toLowerCase();
+  if (['see more', 'view more', 'show more', 'load more', 'next', 'previous'].includes(lower)) return false;
+  return true;
+}
+
+function _geckoDash(v) {
+  if (v === null || v === undefined || v === '') return '\u2014';
+  return _esc(String(v));
+}
 
 window.fetchGeckoHighlights = async function(force = false) {
   const statusEl = document.getElementById('gecko-status');
@@ -11119,22 +11153,35 @@ window.fetchGeckoHighlights = async function(force = false) {
   const container = document.getElementById('gecko-container');
   if (!statusEl || !container) return;
   try {
-    statusEl.textContent = 'LOADING'; statusEl.style.color = 'var(--acc)';
+    statusEl.textContent = 'LOADING';
+    statusEl.style.color = 'var(--acc)';
+    statusEl.style.background = 'var(--s3)';
     const url = '/api/coingecko-highlights' + (force ? '?_t=' + Date.now() : '');
     const res = await fetch(url);
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     _geckoData = data;
-    if (data.ok) { statusEl.textContent = 'LIVE'; statusEl.style.color = 'var(--grn)'; } 
-    else { statusEl.textContent = 'DEGRADED'; statusEl.style.color = 'var(--org)'; }
-    let timeStr = '—';
+    if (data.ok) {
+      statusEl.textContent = 'LIVE';
+      statusEl.style.color = 'var(--grn)';
+      statusEl.style.background = 'rgba(0,200,100,.12)';
+    } else {
+      statusEl.textContent = 'DEGRADED';
+      statusEl.style.color = 'var(--org)';
+      statusEl.style.background = 'rgba(255,160,0,.12)';
+    }
+    let timeStr = '\u2014';
     if (data.fetchedAt) timeStr = new Date(data.fetchedAt).toLocaleTimeString('cs-CZ');
-    infoEl.textContent = `${data.sections ? data.sections.length : 0} sections | ${data.diagnostics ? data.diagnostics.itemCount : 0} items | Updated: ${timeStr}`;
+    const secCount = data.sections ? data.sections.length : 0;
+    const itemCount = data.diagnostics ? data.diagnostics.itemCount : 0;
+    infoEl.textContent = `${secCount} sections \u00B7 ${itemCount} items \u00B7 ${timeStr}`;
     window.renderGeckoHighlights();
   } catch (err) {
-    statusEl.textContent = 'ERROR'; statusEl.style.color = 'var(--red)';
+    statusEl.textContent = 'ERROR';
+    statusEl.style.color = 'var(--red)';
+    statusEl.style.background = 'rgba(255,60,60,.12)';
     if (infoEl) infoEl.textContent = err.message;
-    if (!_geckoData) container.innerHTML = `<div style="padding:40px;text-align:center;color:var(--txt3)">Nepodařilo se načíst data: ${_esc(err.message)}</div>`;
+    if (!_geckoData) container.innerHTML = `<div class="gecko-empty">CoinGecko highlights unavailable: ${_esc(err.message)}</div>`;
   }
 };
 
@@ -11148,41 +11195,88 @@ window.filterGecko = function(filterKey, el) {
 window.renderGeckoHighlights = function() {
   const container = document.getElementById('gecko-container');
   if (!container || !_geckoData || !_geckoData.sections) return;
+
   if (_geckoData.sections.length === 0) {
-    container.innerHTML = `<div style="padding:40px;text-align:center;color:var(--txt3)">${_esc(_geckoData.diagnostics?.warnings?.join(' | ') || 'Žádná data nejsou k dispozici (bezpečnostní degradace).')}</div>`;
+    container.innerHTML = `<div class="gecko-empty">${_esc(_geckoData.diagnostics?.warnings?.join(' | ') || 'CoinGecko highlights unavailable or empty.')}</div>`;
     return;
   }
-  let html = '';
-  for (const sec of _geckoData.sections) {
+
+  const sorted = _geckoSortSections(_geckoData.sections);
+  let cards = '';
+
+  for (const sec of sorted) {
     if (_geckoFilter !== 'all' && sec.key !== _geckoFilter) continue;
-    html += `<div class="gecko-section" style="margin-bottom:12px;">
-        <div class="ph" style="border-radius:var(--rad) var(--rad) 0 0">
-          <span class="pt">${_esc(sec.title).toUpperCase()}</span><span class="ps">${sec.items.length} items</span>
-        </div>
-        <div style="background:var(--s2);border:1px solid var(--b1);border-top:none;border-radius:0 0 var(--rad) var(--rad);padding:8px;display:flex;flex-direction:column;gap:4px;">`;
-    if (sec.items.length === 0) {
-      html += `<div style="padding:12px;text-align:center;color:var(--txt3)">Žádná data</div>`;
+    const validItems = sec.items.filter(_geckoIsValidItem);
+
+    // Section card
+    cards += `<div class="gecko-card">`;
+    cards += `<div class="gecko-card__head">`;
+    cards += `<span class="gecko-card__title">${_esc(sec.title).toUpperCase()}</span>`;
+    cards += `<span class="gecko-card__count">${validItems.length}</span>`;
+    cards += `</div>`;
+    cards += `<div class="gecko-card__body">`;
+
+    if (validItems.length === 0) {
+      cards += `<div class="gecko-card__empty">\u2014 no items \u2014</div>`;
     } else {
-      html += `<div style="display:grid;grid-template-columns:40px 2fr 1fr 1fr;gap:8px;padding:4px 8px;font-size:9px;color:var(--txt3);border-bottom:1px solid var(--b1);margin-bottom:4px;">
-          <span>RANK</span><span>COIN</span><span style="text-align:right">PRICE</span><span style="text-align:right">24H %</span>
-        </div>`;
-      for (const item of sec.items) {
-        let color = 'var(--txt2)';
-        if (item.change24hPct > 0) color = 'var(--grn)';
-        if (item.change24hPct < 0) color = 'var(--red)';
-        let linkHtml = _esc(item.name);
-        if (item.href) linkHtml = `<a href="${_esc(item.href)}" target="_blank" style="color:var(--txt1);text-decoration:none">${_esc(item.name)}</a>`;
-        html += `<div style="display:grid;grid-template-columns:40px 2fr 1fr 1fr;gap:8px;padding:4px 8px;font-size:11px;align-items:center;">
-            <span style="color:var(--txt3)">${item.rank || '-'}</span>
-            <span style="font-weight:600;display:flex;align-items:center;gap:6px">${linkHtml} <span style="font-size:9px;color:var(--txt3);font-weight:400">${_esc(item.symbol)}</span></span>
-            <span style="text-align:right;font-family:'IBM Plex Mono', monospace">${_esc(item.priceText)}</span>
-            <span style="text-align:right;color:${color}">${_esc(item.change24hText)}</span>
-          </div>`;
+      // Header row
+      cards += `<div class="gecko-row gecko-row--hdr"><span class="gecko-col-rank">#</span><span class="gecko-col-name">COIN</span><span class="gecko-col-price">PRICE</span><span class="gecko-col-chg">24H</span></div>`;
+      for (const item of validItems) {
+        let chgColor = 'var(--txt3)';
+        const chgVal = item.change24hPct;
+        if (typeof chgVal === 'number' && chgVal > 0) chgColor = 'var(--grn)';
+        if (typeof chgVal === 'number' && chgVal < 0) chgColor = 'var(--red)';
+
+        let nameHtml = _esc(item.name);
+        if (item.href) nameHtml = `<a href="${_esc(item.href)}" target="_blank" rel="noopener" class="gecko-link">${_esc(item.name)}</a>`;
+        const symHtml = item.symbol ? `<span class="gecko-sym">${_esc(item.symbol)}</span>` : '';
+
+        cards += `<div class="gecko-row">`;
+        cards += `<span class="gecko-col-rank">${item.rank || '\u2014'}</span>`;
+        cards += `<span class="gecko-col-name">${nameHtml}${symHtml}</span>`;
+        cards += `<span class="gecko-col-price">${_geckoDash(item.priceText)}</span>`;
+        cards += `<span class="gecko-col-chg" style="color:${chgColor}">${_geckoDash(item.change24hText)}</span>`;
+        cards += `</div>`;
       }
     }
-    html += `</div></div>`;
+    cards += `</div></div>`;
   }
-  container.innerHTML = html || `<div style="padding:40px;text-align:center;color:var(--txt3)">Tato sekce není v datech nalezena.</div>`;
+
+  if (!cards) {
+    container.innerHTML = `<div class="gecko-empty">No sections match the selected filter.</div>`;
+    return;
+  }
+
+  // Inject scoped styles once (idempotent)
+  if (!document.getElementById('gecko-styles')) {
+    const style = document.createElement('style');
+    style.id = 'gecko-styles';
+    style.textContent = `
+      .gecko-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;width:100%}
+      @media(max-width:900px){.gecko-grid{grid-template-columns:1fr}}
+      .gecko-card{background:var(--s2);border:1px solid var(--b1);border-radius:var(--rad);overflow:hidden}
+      .gecko-card__head{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:var(--s3);border-bottom:1px solid var(--b1)}
+      .gecko-card__title{font-size:11px;font-weight:700;letter-spacing:.4px;color:var(--txt1)}
+      .gecko-card__count{font-size:10px;color:var(--txt3);background:var(--s1);padding:1px 7px;border-radius:3px}
+      .gecko-card__body{padding:6px 0}
+      .gecko-card__empty{padding:16px;text-align:center;color:var(--txt3);font-size:11px}
+      .gecko-row{display:grid;grid-template-columns:36px 1fr auto auto;gap:6px;padding:4px 14px;align-items:center;font-size:12px}
+      .gecko-row:hover{background:var(--s3)}
+      .gecko-row--hdr{font-size:9px;color:var(--txt3);font-weight:600;letter-spacing:.3px;padding-bottom:4px;border-bottom:1px solid var(--b1);margin-bottom:2px}
+      .gecko-row--hdr:hover{background:transparent}
+      .gecko-col-rank{color:var(--txt3);font-size:11px;text-align:center}
+      .gecko-col-name{font-weight:600;color:var(--txt1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:5px}
+      .gecko-col-price{text-align:right;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--txt2);min-width:70px}
+      .gecko-col-chg{text-align:right;font-family:'IBM Plex Mono',monospace;font-size:11px;min-width:60px}
+      .gecko-sym{font-size:9px;color:var(--txt3);font-weight:400}
+      .gecko-link{color:var(--txt1);text-decoration:none}
+      .gecko-link:hover{text-decoration:underline;color:var(--acc)}
+      .gecko-empty{padding:40px 20px;text-align:center;color:var(--txt3);font-size:12px;grid-column:1/-1}
+    `;
+    document.head.appendChild(style);
+  }
+
+  container.innerHTML = cards;
 };
 
 document.addEventListener('DOMContentLoaded', () => {
