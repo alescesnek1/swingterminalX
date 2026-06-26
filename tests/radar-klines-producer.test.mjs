@@ -146,3 +146,9 @@ test('failed fetch does not crash entire run; reports diagnostics', async () => 
   assert.equal(result.snapshot.diagnostics.stored, 1);
   assert.equal(result.diagnostics.errors[0].symbol, 'BEATUSDT');
 });
+
+test('robust CLI guard is used instead of fragile import.meta.url', () => {
+  const source = readFileSync(new URL('../scripts/radar/klines-producer.mjs', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /import\.meta\.url\s*===\s*`file:\/\/\$\{process\.argv\[1\]\}`/);
+  assert.match(source, /path\.resolve\(fileURLToPath\(import\.meta\.url\)\)/);
+});

@@ -1,5 +1,16 @@
 #!/usr/bin/env node
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 import { normalizeKlinesSnapshot } from './klines-snapshot.mjs';
+
+function isMainModule() {
+  if (!process.argv[1]) return false;
+  try {
+    return path.resolve(fileURLToPath(import.meta.url)) === path.resolve(process.argv[1]);
+  } catch (err) {
+    return false;
+  }
+}
 
 const DEFAULT_TIMEFRAME = '1h';
 const SUPPORTED_TIMEFRAMES = new Set(['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '1d']);
@@ -163,7 +174,7 @@ function readCliArgs(argv) {
   return opts;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule()) {
   runKlinesProducer(readCliArgs(process.argv.slice(2)))
     .then((result) => {
       console.log(JSON.stringify({

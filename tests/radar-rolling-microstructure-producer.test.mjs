@@ -145,3 +145,9 @@ test('collect mode does not require previous snapshot and remains untrusted if d
   assert.equal(fetchedPrevious, undefined, 'should not fetch previous snapshot');
   assert.equal(res.snapshot.trusted, false);
 });
+
+test('robust CLI guard is used instead of fragile import.meta.url', () => {
+  const source = readFileSync(new URL('../scripts/radar/rolling-microstructure-producer.mjs', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /import\.meta\.url\s*===\s*`file:\/\/\$\{process\.argv\[1\]\}`/);
+  assert.match(source, /path\.resolve\(fileURLToPath\(import\.meta\.url\)\)/);
+});

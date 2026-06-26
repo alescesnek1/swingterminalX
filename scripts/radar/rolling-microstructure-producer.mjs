@@ -1,5 +1,16 @@
 #!/usr/bin/env node
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 import { normalizeRollingMicrostructureSnapshot } from './rolling-microstructure-snapshot.mjs';
+
+function isMainModule() {
+  if (!process.argv[1]) return false;
+  try {
+    return path.resolve(fileURLToPath(import.meta.url)) === path.resolve(process.argv[1]);
+  } catch (err) {
+    return false;
+  }
+}
 
 const DEFAULT_TOP_N = 20;
 const MAX_TOP_N = 50;
@@ -253,7 +264,7 @@ export function readCliArgs(argv) {
   return opts;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule()) {
   runRollingMicrostructureProducer(readCliArgs(process.argv.slice(2)))
     .then((result) => {
       console.log(JSON.stringify({
