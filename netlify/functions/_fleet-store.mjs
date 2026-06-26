@@ -78,6 +78,7 @@ function emptyFleet() {
     autoTrader: null,      // operator-requested autonomous mode/status; no secrets, no order execution
     autoMarketSnapshot: null, // latest sanitized PUBLIC market snapshot posted by a local worker (no secrets, no orders)
     radarMicrostructureSnapshot: null, // latest sanitized static microstructure (depth/spread/funding) posted by the read-only producer; no secrets, no orders. MUST be declared here or normalize() drops it on every load.
+    radarKlinesSnapshot: null, // latest cached kline snapshot for read-only RADAR analysis; no secrets, no orders. MUST be declared here or normalize() drops it on every load.
     radarContext: { scannerCandidates: [], receivedAt: null }, // context pushed by the browser
     tradingRadar: emptyTradingRadar(), // read-only advisory panel state; no orders, no intents, no gates
     lastRegime: null,     // { regime, entriesAllowed, reason[], metrics, updatedAt }
@@ -128,6 +129,16 @@ function normalize(data) {
       base.radarMicrostructureSnapshot = null;
     } else if (typeof base.radarMicrostructureSnapshot.data !== 'object' || base.radarMicrostructureSnapshot.data === null || Array.isArray(base.radarMicrostructureSnapshot.data)) {
       base.radarMicrostructureSnapshot.data = {};
+    }
+  }
+  // radarKlinesSnapshot is either null or an object carrying a data/symbols map.
+  // Candle-level validation lives in scripts/radar/klines-snapshot.mjs.
+  if (base.radarKlinesSnapshot !== null) {
+    const snap = base.radarKlinesSnapshot;
+    const hasDataMap = snap && typeof snap.data === 'object' && snap.data !== null && !Array.isArray(snap.data);
+    const hasSymbolsMap = snap && typeof snap.symbols === 'object' && snap.symbols !== null && !Array.isArray(snap.symbols);
+    if (typeof snap !== 'object' || Array.isArray(snap) || (!hasDataMap && !hasSymbolsMap)) {
+      base.radarKlinesSnapshot = null;
     }
   }
   return base;

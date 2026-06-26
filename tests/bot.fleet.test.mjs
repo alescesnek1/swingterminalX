@@ -20,6 +20,7 @@ delete process.env.BOT_ALLOW_REAL_ORDERS;
 delete process.env.BOT_GLOBAL_KILL_SWITCH;
 
 const { default: handler } = await import('../netlify/functions/bot.mjs');
+const fleetStore = await import('../netlify/functions/_fleet-store.mjs');
 
 const ORIGIN = 'http://localhost';
 const WORKER_TOKEN = 'test-worker-token';
@@ -63,6 +64,52 @@ async function call(req) {
   const json = await res.json().catch(() => ({}));
   return { status: res.status, json };
 }
+
+test('emptyFleet declares radarKlinesSnapshot', () => {
+  assert.ok(
+    Object.prototype.hasOwnProperty.call(fleetStore.emptyFleet(), 'radarKlinesSnapshot'),
+    'radarKlinesSnapshot must be declared in emptyFleet() or it vanishes on reload',
+  );
+  assert.equal(fleetStore.emptyFleet().radarKlinesSnapshot, null);
+});
+
+test('valid radarKlinesSnapshot survives normalized reload', async () => {
+  const fleet = fleetStore.emptyFleet();
+  fleet.radarKlinesSnapshot = {
+    updatedAtMs: Date.now(),
+    timeframe: '1h',
+    data: {
+      BTCUSDT: [
+        { openTime: 1, open: 100, high: 101, low: 99, close: 100.5, volume: 10, closeTime: 2 },
+      ],
+    },
+  };
+  await fleetStore.saveFleet(fleet);
+
+  const reloaded = await fleetStore.loadFleet();
+  assert.ok(reloaded.radarKlinesSnapshot, 'radarKlinesSnapshot survived normalize');
+  assert.equal(reloaded.radarKlinesSnapshot.data.BTCUSDT[0].close, 100.5);
+});
+
+test('invalid radarKlinesSnapshot is normalized to null', async () => {
+  const invalidValues = [
+    'snapshot',
+    123,
+    [],
+    true,
+    { updatedAtMs: Date.now() },
+    { data: [] },
+    { symbols: [] },
+  ];
+
+  for (const value of invalidValues) {
+    const fleet = fleetStore.emptyFleet();
+    fleet.radarKlinesSnapshot = value;
+    await fleetStore.saveFleet(fleet);
+    const reloaded = await fleetStore.loadFleet();
+    assert.equal(reloaded.radarKlinesSnapshot, null, `invalid value normalized to null: ${JSON.stringify(value)}`);
+  }
+});
 
 // Report an OPEN position for sessionId via the worker position-result route. With
 // no pre-existing session this recovers an (unowned) visible session holding it.
