@@ -65,6 +65,39 @@ async function call(req) {
   return { status: res.status, json };
 }
 
+test('emptyFleet declares radarRollingMicrostructureSnapshot', () => {
+  assert.ok(
+    Object.prototype.hasOwnProperty.call(fleetStore.emptyFleet(), 'radarRollingMicrostructureSnapshot'),
+    'radarRollingMicrostructureSnapshot must be declared in emptyFleet() or it vanishes on reload',
+  );
+  assert.equal(fleetStore.emptyFleet().radarRollingMicrostructureSnapshot, null);
+});
+
+test('valid radarRollingMicrostructureSnapshot survives normalized reload', async () => {
+  const fleet = fleetStore.emptyFleet();
+  fleet.radarRollingMicrostructureSnapshot = {
+    provider: 'manual-public',
+    updatedAtMs: Date.now(),
+    trusted: false,
+    data: { BTCUSDT: { bidDepthRebuildPct: 10, diagnostics: { samples: 1 } } },
+  };
+  await fleetStore.saveFleet(fleet);
+
+  const reloaded = await fleetStore.loadFleet();
+  assert.ok(reloaded.radarRollingMicrostructureSnapshot, 'rolling snapshot survived normalize');
+  assert.equal(reloaded.radarRollingMicrostructureSnapshot.data.BTCUSDT.bidDepthRebuildPct, 10);
+});
+
+test('invalid radarRollingMicrostructureSnapshot is normalized to null', async () => {
+  const invalidValues = ['snapshot', 123, [], true, { updatedAtMs: Date.now() }, { data: [] }, { symbols: [] }];
+  for (const value of invalidValues) {
+    const fleet = fleetStore.emptyFleet();
+    fleet.radarRollingMicrostructureSnapshot = value;
+    await fleetStore.saveFleet(fleet);
+    const reloaded = await fleetStore.loadFleet();
+    assert.equal(reloaded.radarRollingMicrostructureSnapshot, null, `invalid value normalized to null: ${JSON.stringify(value)}`);
+  }
+});
 test('emptyFleet declares radarKlinesSnapshot', () => {
   assert.ok(
     Object.prototype.hasOwnProperty.call(fleetStore.emptyFleet(), 'radarKlinesSnapshot'),

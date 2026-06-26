@@ -51,8 +51,20 @@ const MICRO_KEYS = [
   'marketSellRatio',
 ];
 
-function candidateFor(symbol, extraMarkets = []) {
-  const state = evaluateTradingRadar({ markets: [BTC, ETH, ...extraMarkets], source: 'test', now: NOW });
+function rollingSnapshot(rows, extra = {}) {
+  return { provider: 'test-rolling', trusted: true, updatedAtMs: NOW, data: rows, ...extra };
+}
+
+const ABS_ROLLING_ROW = {
+  bidDepthRebuildPct: 14,
+  marketSellRatio: 0.50,
+  openInterestChangePct: -7,
+  longLiquidationSpike: 2.2,
+  flow: { takerBuySellRatio: 1.4, cumulativeDeltaPct: 1.2, aggressiveSellExhaustion: true },
+};
+
+function candidateFor(symbol, extraMarkets = [], extra = {}) {
+  const state = evaluateTradingRadar({ markets: [BTC, ETH, ...extraMarkets], source: 'test', now: NOW, ...extra });
   return { state, c: state.candidates.find((x) => x.symbol === symbol) };
 }
 
@@ -148,7 +160,7 @@ test('F: static depth/spread/funding present but rolling absent — Absorb/Recla
 
 // ── G) Candidate diagnostics: full rolling data present ──────────────────────
 test('G: with real rolling absorption data, diagnostics report it present and not the blocker', () => {
-  const { c } = candidateFor('ABSUSDT', [WITH_MICRO]);
+  const { c } = candidateFor('ABSUSDT', [WITH_MICRO], { rollingMicrostructureSnapshot: rollingSnapshot({ ABSUSDT: ABS_ROLLING_ROW }) });
   assert.ok(c);
   assert.equal(c.hasStaticMicrostructure, true);
   assert.equal(c.hasRollingMicrostructure, true);

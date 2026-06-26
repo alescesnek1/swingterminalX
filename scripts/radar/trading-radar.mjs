@@ -11,6 +11,7 @@ import { buildSafetyDiagnostics, evaluateKnownSafety, classifyMarketSafety } fro
 import { matchCoinGeckoTrendingToMarketSymbol } from '../market/coingecko-highlights.mjs';
 import { computeStructuralReclaimLevels } from './structural-reclaim.mjs';
 import { getFreshClosedKlinesForSymbol } from './klines-snapshot.mjs';
+import { getFreshRollingMicrostructureForSymbol, normalizeRollingMicrostructureSnapshot } from './rolling-microstructure-snapshot.mjs';
 const WEIRD_BASE_RE = /(UP|DOWN|BULL|BEAR)$|\d+(L|S)$/;
 const QUOTES = new Set(['USDC', 'USDT']);
 
@@ -322,6 +323,7 @@ function signalBooleans(m, regime) {
   const shortLiq = n(m.shortLiquidationSpike);
   const longLiq = n(m.longLiquidationSpike ?? m.longLiquidationUsd);
   const buyDominance = n(m.marketBuyVolumeDominance ?? m.buyVolumeDominance);
+  const flow = m && m.flow && typeof m.flow === 'object' ? m.flow : null;
   const retestHeld = m.retestHeld === true;
   const absorptionScore = n(m.absorptionScore);
   const reclaim = m.reclaimConfirmed === true || m.vwapReclaimed === true || m.rangeHighReclaimed === true;
@@ -334,6 +336,9 @@ function signalBooleans(m, regime) {
     || (n(m.distanceToSupportPct) != null && n(m.distanceToSupportPct) <= 0.75);
   const deltaImproves = m.deltaImproves === true
     || n(m.deltaImprovementPct, 0) > 0
+    || n(flow && flow.cumulativeDeltaPct, 0) > 0
+    || n(flow && flow.takerBuySellRatio, 0) >= 1
+    || (flow && flow.aggressiveSellExhaustion === true)
     || buyDominance >= 0.55;
 
   const dropVsVol = atrPct != null ? Math.abs(c24) / Math.max(atrPct, 0.1) : null;
@@ -725,7 +730,9 @@ function radarScorePack(market, regime, stageInfo, levels, safety) {
   if (!derivDataPresent) execMissing.push('derivatives');
   if (market.buyVolumeDominance == null && market.marketBuyVolumeDominance == null
       && market.cumulativeDelta == null && market.takerBuySellRatio == null
-      && market.deltaImprovementPct == null) execMissing.push('flow');
+      && market.deltaImprovementPct == null
+      && !microPresent(market.flow && market.flow.cumulativeDeltaPct)
+      && !microPresent(market.flow && market.flow.takerBuySellRatio)) execMissing.push('flow');
   const execMissingPenalty = Math.min(12, execMissing.length * 3);
 
   const setup = clamp(dislocation * 0.20 + flush * 0.20 + stabilization * 0.20 + reclaim * 0.15 + deriv * 0.10 + marketRegime * 0.15);
@@ -1288,10 +1295,7 @@ function radarMicrostructureDiagnostics(m, checklist = null) {
   // realAbsorptionData would be true: at least one genuinely measured absorption
   // order-flow / order-book field is present. Kept in lock-step so the UI never
   // claims "rolling present" while the absorption gate still treats it as absent.
-  const hasRollingMicrostructure = m.absorptionScore != null
-    || microPresent(m.bidDepthRebuildPct)
-    || m.bidAbsorption != null
-    || m.aggressiveSellsFailed != null;
+  const hasRollingMicrostructure = m.rollingMicrostructurePresent === true || m.rollingMicrostructureTrusted === true;
 
   const absorptionStatus = checklist && checklist.absorption ? checklist.absorption.status : null;
   const reclaimStatus = checklist && checklist.squeezeOrReclaim ? checklist.squeezeOrReclaim.status : null;
@@ -1385,8 +1389,10 @@ function evaluateAbsorbV2(market, regime, dataQuality) {
   const slippageVal = microPresent(m.slippagePct) ? Number(m.slippagePct) : null;
   const bidRebuildVal = microPresent(m.bidDepthRebuildPct) ? Number(m.bidDepthRebuildPct)
     : microPresent(m.bidDepthChangePct) ? Number(m.bidDepthChangePct) : null;
+  const flow = m && m.flow && typeof m.flow === 'object' ? m.flow : null;
+  const flowDeltaPresent = microPresent(flow && flow.cumulativeDeltaPct) || microPresent(flow && flow.takerBuySellRatio) || (flow && flow.aggressiveSellExhaustion != null);
   const deltaPresent = microPresent(m.deltaImprovementPct) || microPresent(m.marketBuyVolumeDominance)
-    || microPresent(m.buyVolumeDominance) || microPresent(m.cumulativeDelta) || microPresent(m.takerBuySellRatio);
+    || microPresent(m.buyVolumeDominance) || microPresent(m.cumulativeDelta) || microPresent(m.takerBuySellRatio) || flowDeltaPresent;
   const strict = {
     aggressiveSellsFailed: {
       present: m.aggressiveSellsFailed != null || microPresent(m.marketSellRatio),
@@ -1395,8 +1401,8 @@ function evaluateAbsorbV2(market, regime, dataQuality) {
     priceImpactWeakVsSellVolume: {
       // absorptionScore is the system's measure of price holding despite sell
       // pressure (= price impact weak vs sell volume). Real field, real threshold.
-      present: microPresent(m.absorptionScore),
-      pass: microPresent(m.absorptionScore) && Number(m.absorptionScore) >= 70,
+      present: microPresent(m.absorptionScore) || (flow && flow.aggressiveSellExhaustion != null),
+      pass: (microPresent(m.absorptionScore) && Number(m.absorptionScore) >= 70) || (flow && flow.aggressiveSellExhaustion === true),
     },
     bidDepthRebuildPct: {
       present: bidRebuildVal != null,
@@ -1411,6 +1417,9 @@ function evaluateAbsorbV2(market, regime, dataQuality) {
       present: deltaPresent,
       pass: (microPresent(m.deltaImprovementPct) && Number(m.deltaImprovementPct) > 0)
         || Number(m.marketBuyVolumeDominance ?? m.buyVolumeDominance ?? 0) >= 0.55
+        || (microPresent(flow && flow.cumulativeDeltaPct) && Number(flow.cumulativeDeltaPct) > 0)
+        || (microPresent(flow && flow.takerBuySellRatio) && Number(flow.takerBuySellRatio) >= 1)
+        || (flow && flow.aggressiveSellExhaustion === true)
         || m.deltaImproves === true,
     },
     spreadAndSlippageHealthy: {
@@ -1943,15 +1952,13 @@ function radarDataQuality(market, scores, missing) {
     || microPresent(market.cumulativeDelta)
     || microPresent(market.takerBuySellRatio)
     || microPresent(market.deltaImprovementPct)
+    || microPresent(market.flow && market.flow.cumulativeDeltaPct)
+    || microPresent(market.flow && market.flow.takerBuySellRatio)
     || market.aggressiveSellsFailed != null
     || market.bidAbsorption != null;
-  const hasRolling = market.absorptionScore != null
-    || microPresent(market.bidDepthRebuildPct)
-    || microPresent(market.bidDepthChangePct)
-    || market.bidAbsorption != null
-    || market.aggressiveSellsFailed != null
-    || hasFlow;
+  const hasRolling = market.rollingMicrostructurePresent === true || market.rollingMicrostructureTrusted === true;
   const microstructureTrusted = hasDepth && hasSpread && hasFlow && hasRolling
+    && market.rollingMicrostructureTrusted === true
     && market.microstructureStale !== true
     && market.staticMicrostructureTrusted !== false;
   const microstructureMissing = !hasDepth || !hasSpread || !hasFlow;
@@ -1972,6 +1979,9 @@ function radarDataQuality(market, scores, missing) {
     microstructureTrusted,
     microstructureMissing,
     derivativesMissing: derivMissing,
+    hasStaticMicrostructure: hasDepth || hasSpread,
+    hasRollingMicrostructure: hasRolling,
+    staticMicrostructureTrusted: market.staticMicrostructureTrusted !== false,
     missingData: Array.from(missingSet).sort(),
   };
 }
@@ -2136,6 +2146,30 @@ function safeKlinesSymbolFromCandidate(candidate = {}) {
   return null;
 }
 
+function withRollingMicrostructureSnapshot(market, rollingMicrostructureSnapshot, nowMs = Date.now()) {
+  const symbol = safeKlinesSymbolFromCandidate(market);
+  if (!symbol || !rollingMicrostructureSnapshot) return market;
+  const normalized = normalizeRollingMicrostructureSnapshot(rollingMicrostructureSnapshot, { nowMs });
+  if (normalized.stale) return { ...market, microstructureStale: true, rollingMicrostructurePresent: false, rollingMicrostructureStatus: 'STALE' };
+  if (normalized.trusted !== true) return { ...market, staticMicrostructureTrusted: false, rollingMicrostructurePresent: false, rollingMicrostructureStatus: 'UNTRUSTED' };
+  const row = getFreshRollingMicrostructureForSymbol(normalized, symbol, { nowMs });
+  if (!row) return market;
+  return {
+    ...market,
+    bidDepthRebuildPct: row.bidDepthRebuildPct ?? market.bidDepthRebuildPct,
+    marketSellRatio: row.marketSellRatio ?? market.marketSellRatio,
+    openInterestChangePct: row.openInterestChangePct ?? market.openInterestChangePct,
+    longLiquidationSpike: row.longLiquidationSpike ?? market.longLiquidationSpike,
+    flow: row.flow ? { ...(market.flow && typeof market.flow === 'object' ? market.flow : {}), ...row.flow } : market.flow,
+    rollingMicrostructureSymbol: symbol,
+    rollingMicrostructurePresent: true,
+    rollingMicrostructureTrusted: row.strictReady === true,
+    rollingMicrostructureMissingFields: row.missingFields,
+    rollingMicrostructureUpdatedAtMs: normalized.updatedAtMs,
+    rollingMicrostructureStatus: row.strictReady === true ? 'READY' : 'INCOMPLETE',
+  };
+}
+
 function withComputedStructuralReclaim(market, klinesSnapshot, nowMs = Date.now()) {
   const symbol = safeKlinesSymbolFromCandidate(market);
   if (!symbol) return market;
@@ -2157,6 +2191,7 @@ export function evaluateTradingRadar({
   filters = {},
   scannerContext = {},
   klinesSnapshot = null,
+  rollingMicrostructureSnapshot = null,
 } = {}) {
   const nowIso = new Date(now).toISOString();
   const state = defaultTradingRadarState(nowIso);
@@ -2267,9 +2302,10 @@ export function evaluateTradingRadar({
        }
     }
 
-    const marketsWithKlines = mergedMarkets.map((m) => withComputedStructuralReclaim(m, klinesSnapshot, now));
+    const marketsWithRolling = mergedMarkets.map((m) => withRollingMicrostructureSnapshot(m, rollingMicrostructureSnapshot, now));
+    const marketsWithKlines = marketsWithRolling.map((m) => withComputedStructuralReclaim(m, klinesSnapshot, now));
     const { universe, diagnostics, missingSignals } = buildRadarUniverse(marketsWithKlines, { filters });
-    const regime = evaluateMarketRegime(mergedMarkets);
+    const regime = evaluateMarketRegime(marketsWithRolling);
     const allMissing = new Set(missingSignals);
     const safetyResults = [];
     const candidates = universe.map((m) => {
@@ -2437,7 +2473,7 @@ export function evaluateTradingRadar({
         // Telegram eligibility is fail-safe: V1 ENTRY_READY + all conditions +
         // confidence>=75 + concrete entry/stop + safety strictly SAFE. UNKNOWN or
         // DANGER safety can never be alertable here.
-        telegramEligible: entryReadyV1 && v1.allRadarConditionsPassed && adjustedConfidence >= 75 && levels.entryZone != null && (levels.invalidationLevel != null || levels.suggestedStop != null) && safety.safetyStatus === 'SAFE',
+        telegramEligible: entryReadyV1 && v1.allRadarConditionsPassed && adjustedConfidence >= 75 && levels.entryZone != null && (levels.invalidationLevel != null || levels.suggestedStop != null) && safety.safetyStatus === 'SAFE' && m.microstructureStale !== true && m.staticMicrostructureTrusted !== false,
         sourceSignals: Array.isArray(m.scannerTags) ? m.scannerTags : [],
         diagnostics: {
           change24hPct: round(n(m.change24hPct ?? m.priceChangePercent), 2),

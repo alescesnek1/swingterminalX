@@ -55,8 +55,34 @@ const WEAK_TRUSTED = {
 const STALE_MICRO = { ...STRONG_TRUSTED, symbol: 'STALEUSDT', microstructureStale: true };
 const UNTRUSTED_MICRO = { ...STRONG_TRUSTED, symbol: 'UNTRUSTUSDT', staticMicrostructureTrusted: false };
 
-function candidateFor(symbol, extraMarkets = []) {
-  const state = evaluateTradingRadar({ markets: [BTC, ETH, ...extraMarkets], source: 'test', now: NOW });
+function rollingSnapshot(rows, extra = {}) {
+  return {
+    provider: 'test-rolling',
+    trusted: true,
+    updatedAtMs: NOW,
+    data: rows,
+    ...extra,
+  };
+}
+
+const STRONG_ROLLING = {
+  bidDepthRebuildPct: 14,
+  marketSellRatio: 0.50,
+  openInterestChangePct: -7,
+  longLiquidationSpike: 2.2,
+  flow: { takerBuySellRatio: 1.4, cumulativeDeltaPct: 1.2, aggressiveSellExhaustion: true },
+};
+
+const WEAK_ROLLING = {
+  bidDepthRebuildPct: 2,
+  marketSellRatio: 0.72,
+  openInterestChangePct: -1,
+  longLiquidationSpike: 0.2,
+  flow: { takerBuySellRatio: 0.7, cumulativeDeltaPct: -1.1, aggressiveSellExhaustion: false },
+};
+
+function candidateFor(symbol, extraMarkets = [], extra = {}) {
+  const state = evaluateTradingRadar({ markets: [BTC, ETH, ...extraMarkets], source: 'test', now: NOW, ...extra });
   return { state, c: state.candidates.find((x) => x.symbol === symbol) };
 }
 
@@ -74,7 +100,7 @@ test('1: missing provider — STRICT not confirmed, mode is PROXY, proxy may eva
 });
 
 test('2: stale microstructure — ABSORB_DATA_STALE, never strict-confirmed', () => {
-  const { c } = candidateFor('STALEUSDT', [STALE_MICRO]);
+  const { c } = candidateFor('STALEUSDT', [STALE_MICRO], { rollingMicrostructureSnapshot: rollingSnapshot({ STALEUSDT: STRONG_ROLLING }, { updatedAtMs: NOW - 20 * 60 * 1000 }) });
   assert.ok(c);
   assert.equal(c.STRICT_ABSORB_STATUS, 'ABSORB_DATA_STALE');
   assert.equal(c.STRICT_ABSORB_CONFIRMED, false);
@@ -84,7 +110,7 @@ test('2: stale microstructure — ABSORB_DATA_STALE, never strict-confirmed', ()
 });
 
 test('3: untrusted provider — ABSORB_PROVIDER_UNTRUSTED, never strict-confirmed', () => {
-  const { c } = candidateFor('UNTRUSTUSDT', [UNTRUSTED_MICRO]);
+  const { c } = candidateFor('UNTRUSTUSDT', [UNTRUSTED_MICRO], { rollingMicrostructureSnapshot: rollingSnapshot({ UNTRUSTUSDT: STRONG_ROLLING }, { trusted: false }) });
   assert.ok(c);
   assert.equal(c.STRICT_ABSORB_STATUS, 'ABSORB_PROVIDER_UNTRUSTED');
   assert.equal(c.STRICT_ABSORB_CONFIRMED, false);
@@ -94,7 +120,7 @@ test('3: untrusted provider — ABSORB_PROVIDER_UNTRUSTED, never strict-confirme
 });
 
 test('4: trusted FRESH but weak data — STRICT evaluated and REJECTED, not confirmed', () => {
-  const { c } = candidateFor('WEAKUSDT', [WEAK_TRUSTED]);
+  const { c } = candidateFor('WEAKUSDT', [WEAK_TRUSTED], { rollingMicrostructureSnapshot: rollingSnapshot({ WEAKUSDT: WEAK_ROLLING }) });
   assert.ok(c);
   assert.equal(c.ABSORB_MODE, 'STRICT');
   assert.equal(c.STRICT_ABSORB_STATUS, 'ABSORB_REJECTED');
@@ -103,7 +129,7 @@ test('4: trusted FRESH but weak data — STRICT evaluated and REJECTED, not conf
 });
 
 test('5: trusted FRESH strong data — STRICT confirmed (ABSORB_CONFIRMED)', () => {
-  const { c } = candidateFor('STRONGUSDT', [STRONG_TRUSTED]);
+  const { c } = candidateFor('STRONGUSDT', [STRONG_TRUSTED], { rollingMicrostructureSnapshot: rollingSnapshot({ STRONGUSDT: STRONG_ROLLING }) });
   assert.ok(c);
   assert.equal(c.ABSORB_MODE, 'STRICT');
   assert.equal(c.STRICT_ABSORB_STATUS, 'ABSORB_CONFIRMED');
@@ -143,7 +169,7 @@ test('8: missing strict fields are surfaced, never invented', () => {
 });
 
 test('10: snapshot absorb funnel counters are present and consistent', () => {
-  const { state } = candidateFor('STRONGUSDT', [STRONG_TRUSTED, NO_MICRO, WEAK_TRUSTED]);
+  const { state } = candidateFor('STRONGUSDT', [STRONG_TRUSTED, NO_MICRO, WEAK_TRUSTED], { rollingMicrostructureSnapshot: rollingSnapshot({ STRONGUSDT: STRONG_ROLLING, WEAKUSDT: WEAK_ROLLING }) });
   const f = state.absorbFunnel;
   assert.ok(f, 'absorbFunnel present');
   assert.equal(f, state.pipeline.absorbFunnel);
@@ -172,7 +198,7 @@ test('11: stale / untrusted / proxy rows are never Telegram-eligible and never a
 });
 
 test('9: every required Absorb v2 output field is present on each candidate', () => {
-  const { state } = candidateFor('STRONGUSDT', [STRONG_TRUSTED, NO_MICRO, WEAK_TRUSTED]);
+  const { state } = candidateFor('STRONGUSDT', [STRONG_TRUSTED, NO_MICRO, WEAK_TRUSTED], { rollingMicrostructureSnapshot: rollingSnapshot({ STRONGUSDT: STRONG_ROLLING, WEAKUSDT: WEAK_ROLLING }) });
   const required = [
     'ABSORB_STATUS', 'ABSORB_MODE', 'STRICT_ABSORB_STATUS', 'PROXY_ABSORB_STATUS',
     'STRICT_ABSORB_SCORE', 'PROXY_ABSORB_SCORE', 'ABSORB_BLOCK_REASON',

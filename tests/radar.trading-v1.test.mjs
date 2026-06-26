@@ -118,6 +118,32 @@ function candidate(markets, symbol, extra) {
   return c;
 }
 
+function rollingSnapshot(rows, extra = {}) {
+  return {
+    provider: 'test-rolling',
+    trusted: true,
+    updatedAtMs: NOW,
+    data: rows,
+    ...extra,
+  };
+}
+
+const STRONG_ROLLING_ROW = {
+  bidDepthRebuildPct: 14,
+  marketSellRatio: 0.50,
+  openInterestChangePct: -7,
+  longLiquidationSpike: 2.2,
+  flow: { takerBuySellRatio: 1.4, cumulativeDeltaPct: 1.2, aggressiveSellExhaustion: true },
+};
+
+const WEAK_ROLLING_ROW = {
+  bidDepthRebuildPct: 2,
+  marketSellRatio: 0.72,
+  openInterestChangePct: -1,
+  longLiquidationSpike: 0.2,
+  flow: { takerBuySellRatio: 0.7, cumulativeDeltaPct: -1.1, aggressiveSellExhaustion: false },
+};
+
 test('A: every candidate includes the required Trading RADAR v1 output fields', () => {
   const state = stateFor([FULL_MICRO_ENTRY, CHASE_RISK, STATIC_ONLY]);
   const required = [
@@ -457,6 +483,7 @@ test('Reclaim-12: reclaim + strict absorb confirmed still requires all existing 
       { ...ETH, change24hPct: -6 },
       STRICT_RECLAIM,
     ],
+    rollingMicrostructureSnapshot: rollingSnapshot({ STRICTUSDT: STRONG_ROLLING_ROW }),
   });
   assert.equal(c.STRICT_ABSORB_CONFIRMED, true);
   assert.ok(['RECLAIM_CONFIRMED', 'RECLAIM_CONFIRMED_NO_RETEST', 'RECLAIM_RETEST_HOLD'].includes(c.RECLAIM_STATUS));
@@ -759,5 +786,75 @@ test('E2b-3: computed source alone does not unlock ENTRY_READY or Telegram', () 
   const c = candidate([KLINE_BASE], 'KLINEUSDT', { klinesSnapshot: freshKlinesSnapshot() });
   assert.notEqual(c.actionability, 'ENTRY_READY');
   assert.notEqual(c.STATUS, 'ENTRY_READY');
+  assert.equal(c.telegramEligible, false);
+});
+
+test('E3d-1: no rolling snapshot keeps Absorb fail-closed with missing rolling producer diagnostic', () => {
+  const c = candidate([FULL_MICRO_ENTRY], 'FULLUSDT');
+  assert.equal(c.STRICT_ABSORB_CONFIRMED, false);
+  assert.notEqual(c.ABSORB_MODE, 'STRICT');
+  assert.equal(c.absorbV2.absorbStrictUnavailableCode, 'ABSORB_ROLLING_FLOW_MISSING');
+  assert.match(c.ABSORB_NEXT_REQUIRED_CONDITION, /trusted rolling microstructure/i);
+});
+
+test('E3d-2: stale rolling snapshot is blocked', () => {
+  const c = candidate([FULL_MICRO_ENTRY], 'FULLUSDT', {
+    rollingMicrostructureSnapshot: rollingSnapshot({ FULLUSDT: STRONG_ROLLING_ROW }, { updatedAtMs: NOW - 20 * 60 * 1000 }),
+  });
+  assert.equal(c.STRICT_ABSORB_STATUS, 'ABSORB_DATA_STALE');
+  assert.equal(c.STRICT_ABSORB_CONFIRMED, false);
+  assert.notEqual(c.STATUS, 'AGGRESSIVE_ENTRY_READY');
+});
+
+test('E3d-3: untrusted rolling snapshot is blocked', () => {
+  const c = candidate([FULL_MICRO_ENTRY], 'FULLUSDT', {
+    rollingMicrostructureSnapshot: rollingSnapshot({ FULLUSDT: STRONG_ROLLING_ROW }, { trusted: false }),
+  });
+  assert.equal(c.STRICT_ABSORB_STATUS, 'ABSORB_PROVIDER_UNTRUSTED');
+  assert.equal(c.STRICT_ABSORB_CONFIRMED, false);
+  assert.equal(c.telegramEligible, false);
+});
+
+test('E3d-4: static-only row without rolling snapshot cannot confirm Absorb', () => {
+  const c = candidate([{ ...STATIC_ONLY, bidDepthRebuildPct: 20, marketSellRatio: 0.5, absorptionScore: 90, supportRetested: true }], 'STAUSDT');
+  assert.equal(c.STRICT_ABSORB_CONFIRMED, false);
+  assert.notEqual(c.ABSORB_STATUS, 'ABSORB_CONFIRMED');
+  assert.notEqual(c.actionability, 'ENTRY_READY');
+});
+
+test('E3d-5: trusted fresh complete rolling snapshot can satisfy strict Absorb thresholds', () => {
+  const c = candidate([{ ...FULL_MICRO_ENTRY, supportRetested: true }], 'FULLUSDT', {
+    rollingMicrostructureSnapshot: rollingSnapshot({ FULLUSDT: STRONG_ROLLING_ROW }),
+  });
+  assert.equal(c.ABSORB_MODE, 'STRICT');
+  assert.equal(c.STRICT_ABSORB_STATUS, 'ABSORB_CONFIRMED');
+  assert.equal(c.STRICT_ABSORB_CONFIRMED, true);
+});
+
+test('E3d-6: trusted fresh weak rolling snapshot is evaluated and rejected, not missing', () => {
+  const c = candidate([{ ...FULL_MICRO_ENTRY, symbol: 'WEAKRUSDT', supportRetested: false }], 'WEAKRUSDT', {
+    rollingMicrostructureSnapshot: rollingSnapshot({ WEAKRUSDT: WEAK_ROLLING_ROW }),
+  });
+  assert.equal(c.ABSORB_MODE, 'STRICT');
+  assert.equal(c.STRICT_ABSORB_STATUS, 'ABSORB_REJECTED');
+  assert.equal(c.STRICT_ABSORB_CONFIRMED, false);
+  assert.doesNotMatch(c.ABSORB_BLOCK_REASON, /provider unavailable/i);
+});
+
+test('E3d-7: missing rolling fields are surfaced and never invented', () => {
+  const c = candidate([{ ...DISLOCATION_ONLY, symbol: 'PARTUSDT', spreadPct: 0.03, depthUsdWithin1Pct: 2e6, depthUsd: 2e6, supportRetested: true }], 'PARTUSDT', {
+    rollingMicrostructureSnapshot: rollingSnapshot({ PARTUSDT: { marketSellRatio: 0.5 } }),
+  });
+  assert.equal(c.STRICT_ABSORB_CONFIRMED, false);
+  assert.ok(c.ABSORB_MISSING_FIELDS.includes('bidDepthRebuildPct'));
+  assert.ok(c.ABSORB_MISSING_FIELDS.includes('priceImpactWeakVsSellVolume'));
+});
+
+test('E3d-8: strict Absorb alone does not unlock ENTRY_READY or Telegram', () => {
+  const c = candidate([{ ...DISLOCATION_ONLY, symbol: 'ABSONLYUSDT', spreadPct: 0.03, depthUsdWithin1Pct: 2e6, depthUsd: 2e6, supportRetested: true }], 'ABSONLYUSDT', {
+    rollingMicrostructureSnapshot: rollingSnapshot({ ABSONLYUSDT: STRONG_ROLLING_ROW }),
+  });
+  assert.equal(c.STRICT_ABSORB_CONFIRMED, true);
+  assert.notEqual(c.actionability, 'ENTRY_READY');
   assert.equal(c.telegramEligible, false);
 });

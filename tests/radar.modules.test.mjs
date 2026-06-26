@@ -61,6 +61,18 @@ const FLUSH_STRICT = {
   absorptionScore: 82,
 };
 
+function rollingSnapshot(rows, extra = {}) {
+  return { provider: 'test-rolling', trusted: true, updatedAtMs: NOW, data: rows, ...extra };
+}
+
+const SOL_ROLLING_ROW = {
+  bidDepthRebuildPct: 14,
+  marketSellRatio: 0.50,
+  openInterestChangePct: -7,
+  longLiquidationSpike: 2.2,
+  flow: { takerBuySellRatio: 1.4, cumulativeDeltaPct: 1.2, aggressiveSellExhaustion: true },
+};
+
 test('RADAR universe filters liquid stablecoin spot pairs and rejects weird/thin books', () => {
   const { universe, diagnostics } = buildRadarUniverse([
     BTC,
@@ -173,6 +185,7 @@ test('RADAR sorts by distanceToEntryReadyScore correctly', () => {
     source: 'test',
     fetchedAt: new Date(NOW).toISOString(),
     now: NOW,
+    rollingMicrostructureSnapshot: rollingSnapshot({ SOLUSDT: SOL_ROLLING_ROW }),
   });
   
   const btcCand = state.candidates.find(c => c.symbol === 'BTCUSDT');
@@ -313,7 +326,7 @@ test('fleet empty state persists tradingRadar top-level field', () => {
   assert.ok(Object.hasOwn(fleet, 'tradingRadar'));
   assert.ok(Object.hasOwn(fleet.tradingRadar, 'pipeline'));
   assert.ok(Object.hasOwn(fleet.tradingRadar, 'telegramAlertState'));
-  fleet.tradingRadar = evaluateTradingRadar({ markets: [BTC, ETH, FLUSH_STRICT], source: 'test', fetchedAt: new Date(NOW).toISOString(), now: NOW });
+  fleet.tradingRadar = evaluateTradingRadar({ markets: [BTC, ETH, FLUSH_STRICT], source: 'test', fetchedAt: new Date(NOW).toISOString(), now: NOW, rollingMicrostructureSnapshot: rollingSnapshot({ SOLUSDT: SOL_ROLLING_ROW }) });
   assert.equal(fleet.tradingRadar.selected.symbol, 'SOLUSDT');
   assert.equal(fleet.tradingRadar.status, 'ENTRY_READY');
   assert.equal(fleet.tradingRadar.pipeline.ENTRY_READY, 1);
