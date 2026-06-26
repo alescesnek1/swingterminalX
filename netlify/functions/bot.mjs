@@ -7,6 +7,7 @@ import { fetchBinancePublicUniverse } from '../../scripts/auto/binance-public.mj
 import { evaluateTradingRadar, defaultTradingRadarState, normalizeScannerSymbol } from '../../scripts/radar/trading-radar.mjs';
 import { warmBinanceAlphaMapping } from '../../scripts/safety/token-metadata.mjs';
 import { microstructureSnapshotStatus } from '../../scripts/radar/market-data-provider.mjs';
+import { normalizeKlinesSnapshot } from '../../scripts/radar/klines-snapshot.mjs';
 
 function safeRequestUrl(req, fallbackPath = '/') {
   if (!req) return new URL(fallbackPath, 'http://localhost');
@@ -2559,6 +2560,43 @@ async function handleFleetWorker(req, base, body) {
     });
   }
 
+  // radar-klines: a local worker/manual producer posts sanitized cached klines
+  // for later read-only RADAR diagnostics. This does not evaluate RADAR or fetch.
+  if (base === 'radar-klines') {
+    if (req.method === 'GET') {
+      return await mutateFleet(async (fleet) => {
+        return json(req, { ok: true, snapshot: fleet.radarKlinesSnapshot || null });
+      });
+    }
+
+    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    const workerId = bodyWorkerId(req, body);
+    if (!workerId) return json(req, { ok: false, error: 'workerId is required' }, 400);
+
+    const rawSnapshot = body && typeof body === 'object' && !Array.isArray(body) && body.snapshot !== undefined ? body.snapshot : body;
+    const hasDataMap = rawSnapshot && typeof rawSnapshot.data === 'object' && rawSnapshot.data !== null && !Array.isArray(rawSnapshot.data);
+    const hasSymbolsMap = rawSnapshot && typeof rawSnapshot.symbols === 'object' && rawSnapshot.symbols !== null && !Array.isArray(rawSnapshot.symbols);
+    const normalized = (rawSnapshot && typeof rawSnapshot === 'object' && !Array.isArray(rawSnapshot) && (hasDataMap || hasSymbolsMap))
+      ? normalizeKlinesSnapshot(rawSnapshot)
+      : null;
+
+    return await mutateFleet(async (fleet) => {
+      fleet.radarKlinesSnapshot = normalized ? {
+        ...normalized,
+        source: 'local_worker_radar_klines',
+        receivedAt: new Date().toISOString(),
+        workerId: workerId.slice(0, 80),
+      } : null;
+      fevent(fleet, normalized ? 'RADAR_KLINES_SNAPSHOT_UPDATED' : 'RADAR_KLINES_SNAPSHOT_REJECTED', normalized ? 'info' : 'warn',
+        normalized ? `Local worker posted RADAR klines snapshot (${normalized.diagnostics.stored} symbols).` : 'Invalid RADAR klines snapshot rejected.', {});
+      return json(req, {
+        ok: true,
+        stored: Boolean(normalized),
+        diagnostics: normalized ? normalized.diagnostics : { requested: 0, stored: 0, skipped: 0, invalidSymbols: [], invalidCandles: 0 },
+      });
+    });
+  }
+
   // radar-microstructure: a local worker posts futures depth/premiumIndex data
   // specifically for top RADAR candidates to patch the gap where the spot snapshot
   // misses futures-only listings like BEATUSDT.
@@ -4419,7 +4457,7 @@ async function handleWorkerPair(req) {
   });
 }
 
-const FLEET_WORKER_BASES = new Set(['worker-heartbeat', 'worker-session', 'execution-result', 'position-result', 'worker-command-ack', 'live-preflight-result', 'auto-market-snapshot', 'radar-microstructure', 'radar-candidates', 'radar-debug', 'auto-decision', 'auto-intent-request']);
+const FLEET_WORKER_BASES = new Set(['worker-heartbeat', 'worker-session', 'execution-result', 'position-result', 'worker-command-ack', 'live-preflight-result', 'auto-market-snapshot', 'radar-microstructure', 'radar-klines', 'radar-candidates', 'radar-debug', 'auto-decision', 'auto-intent-request']);
 const FLEET_BROWSER_BASES = new Set(['fleet', 'config', 'start-session', 'start-live-session', 'live-emergency-stop', 'global-kill-switch', 'auto-trader', 'session', 'clear-stale-sessions', 'create-execution-intent', 'create-smoke-execution-intent', 'create-live-execution-intent', 'create-worker-pairing-code', 'radar-context']);
 
 function isWorkerRoute(route) {
