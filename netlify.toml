@@ -82,3 +82,7 @@
   for = "/index.html"
   [headers.values]
     Cache-Control = "no-cache, no-store, must-revalidate"
+
+[[edge_functions]]
+  path = "/api/coingecko-highlights"
+  function = "coingecko-highlights"
