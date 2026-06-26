@@ -448,7 +448,6 @@ test('Phase D1b: UI renders CoinGecko attention chip correctly based on metadata
   assert.ok(renderList.includes(`d.ATTENTION_KIND === 'trending'`), 'must check for trending kind');
   assert.ok(renderList.includes('Number.isFinite(d.ATTENTION_RANK)'), 'must check for valid rank');
   assert.ok(renderList.includes('d.ATTENTION_RANK > 0'), 'must check rank > 0');
-  
   const forbidden = ['buy', 'sell', 'signal', 'entry', 'confirmed', 'recommended'];
   const chipHtmlIdx = renderList.indexOf('CG #');
   const chipHtmlContext = renderList.slice(Math.max(0, chipHtmlIdx - 150), chipHtmlIdx + 150).toLowerCase();
@@ -462,8 +461,8 @@ test('Phase D1b: UI renders CoinGecko attention chip correctly based on metadata
 });
 
 test('Phase E0: UI explicitly handles missing flow and Reclaim fallbacks safely without crashing', () => {
-  assert.match(terminalJs, /absorbStrictUnavailableCode === 'ABSORB_ROLLING_FLOW_MISSING'/);
-  assert.match(terminalJs, /rolling flow producer missing/);
+  assert.match(terminalJs, /c\.rollingMicrostructureStatus === 'INCOMPLETE'/);
+  assert.match(terminalJs, /Rolling data present, strict Absorb incomplete: liquidation data unavailable/);
   assert.match(terminalJs, /const rSource = rPrimary && rPrimary\.source \? rPrimary\.source : ''/);
   assert.match(terminalJs, /rSource\.indexOf\('fallback'\)/);
   assert.match(terminalJs, /rv\.missingSourceFields/);
@@ -471,11 +470,8 @@ test('Phase E0: UI explicitly handles missing flow and Reclaim fallbacks safely 
 });
 
 test('Phase E0.1: UI infers rolling producer missing from production-like missing backend fields', () => {
-  assert.match(terminalJs, /const isStaticOnly = selected\.hasStaticMicrostructure === true && selected\.hasRollingMicrostructure !== true;/);
-  assert.match(terminalJs, /const untrustedStatic = selected\.staticMicrostructureTrusted !== true;/);
-  assert.match(terminalJs, /const hasMissingRollingFields = Array\.isArray\(selected\.missingAbsorptionFields\) && selected\.missingAbsorptionFields\.length > 0;/);
-  assert.match(terminalJs, /const rollingProducerMissingReason = 'Rolling absorption producer not running; static depth\/funding alone cannot confirm Absorb\.';/);
-  assert.match(terminalJs, /const producerReasonText = selected\.absorbStrictUnavailableReason[\s\S]+?\|\| \(\(isStaticOnly && \(untrustedStatic \|\| hasMissingRollingFields\)\) \? rollingProducerMissingReason : 'none'\);/);
+  assert.match(terminalJs, /c\.rollingMicrostructurePresent === false/);
+  assert.match(terminalJs, /NO STRICT DATA — Rolling producer missing/);
 });
 
 test('Phase E2a: UI renders Computed structural source present natively and safely', () => {

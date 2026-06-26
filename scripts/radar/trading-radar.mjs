@@ -1492,6 +1492,14 @@ function evaluateAbsorbV2(market, regime, dataQuality) {
     if (mode !== 'STRICT') {
       if (m.microstructureStale === true) blockReason = 'stale static cache';
       else if (m.staticMicrostructureTrusted === false) blockReason = 'untrusted provider';
+      else if (m.rollingMicrostructureStatus === 'INCOMPLETE') {
+        const miss = m.rollingMicrostructureMissingFields || [];
+        if (miss.length === 1 && miss[0] === 'longLiquidationSpike') {
+          blockReason = 'Rolling data present, strict Absorb incomplete: liquidation data unavailable';
+        } else {
+          blockReason = `Rolling data present, strict Absorb incomplete: missing ${miss.join(', ')}`;
+        }
+      }
       else blockReason = 'provider unavailable';
     } else if (!strict.aggressiveSellsFailed.present) blockReason = 'missing aggressiveSellsFailed';
     else if (!strict.priceImpactWeakVsSellVolume.present) blockReason = 'missing absorptionScore';

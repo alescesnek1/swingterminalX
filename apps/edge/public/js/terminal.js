@@ -7248,9 +7248,9 @@ function _fleetRadarAbsorbCompact(c) {
   const mode = c.ABSORB_MODE || 'DISABLED';
   if (strict === 'ABSORB_DATA_STALE') return 'STALE';
   if (strict === 'ABSORB_PROVIDER_UNTRUSTED') return 'UNTRUSTED';
-  if (strict === 'ABSORB_DATA_UNAVAILABLE' && proxy === 'ABSORB_REJECTED') return 'STRICT N/A';
+  if (strict === 'ABSORB_DATA_UNAVAILABLE' && proxy === 'ABSORB_REJECTED') return c.rollingMicrostructureStatus === 'INCOMPLETE' ? 'INCOMPLETE' : 'STRICT N/A';
   if (strict === 'ABSORB_DATA_UNAVAILABLE' && (proxy === 'ABSORB_PARTIAL_EVIDENCE' || proxy === 'ABSORB_WATCH')) return 'PROXY';
-  if (strict === 'ABSORB_DATA_UNAVAILABLE') return 'STRICT N/A';
+  if (strict === 'ABSORB_DATA_UNAVAILABLE') return c.rollingMicrostructureStatus === 'INCOMPLETE' ? 'INCOMPLETE' : 'STRICT N/A';
   if (strict === 'ABSORB_REJECTED' && mode === 'STRICT') return 'REJECTED';
   if (st === 'ABSORB_CONFIRMED') return 'STRICT OK';
   if (st === 'ABSORB_DATA_STALE') return 'STALE';
@@ -7280,7 +7280,7 @@ function _fleetRadarReclaimCompact(c) {
 function _fleetRadarCompactClass(label) {
   if (label === 'STRICT OK' || label === 'CONFIRMED' || label === 'RETEST HELD') return 'radar-pill radar-pill-pass';
   if (label === 'FAILED' || label === 'REJECTED' || label === 'STALE' || label === 'UNTRUSTED') return 'radar-pill radar-pill-fail';
-  if (label === 'NO DATA' || label === 'NO LEVEL' || label === 'NO RECLAIM DATA' || label === 'STRICT N/A') return 'radar-pill radar-pill-missing';
+  if (label === 'NO DATA' || label === 'NO LEVEL' || label === 'NO RECLAIM DATA' || label === 'STRICT N/A' || label === 'INCOMPLETE') return 'radar-pill radar-pill-missing';
   return 'radar-pill radar-pill-wait';
 }
 // One-line Absorb verdict for the Operator Summary. Proxy/stale/unavailable are
@@ -7295,8 +7295,18 @@ function _fleetRadarAbsorbVerdict(c) {
   const untrustedStatic = c.staticMicrostructureTrusted !== true;
   const hasMissingRollingFields = Array.isArray(c.missingAbsorptionFields) && c.missingAbsorptionFields.length > 0;
   
-  if (c.absorbStrictUnavailableCode === 'ABSORB_ROLLING_FLOW_MISSING' || (staticOnlySnapshot && (untrustedStatic || hasMissingRollingFields))) {
-    return 'NO STRICT DATA — rolling flow producer missing';
+  if (c.rollingMicrostructurePresent === false) {
+    if (c.rollingMicrostructureStatus === 'STALE') return 'STALE — Rolling data stale';
+    return 'NO STRICT DATA — Rolling producer missing';
+  }
+  
+  if (c.rollingMicrostructurePresent === true && c.rollingMicrostructureStatus === 'INCOMPLETE') {
+    const miss = c.rollingMicrostructureMissingFields || [];
+    if (miss.length === 1 && miss[0] === 'longLiquidationSpike') {
+      return 'NO STRICT DATA — Rolling data present, strict Absorb incomplete: liquidation data unavailable';
+    } else {
+      return `NO STRICT DATA — Rolling data present, strict Absorb incomplete: missing ${miss.join(', ')}`;
+    }
   }
   
   if (strict === 'ABSORB_DATA_UNAVAILABLE' && proxy === 'ABSORB_REJECTED') return 'NO STRICT DATA — proxy rejected';
@@ -7708,7 +7718,7 @@ function _renderTradingRadar(radar, esc) {
       </div>
       <div class="radar-focus-blocked"><span>Reason</span><b>${esc((selected.REASON || selected.reasons || []).join(' | ') || '--')}</b></div>
       <div class="radar-focus-blocked"><span>Invalidation</span><b>${esc(selected.INVALIDATION || '--')}</b></div>
-      <details class="radar-advanced-diagnostics" style="margin-top:8px;">
+      <details class="radar-advanced-diagnostics" style="margin-top:8px;" ${window._fleetAdvancedDiagExpanded && window._fleetAdvancedDiagExpanded[selected.symbol] ? 'open' : ''} ontoggle="window._fleetAdvancedDiagExpanded = window._fleetAdvancedDiagExpanded || {}; window._fleetAdvancedDiagExpanded['${selected.symbol}'] = this.open;">
         <summary style="cursor:pointer; font-size:11px; letter-spacing:.06em; color:var(--txt2); text-transform:uppercase; padding:5px 0;">Advanced diagnostics (raw &mdash; click to expand)</summary>
       <div class="radar-focus-blocked"><span>Status</span><b>${esc(selectedV1Status)}</b></div>
       <div class="radar-focus-blocked"><span>Action</span><b>${esc(_fleetRadarV1Action(selected))}</b></div>

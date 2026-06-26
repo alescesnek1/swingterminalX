@@ -209,3 +209,36 @@ test('9: every required Absorb v2 output field is present on each candidate', ()
     assert.ok(['STRICT', 'PROXY', 'DISABLED'].includes(c.ABSORB_MODE), `${c.symbol} mode=${c.ABSORB_MODE}`);
   }
 });
+
+test('12: partial rolling data with missing longLiquidationSpike has specific block reason and stays fail-closed', () => {
+  const PARTIAL_ROLLING = { ...STRONG_ROLLING };
+  delete PARTIAL_ROLLING.longLiquidationSpike;
+  PARTIAL_ROLLING.strictReady = false;
+  PARTIAL_ROLLING.missingFields = ['longLiquidationSpike'];
+  
+  const PARTIAL_TRUSTED = { ...STRONG_TRUSTED, symbol: 'PARTIALUSDT' };
+  const { c } = candidateFor('PARTIALUSDT', [PARTIAL_TRUSTED], { rollingMicrostructureSnapshot: rollingSnapshot({ PARTIALUSDT: PARTIAL_ROLLING }) });
+  assert.ok(c);
+  
+  // Rolling data is present but incomplete
+  assert.equal(c.hasRollingMicrostructure, true);
+  assert.equal(c.absorbV2.hasRollingMicrostructure, true);
+  assert.equal(c.absorbV2.microstructureStale, false);
+  
+  // Strict absorb remains unavailable
+  assert.equal(c.STRICT_ABSORB_CONFIRMED, false);
+  assert.equal(c.absorbV2.STRICT_ABSORB_CONFIRMED, false);
+  assert.notEqual(c.ABSORB_STATUS, 'ABSORB_CONFIRMED');
+  assert.notEqual(c.STRICT_ABSORB_STATUS, 'ABSORB_CONFIRMED');
+  
+  assert.equal(c.STRICT_ABSORB_STATUS, 'ABSORB_DATA_UNAVAILABLE');
+  assert.equal(c.absorbV2.STRICT_ABSORB_STATUS, 'ABSORB_DATA_UNAVAILABLE');
+  
+  // Specific block reason correctly formulated
+  assert.equal(c.ABSORB_BLOCK_REASON, 'Rolling data present, strict Absorb incomplete: liquidation data unavailable');
+  assert.equal(c.absorbV2.ABSORB_BLOCK_REASON, 'Rolling data present, strict Absorb incomplete: liquidation data unavailable');
+  
+  // ENTRY_READY / Telegram remain blocked
+  assert.notEqual(c.STATUS, 'AGGRESSIVE_ENTRY_READY');
+  assert.equal(c.telegramEligible, false);
+});
