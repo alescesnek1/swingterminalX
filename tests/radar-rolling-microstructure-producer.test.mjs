@@ -8,6 +8,7 @@ import {
   resolveRollingSymbol,
   runRollingMicrostructureProducer,
   selectRollingTargets,
+  readCliArgs,
 } from '../scripts/radar/rolling-microstructure-producer.mjs';
 
 function response(status, body) { return { ok: status >= 200 && status < 300, status, json: async () => body }; }
@@ -87,4 +88,60 @@ test('missing liquidation data stays missing and diagnostics says why', () => {
 test('no cron/workflow/config/package changes in source', () => {
   const source = readFileSync(new URL('../scripts/radar/rolling-microstructure-producer.mjs', import.meta.url), 'utf8');
   assert.doesNotMatch(source, /cron|schedule|scheduled|github|workflow|netlify\.toml|package\.json|package-lock/i);
+});
+
+test('CLI parser recognizes flags', () => {
+  const opts = readCliArgs(['--control-url', 'http://a', '--worker-id', 'w1', '--candidates-json', '[]', '--top-n', '10', '--base-url', 'http://b', '--mode', 'evaluate', '--previous-snapshot-json', '{}']);
+  assert.equal(opts.controlUrl, 'http://a');
+  assert.equal(opts.workerId, 'w1');
+  assert.equal(opts.candidatesJson, '[]');
+  assert.equal(opts.topN, '10');
+  assert.equal(opts.baseUrl, 'http://b');
+  assert.equal(opts.mode, 'evaluate');
+  assert.equal(opts.previousSnapshotJson, '{}');
+});
+
+test('evaluate mode fetches previous snapshot from endpoint when previousSnapshot is not provided', async () => {
+  const calls = [];
+  const previousSnap = buildRollingSnapshotFromSamples([sample('BTCUSDT', 100, 1000)]);
+  const fetchImpl = async (url, init = {}) => {
+    calls.push({ url: String(url), method: init.method || 'GET' });
+    if (String(url).endsWith('radar-rolling-microstructure') && init.method === undefined) {
+      return response(200, { ok: true, snapshot: previousSnap });
+    }
+    if (String(url).includes('/fapi/v1/depth')) return response(200, depth(125));
+    if (String(url).includes('/fapi/v1/aggTrades')) return response(200, trades());
+    if (String(url).includes('/fapi/v1/openInterest')) return response(200, { openInterest: '900' });
+    if (String(url).includes('/fapi/v1/allForceOrders')) return response(200, []);
+    if (String(url).endsWith('/api/bot/radar-rolling-microstructure') && init.method === 'POST') {
+      return response(200, { ok: true, stored: true });
+    }
+    return response(500, {});
+  };
+  const res = await runRollingMicrostructureProducer({ mode: 'evaluate', fetchImpl, controlUrl: 'https://ctl.example', workerToken: 'secret-token', candidates: [{ symbol: 'BTCUSDT' }] });
+  
+  const fetchedPrevious = calls.find(c => c.url.endsWith('radar-rolling-microstructure') && c.method === 'GET');
+  assert.ok(fetchedPrevious, 'must fetch previous snapshot from endpoint');
+  assert.equal(Math.round(res.snapshot.data.BTCUSDT.bidDepthRebuildPct), 25);
+  assert.equal(Math.round(res.snapshot.data.BTCUSDT.openInterestChangePct), -10);
+});
+
+test('collect mode does not require previous snapshot and remains untrusted if deltas are missing', async () => {
+  const calls = [];
+  const fetchImpl = async (url, init = {}) => {
+    calls.push({ url: String(url), method: init.method || 'GET' });
+    if (String(url).includes('/fapi/v1/depth')) return response(200, depth(100));
+    if (String(url).includes('/fapi/v1/aggTrades')) return response(200, trades());
+    if (String(url).includes('/fapi/v1/openInterest')) return response(200, { openInterest: '1000' });
+    if (String(url).includes('/fapi/v1/allForceOrders')) return response(200, []);
+    if (String(url).endsWith('/api/bot/radar-rolling-microstructure') && init.method === 'POST') {
+      return response(200, { ok: true, stored: true });
+    }
+    return response(500, {});
+  };
+  const res = await runRollingMicrostructureProducer({ mode: 'collect', fetchImpl, controlUrl: 'https://ctl.example', workerToken: 'secret-token', candidates: [{ symbol: 'BTCUSDT' }] });
+  
+  const fetchedPrevious = calls.find(c => c.url.endsWith('radar-rolling-microstructure') && c.method === 'GET');
+  assert.equal(fetchedPrevious, undefined, 'should not fetch previous snapshot');
+  assert.equal(res.snapshot.trusted, false);
 });

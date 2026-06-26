@@ -178,6 +178,15 @@ async function collectSample(fetchImpl, baseUrl, symbol) {
   return sample;
 }
 
+function parseCandidatesJson(value) {
+  if (!value) return null;
+  const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+  if (Array.isArray(parsed)) return parsed;
+  if (parsed && Array.isArray(parsed.radarCandidates)) return parsed.radarCandidates;
+  if (parsed && Array.isArray(parsed.candidates)) return parsed.candidates;
+  return [];
+}
+
 async function postSnapshot({ controlUrl, workerToken, workerId, snapshot, fetchImpl }) {
   const url = `${controlUrl.replace(/\/+$/, '')}/api/bot/radar-rolling-microstructure`;
   const res = await fetchImpl(url, {
@@ -197,15 +206,68 @@ export async function runRollingMicrostructureProducer(opts = {}) {
   if (!workerToken) throw new Error('BOT_WORKER_TOKEN is required');
   if (!controlUrl) throw new Error('controlUrl or BOT_CONTROL_URL is required');
   const options = normalizeRollingProducerOptions(opts);
-  const targets = selectRollingTargets(opts.candidates || [], options);
+  
+  let previousSnapshot = opts.previousSnapshot || null;
+  if (!previousSnapshot && opts.previousSnapshotJson) {
+    try { previousSnapshot = JSON.parse(opts.previousSnapshotJson); } catch {}
+  }
+  if (options.mode === 'evaluate' && !previousSnapshot) {
+    try {
+      const getUrl = `${controlUrl.replace(/\/+$/, '')}/api/bot/radar-rolling-microstructure`;
+      const getRes = await fetchImpl(getUrl, { headers: { Accept: 'application/json', 'X-BOT-WORKER-TOKEN': workerToken } });
+      if (getRes && getRes.ok) {
+        const getJson = await getRes.json();
+        if (getJson && getJson.snapshot) previousSnapshot = getJson.snapshot;
+      }
+    } catch (err) {
+      // Ignored: missing previous snapshot will keep trusted fields missing
+    }
+  }
+
+  const cands = opts.candidates || parseCandidatesJson(opts.candidatesJson);
+  const targets = selectRollingTargets(cands || [], options);
   const samples = [];
   const errors = [];
   for (const target of targets) {
     try { samples.push(await collectSample(fetchImpl, options.baseUrl, target.symbol)); }
     catch (err) { errors.push({ symbol: target.symbol, error: err && err.message ? err.message.slice(0, 180) : 'sample failed' }); }
   }
-  const snapshot = buildRollingSnapshotFromSamples(samples, { ...options, previousSnapshot: opts.previousSnapshot });
+  const snapshot = buildRollingSnapshotFromSamples(samples, { ...options, previousSnapshot });
   snapshot.diagnostics.errors = errors;
   const postResult = await postSnapshot({ controlUrl, workerToken, workerId: opts.workerId || 'manual-rolling-microstructure-producer', snapshot, fetchImpl });
   return { ok: true, targets: targets.map((t) => t.symbol), snapshot, postResult };
+}
+
+export function readCliArgs(argv) {
+  const opts = {};
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i];
+    if (a === '--control-url') opts.controlUrl = argv[++i];
+    else if (a === '--worker-id') opts.workerId = argv[++i];
+    else if (a === '--candidates-json') opts.candidatesJson = argv[++i];
+    else if (a === '--top-n') opts.topN = argv[++i];
+    else if (a === '--base-url') opts.baseUrl = argv[++i];
+    else if (a === '--mode') opts.mode = argv[++i];
+    else if (a === '--previous-snapshot-json') opts.previousSnapshotJson = argv[++i];
+  }
+  return opts;
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  runRollingMicrostructureProducer(readCliArgs(process.argv.slice(2)))
+    .then((result) => {
+      console.log(JSON.stringify({
+        ok: result.ok,
+        targets: result.targets,
+        snapshot: {
+          trusted: result.snapshot.trusted,
+          diagnostics: result.snapshot.diagnostics,
+        },
+        postResult: { ok: result.postResult && result.postResult.ok, stored: result.postResult && result.postResult.stored },
+      }, null, 2));
+    })
+    .catch((err) => {
+      console.error(JSON.stringify({ ok: false, error: err && err.message ? err.message : 'rolling microstructure producer failed' }));
+      process.exitCode = 1;
+    });
 }
