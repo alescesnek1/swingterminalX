@@ -55,9 +55,27 @@ export function parseCoinGeckoHighlights(html) {
 
   for (let i = 0; i < indices.length; i++) {
     const current = indices[i];
-    const nextIdx = i < indices.length - 1 ? indices[i+1].idx : html.length;
-    // Extract the block of HTML between this heading and the next
-    const block = html.substring(current.idx, nextIdx);
+    let nextIdx = i < indices.length - 1 ? indices[i+1].idx : html.length;
+    
+    // Prevent section bleed: stop at footer or main end
+    const footerIdx = html.indexOf('<footer', current.idx);
+    if (footerIdx !== -1 && footerIdx < nextIdx) nextIdx = footerIdx;
+
+    const mainEndIdx = html.indexOf('</main>', current.idx);
+    if (mainEndIdx !== -1 && mainEndIdx < nextIdx) nextIdx = mainEndIdx;
+
+    // Safety cutoff for last section
+    if (nextIdx - current.idx > 15000) {
+        nextIdx = current.idx + 15000;
+    }
+    
+    let block = html.substring(current.idx, nextIdx);
+    
+    // Card boundary heuristic: "See all" or "Discover more" or "Explore"
+    const seeAllMatch = block.match(/>\s*(See all|Discover more|Explore)[^<]*<\/a>/i);
+    if (seeAllMatch) {
+        block = block.substring(0, seeAllMatch.index);
+    }
     
     const items = parseItemsFromBlock(block);
     if (items.length > 0) {
@@ -90,73 +108,7 @@ export function parseCoinGeckoHighlights(html) {
 
 function parseItemsFromBlock(block) {
   const items = [];
-  // CoinGecko highlights items usually have links like `/en/coins/...`
-  // We can look for items wrapped in typical list/row tags
-  // We'll split the block by `href="/en/coins/` or `<a ` to isolate items
-  // An even better way is to find repeating container tags. Since we don't know the exact DOM,
-  // we use a regex to capture text near a coin link.
   
-  // Try to find table rows
-  const rowMatches = block.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi);
-  if (rowMatches && rowMatches.length > 1) { // Assuming >1 because of header row
-    for (const row of rowMatches) {
-      if (row.includes('<th')) continue;
-      const item = extractItemFromText(row);
-      if (item) items.push(item);
-    }
-    return items;
-  }
-  
-  // If no <tr>, try looking for generic wrapper divs that contain a link
-  // Splitting by `<a ` might work, but multiple <a> per item is common.
-  // We'll split by `href="/en/coins/` and try to reconstruct the item.
-  // Actually, splitting by `href="/en/` is safer for categories too.
-  
-  // Let's strip all tags EXCEPT `<a>` to find logical blocks. Or just use a block splitter.
-  // A simple heuristic for CoinGecko grid: 
-  const links = block.match(/<a[^>]+href="(\/en\/(?:coins|categories)\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi);
-  if (links) {
-     // A lot of links might point to the same coin (logo, name, etc)
-     // We need to group them or find the parent container.
-     // Without DOM parsing, it's safer to extract text chunks separated by large spacing.
-  }
-  
-  // Let's just use a very generic text-based extractor over the whole block.
-  // We find matches for `/en/coins/([^\"]+)` and extract the surrounding text (up to 200 chars after it).
-  const regex = /href="(\/en\/(?:coins|categories)\/[^"]+)"[^>]*>([\s\S]*?)(?:href="\/en\/|$)/gi;
-  // This is too fragile.
-  
-  // Let's stick to a robust fallback: split by `<img` or `flex` classes?
-  // Let's extract all <a> tags. If it has text, maybe it's an item name.
-  // But we need price and change. 
-  // Let's just strip HTML tags and parse line by line.
-  const cleanBlock = block.replace(/<\/div>/gi, '\\n').replace(/<\/tr>/gi, '\\n').replace(/<\/li>/gi, '\\n');
-  const lines = cleanBlock.split('\\n');
-  let currentItemText = '';
-  
-  for (const line of lines) {
-    const text = stripTags(line).trim();
-    if (text) {
-      currentItemText += ' ' + text;
-    }
-    // If we have accumulated enough or hit a boundary, parse it.
-    // We can just accumulate lines until we see a price and a change %, then flush.
-    if (currentItemText.match(/\$[0-9,.]+/) && currentItemText.match(/[+-][0-9,.]+\s*%/)) {
-       const item = extractItemFromText(line); // Pass the original line to keep links if needed
-       // Actually, we lost the link by stripping tags.
-    }
-  }
-
-  // Let's go back to the row approach, and add a div-based approach
-  // Many divs have classes like 'tw-flex' or similar. 
-  // We can look for `<div` that contains `href="/en/` and `$` and `%`
-  const itemBlocks = block.match(/<div[^>]*>[\s\S]*?<\/div>/gi);
-  // This is recursive and regex will fail on nested divs.
-
-  // Let's use a simpler heuristic. Find all matches of `href="/en/coins/...`
-  // and find the text immediately following it until the next `<a ` or `</div>`
-  
-  // For the sake of this robust script, we will split the block by `href="` and process each segment.
   const segments = block.split('href="');
   let currentItem = null;
   
@@ -165,25 +117,22 @@ function parseItemsFromBlock(block) {
     const quoteIdx = seg.indexOf('"');
     if (quoteIdx === -1) continue;
     const href = seg.substring(0, quoteIdx);
+    const rawHtmlPart = '<a href="' + seg;
     
     if (href.startsWith('/en/coins/') || href.startsWith('/en/categories/')) {
-       // This is a coin/category link.
        const fullLink = 'https://www.coingecko.com' + href;
-       // Find the text after the link until next major boundary
-       const textPart = stripTags('<a href="' + seg).trim().replace(/\s+/g, ' ');
+       const textPart = stripTags(rawHtmlPart).trim().replace(/\s+/g, ' ');
        
-       if (textPart.length > 0) {
-           // If we already have an item with the same link, append text
-           if (currentItem && currentItem.href === fullLink) {
-               currentItem.rawText += ' ' + textPart;
-           } else {
-               if (currentItem) items.push(parseRawTextIntoItem(currentItem));
-               currentItem = { href: fullLink, rawText: textPart };
-           }
+       if (currentItem && currentItem.href === fullLink) {
+           currentItem.rawText += ' ' + textPart;
+           currentItem.rawHtml += ' ' + rawHtmlPart;
+       } else {
+           if (currentItem) items.push(parseRawTextIntoItem(currentItem));
+           currentItem = { href: fullLink, rawText: textPart, rawHtml: rawHtmlPart };
        }
     } else if (currentItem) {
-       // Append text of non-coin links/content to the current item
-       currentItem.rawText += ' ' + stripTags(seg).trim().replace(/\s+/g, ' ');
+       currentItem.rawText += ' ' + stripTags(rawHtmlPart).trim().replace(/\s+/g, ' ');
+       currentItem.rawHtml += ' ' + rawHtmlPart;
     }
   }
   
@@ -209,18 +158,39 @@ function stripTags(s) {
 
 function parseRawTextIntoItem(item) {
   const text = item.rawText;
+  const htmlStr = item.rawHtml || '';
   
   // Try to extract price
   const priceMatch = text.match(/\$[0-9,.]+/);
   const priceText = priceMatch ? priceMatch[0] : '';
   
-  // Extract change
-  const changeMatch = text.match(/([+-][0-9,.]+)\s*%/);
+  // Try to extract change
   let change24hPct = null;
   let change24hText = '';
-  if (changeMatch) {
-      change24hText = changeMatch[0];
-      change24hPct = parseFloat(changeMatch[1].replace(/,/g, ''));
+  const pctMatch = text.match(/([+-]?\s*[0-9,.]+)\s*%/);
+  
+  if (pctMatch) {
+      let valStr = pctMatch[1].replace(/\s/g, '').replace(/,/g, '');
+      let sign = 1;
+      if (valStr.startsWith('-')) {
+          sign = -1;
+          valStr = valStr.substring(1);
+      } else if (valStr.startsWith('+')) {
+          sign = 1;
+          valStr = valStr.substring(1);
+      } else {
+          // No explicit sign in text. Look at HTML.
+          const lowerHtml = htmlStr.toLowerCase();
+          if (lowerHtml.includes('down') || lowerHtml.includes('red') || lowerHtml.includes('fall')) {
+              sign = -1;
+          }
+      }
+      
+      const num = parseFloat(valStr);
+      if (!isNaN(num)) {
+          change24hPct = sign * num;
+          change24hText = (sign === 1 ? '+' : '-') + valStr + '%';
+      }
   }
   
   // Extract name/symbol
@@ -231,21 +201,28 @@ function parseRawTextIntoItem(item) {
       tokens.shift();
   }
   
-  // The first token is usually the name
-  let name = tokens[0] || 'Unknown';
+  // Exclude tokens that look like price, percent, or pure large numbers (e.g. volume)
+  const nameTokens = tokens.filter(t => !t.includes('$') && !t.includes('%') && !/^[0-9,.]+$/.test(t));
+  
+  let name = nameTokens[0] || 'Unknown';
   let symbol = '';
   
-  // Heuristic: if there's a token that is all caps, it's the symbol
-  for (const t of tokens) {
-    if (/^[A-Z0-9-]{2,10}$/.test(t) && t !== name) {
+  for (let i = 1; i < nameTokens.length; i++) {
+    const t = nameTokens[i];
+    if (/^[A-Z0-9-]{2,10}$/.test(t)) {
       symbol = t;
+      name = nameTokens.slice(0, i).join(' ');
       break;
     }
   }
   
-  // Clean up name if symbol is attached (e.g. "BitcoinBTC")
+  if (!symbol && nameTokens.length > 1) {
+      name = nameTokens.join(' ');
+  }
+
+  // Cleanup if symbol is attached
   if (symbol && name.endsWith(symbol) && name !== symbol) {
-      name = name.substring(0, name.length - symbol.length);
+      name = name.substring(0, name.length - symbol.length).trim();
   }
 
   return {
@@ -258,16 +235,6 @@ function parseRawTextIntoItem(item) {
     href: item.href,
     rawText: text
   };
-}
-
-function extractItemFromText(rowHtml) {
-  const text = stripTags(rowHtml).trim().replace(/\s+/g, ' ');
-  if (!text) return null;
-  
-  const hrefMatch = rowHtml.match(/href="(\/en\/(?:coins|categories)\/[^"]+)"/);
-  const href = hrefMatch ? 'https://www.coingecko.com' + hrefMatch[1] : '';
-  
-  return parseRawTextIntoItem({ href, rawText: text });
 }
 
 function corsHeaders(req) {
