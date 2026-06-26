@@ -108,3 +108,10 @@ test('no dependency on bot/trading-radar/fleet/UI/Telegram/worker/package', () =
     assert.ok(!source.includes(term), `must not reference ${term}`);
   }
 });
+
+test('fresh rolling snapshot from producer with slightly misaligned clock is not immediately stale', () => {
+  const producerNow = NOW + 15000; // 15s in the future
+  const s = snapshot({ BTCUSDT: completeRow() }, { updatedAtMs: producerNow });
+  const normalized = normalizeRollingMicrostructureSnapshot(s, { nowMs: NOW });
+  assert.equal(normalized.stale, false);
+});

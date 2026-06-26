@@ -149,11 +149,10 @@ export function buildRollingSnapshotFromSamples(samples, opts = {}) {
     provider: 'manual-public-rolling',
     updatedAtMs: Date.now(),
     timeframe: 'rolling',
-    trusted: true,
+    trusted: options.mode === 'evaluate',
     data,
     diagnostics,
   });
-  normalized.trusted = Object.values(normalized.data).some((row) => row.strictReady === true);
   return normalized;
 }
 

@@ -147,7 +147,7 @@ export function normalizeRollingMicrostructureSnapshot(input, opts = {}) {
     }
   }
 
-  const stale = !Number.isFinite(updatedAtMs) || updatedAtMs > nowMs || nowMs - updatedAtMs > ttlMs;
+  const stale = !Number.isFinite(updatedAtMs) || updatedAtMs > nowMs + 60000 || nowMs - updatedAtMs > ttlMs;
   return {
     provider: typeof input?.provider === 'string' ? input.provider.slice(0, 64) : 'unknown',
     updatedAtMs,
