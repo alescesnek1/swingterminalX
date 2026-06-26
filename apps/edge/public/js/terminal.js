@@ -3035,7 +3035,7 @@ function _applyViewDisplay(target, v) {
   if (!target) return;
   const name = _viewNameFromId(target.id || v);
   const flex = name === 'heatmap' || name === 'manual' || name === 'calendar';
-  target.style.display = flex ? 'flex' : 'block';
+  target.style.setProperty('display', flex ? 'flex' : 'block', 'important');
   target.style.flexDirection = flex ? 'column' : '';
   if (name === 'bot' || name === 'radar' || name === 'cockpit') {
     target.style.height = 'calc(100vh - 85px)';
@@ -3045,8 +3045,6 @@ function _applyViewDisplay(target, v) {
   } else if (name === 'calendar') {
     target.style.height = 'calc(100vh - 85px)';
     target.style.overflow = 'hidden';
-  } else if (name === 'gecko') {
-    target.style.display = 'block';
   }
 }
 
@@ -3059,7 +3057,7 @@ function sv(v, el) {
   document.querySelectorAll('.view').forEach(x => {
     x.classList.remove('on');
     x.hidden = true;
-    x.style.display = 'none';
+    x.style.setProperty('display', 'none', 'important');
     x.style.opacity = '';
     x.style.visibility = '';
     x.style.transform = '';

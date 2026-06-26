@@ -482,10 +482,14 @@ test('Phase E2a: UI renders Computed structural source present natively and safe
 });
 
 test('GECKO UI rendering, view switching, and data fetching are correctly hooked up', () => {
+  // HTML: GECKO tab and view container exist
   assert.match(indexHtml, /onclick="sv\('gecko',this\)"[^>]*>GECKO/);
   assert.match(indexHtml, /id="v-gecko"/);
-  assert.match(terminalJs, /name === 'gecko'/);
-  assert.match(terminalJs, /target\.style\.display = 'block'/);
+  // General display fix: _applyViewDisplay uses setProperty with !important
+  assert.match(terminalJs, /target\.style\.setProperty\('display', flex \? 'flex' : 'block', 'important'\)/);
+  // Hide loop uses setProperty with !important
+  assert.match(terminalJs, /x\.style\.setProperty\('display', 'none', 'important'\)/);
+  // GECKO fetch hook exists in sv()
   assert.match(terminalJs, /if \(activeViewName === 'gecko'\)/);
   assert.match(terminalJs, /window\.fetchGeckoHighlights/);
   assert.match(terminalJs, /\/api\/coingecko-highlights/);
