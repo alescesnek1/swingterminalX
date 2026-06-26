@@ -288,7 +288,7 @@ function jsonHeaders(req) {
   };
 }
 
-export async function handler(request) {
+export default async function handler(request, context) {
   if (request.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: corsHeaders(request) });
   }
