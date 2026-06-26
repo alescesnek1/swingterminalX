@@ -154,6 +154,7 @@
       <div class="tab" onclick="sv('alerts',this)">ALERTS <span class="cnt" id="abadge"></span></div>
       <div class="tab" onclick="sv('livefeed',this)">LIVE FEED <span class="lf-tab-badge" id="lf-unread"></span></div>
       <div class="tab" onclick="sv('regime',this)">REGIME</div>
+      <div class="tab" onclick="sv('gecko',this)">GECKO</div>
       <div class="tab" data-tab="manual" onclick="sv('manual',this)" title="Interactive Manual — ELI5 explainer for every signal">MANUAL</div>
     </div>
 
@@ -564,6 +565,32 @@
           <div id="regime-log" style="background:var(--s2);border:1px solid var(--b1);border-top:none;border-radius:0 0 var(--rad) var(--rad);padding:8px;display:flex;flex-direction:column;gap:4px"></div>
         </div>
       </div>
+    </div>
+
+    <!-- COINGECKO HIGHLIGHTS -->
+    <div id="v-gecko" class="view" style="max-height:calc(100vh - 85px);overflow-y:auto;padding:12px">
+      <div class="filter-bar">
+        <span style="font-size:9px;color:var(--txt3);margin-right:4px">STATUS: <b id="gecko-status" style="color:var(--acc)">LOADING</b></span>
+        <span style="font-size:9px;color:var(--txt3);margin-right:10px" id="gecko-info">—</span>
+        <div style="width:1px;height:12px;background:var(--b2);margin:0 4px"></div>
+        <div id="gecko-filters" style="display:inline-flex;gap:4px">
+          <span class="f-chip on" onclick="filterGecko('all',this)">ALL</span>
+          <span class="f-chip" onclick="filterGecko('trending_coins',this)">TRENDING</span>
+          <span class="f-chip" onclick="filterGecko('top_gainers',this)">GAINERS</span>
+          <span class="f-chip" onclick="filterGecko('top_losers',this)">LOSERS</span>
+          <span class="f-chip" onclick="filterGecko('new_coins',this)">NEW</span>
+          <span class="f-chip" onclick="filterGecko('incoming_token_unlocks',this)">UNLOCKS</span>
+          <span class="f-chip" onclick="filterGecko('most_viewed',this)">VIEWED</span>
+          <span class="f-chip" onclick="filterGecko('highest_volume',this)">VOLUME</span>
+          <span class="f-chip" onclick="filterGecko('price_change_since_ath',this)">ATH</span>
+          <span class="f-chip" onclick="filterGecko('most_voted_coins',this)">VOTED</span>
+          <span class="f-chip" onclick="filterGecko('upcoming_coins',this)">UPCOMING</span>
+          <span class="f-chip" onclick="filterGecko('trending_categories',this)">CATEGORIES</span>
+        </div>
+        <div style="width:1px;height:12px;background:var(--b2);margin:0 4px"></div>
+        <button class="hbtn" onclick="fetchGeckoHighlights(true)" title="Manual Refresh">REFRESH</button>
+      </div>
+      <div id="gecko-container" style="max-width:1200px;margin:0 auto;display:flex;flex-direction:column;gap:12px"></div>
     </div>
 
     <!-- INTERACTIVE MANUAL — ELI5 explainer for every signal on the terminal -->
