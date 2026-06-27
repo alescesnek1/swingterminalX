@@ -241,6 +241,26 @@ function isValidName(name) {
   return true;
 }
 
+// Direction of a 24h change, inferred ONLY from CoinGecko's own direction
+// markup — a color class, a brand hex colour, or an arrow glyph — and NEVER
+// from arbitrary words in the row text. This is what stops a coin literally
+// named "RED" / "DOWN" or a "Falling Knives" category from flipping a
+// gainer's sign. Returns -1 (down), +1 (up) or 0 (unknown / no signal).
+export function detectChangeDirection(html) {
+  const h = String(html || '');
+  // Class-style suffixes ([-_]down / [-_]up) match CoinGecko markup like
+  // `gecko-down`, `change-down`, `price_up`, `text-red`, etc. They require a
+  // leading hyphen/underscore so a bare coin/category name ("RED", "DOWN",
+  // "Falling Knives") can never match. Plus brand hex colours and arrows.
+  const DOWN = /(text-red|tw-text-red|text-danger|[-_]down\b|#ea3943|#cf304a|#f0616d|[▼↓⬇])/i;
+  const UP   = /(text-green|tw-text-green|text-success|[-_]up\b|#16c784|#00c389|#1ea97c|[▲↑⬆])/i;
+  const down = DOWN.test(h);
+  const up = UP.test(h);
+  if (down && !up) return -1;
+  if (up && !down) return 1;
+  return 0;
+}
+
 function parseRawTextIntoItem(item) {
   const text = item.rawText;
   const htmlStr = item.rawHtml || '';
@@ -264,11 +284,13 @@ function parseRawTextIntoItem(item) {
           sign = 1;
           valStr = valStr.substring(1);
       } else {
-          // No explicit sign in text. Look at HTML.
-          const lowerHtml = htmlStr.toLowerCase();
-          if (lowerHtml.includes('down') || lowerHtml.includes('red') || lowerHtml.includes('fall')) {
-              sign = -1;
-          }
+          // No explicit +/- in the visible text — infer the sign ONLY from
+          // CoinGecko's direction markup (color class / brand hex / arrow),
+          // never from words like "red"/"down"/"fall" that can legitimately
+          // appear inside a coin or category name.
+          const dir = detectChangeDirection(htmlStr);
+          if (dir < 0) sign = -1;
+          else if (dir > 0) sign = 1;
       }
       
       const num = parseFloat(valStr);
@@ -325,42 +347,66 @@ function parseRawTextIntoItem(item) {
   };
 }
 
-function corsHeaders(req) {
-  const origin = req.headers.get('origin') || '*';
+function corsHeaders(allowOrigin) {
   return {
-    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Origin': allowOrigin || 'null',
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    'Vary': 'Origin',
+    // Vary on Authorization (not just Origin) so a shared/CDN cache can NEVER
+    // serve an authenticated 200 to an unauthenticated caller — without this
+    // the auth gate is bypassed on every cache hit. Parity with /api/markets.
+    'Vary': 'Origin, Authorization',
   };
 }
 
-function jsonHeaders(req) {
+function jsonHeaders(allowOrigin) {
   return {
     'Content-Type': 'application/json',
     'Cache-Control': `public, s-maxage=${CDN_MAX_AGE_SEC}, stale-while-revalidate=${CDN_SWR_SEC}`,
-    ...corsHeaders(req),
+    ...corsHeaders(allowOrigin),
   };
 }
 
-export default async function handler(request, context) {
+// Gate / error (OPTIONS-aside) responses must never be stored by any cache,
+// so an unauthenticated 401/403 can't be replayed and a cached body can't be
+// confused with a gated one.
+function gateHeaders(allowOrigin) {
+  return { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...corsHeaders(allowOrigin) };
+}
+
+// Core handler with INJECTABLE security + fetch. The default export wires in
+// the real lib/security.js (Deno-only at module load) and global fetch; tests
+// call runGecko() directly with mocks so the fail-closed behaviour is actually
+// executed, not just grepped.
+export async function runGecko(request, deps) {
+  const { checkOrigin, verifyAuth, pickAllowOrigin, fetchImpl = fetch, now = Date.now() } = deps;
+  const allowOrigin = pickAllowOrigin(request);
+
   if (request.method === 'OPTIONS') {
-    return new Response(null, { status: 204, headers: corsHeaders(request) });
+    return new Response(null, { status: 204, headers: corsHeaders(allowOrigin) });
   }
   if (request.method !== 'GET') {
-    return new Response(JSON.stringify({ error: 'Method Not Allowed' }), {
-      status: 405,
-      headers: { 'Content-Type': 'application/json', ...corsHeaders(request) },
-    });
+    return new Response(JSON.stringify({ error: 'Method Not Allowed' }), { status: 405, headers: gateHeaders(allowOrigin) });
   }
 
-  const now = Date.now();
+  // FAIL-CLOSED gate: origin allowlist + Supabase JWT BEFORE any upstream
+  // fetch/parse. GECKO scrapes an upstream on cache-miss, so an unauthorized
+  // caller must never reach that path.
+  const originCheck = checkOrigin(request);
+  if (!originCheck.ok) {
+    return new Response(JSON.stringify({ error: 'Forbidden origin', detail: originCheck.reason }), { status: 403, headers: gateHeaders(allowOrigin) });
+  }
+  const auth = await verifyAuth(request);
+  if (!auth.ok) {
+    return new Response(JSON.stringify({ error: 'Unauthorized', detail: auth.reason }), { status: auth.status || 401, headers: gateHeaders(allowOrigin) });
+  }
+
   if (_cache && now - _cache.at < MEMORY_TTL_MS) {
-    return new Response(_cache.body, { status: 200, headers: jsonHeaders(request) });
+    return new Response(_cache.body, { status: 200, headers: jsonHeaders(allowOrigin) });
   }
 
   try {
-    const res = await fetch(GECKO_URL, {
+    const res = await fetchImpl(GECKO_URL, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; SwingTerminal/1.0)',
         'Accept': 'text/html'
@@ -371,7 +417,7 @@ export default async function handler(request, context) {
     if (!res.ok) {
       const degraded = parseCoinGeckoHighlights(null);
       degraded.diagnostics.warnings.push(`HTTP ${res.status}`);
-      return new Response(JSON.stringify(degraded), { status: 200, headers: jsonHeaders(request) });
+      return new Response(JSON.stringify(degraded), { status: 200, headers: jsonHeaders(allowOrigin) });
     }
 
     const html = await res.text();
@@ -380,13 +426,24 @@ export default async function handler(request, context) {
     if (payload.ok) {
       const body = JSON.stringify(payload);
       _cache = { at: now, body };
-      return new Response(body, { status: 200, headers: jsonHeaders(request) });
+      return new Response(body, { status: 200, headers: jsonHeaders(allowOrigin) });
     } else {
-      return new Response(JSON.stringify(payload), { status: 200, headers: jsonHeaders(request) });
+      return new Response(JSON.stringify(payload), { status: 200, headers: jsonHeaders(allowOrigin) });
     }
   } catch (err) {
     const degraded = parseCoinGeckoHighlights(null);
     degraded.diagnostics.warnings.push(`Fetch failed: ${err.message}`);
-    return new Response(JSON.stringify(degraded), { status: 200, headers: jsonHeaders(request) });
+    return new Response(JSON.stringify(degraded), { status: 200, headers: jsonHeaders(allowOrigin) });
   }
+}
+
+// Test-only: reset the in-isolate scrape cache so behaviour tests are isolated.
+export function __resetGeckoCacheForTests() { _cache = null; }
+
+export default async function handler(request, context) {
+  // security.js pulls a Deno-only esm.sh dependency at module load, so import
+  // it dynamically — the handler runs on Deno; node:test exercises runGecko
+  // with mock security + fetch instead.
+  const { checkOrigin, verifyAuth, pickAllowOrigin } = await import('./lib/security.js');
+  return runGecko(request, { checkOrigin, verifyAuth, pickAllowOrigin });
 }

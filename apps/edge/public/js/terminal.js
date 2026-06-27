@@ -1825,20 +1825,22 @@ function renderTopbar() {
   rb.querySelector('.regime-dot').style.background = REGIME.bucket === 'bear' ? 'var(--red)' : REGIME.bucket === 'chop' ? 'var(--amb)' : 'var(--grn)';
   document.getElementById('regime-text').textContent = (REGIME.label || REGIME.bucket || '—').toUpperCase() + ' · ' + (REGIME.score | 0);
 
-  // Batch B: honest source/freshness badge.
+  // Batch B / Phase 4: honest source/freshness badge.
   //   LIVE   → fresh live-built snapshot (green)
   //   STALE  → last-good snapshot served because upstream failed (amber)
   //   OFFLINE→ the fetch itself failed (red)
+  // Decision lives in the pure, unit-tested freshness-badge.js module
+  // (window.freshnessBadge). The inline fallback keeps the badge rendering
+  // if that module ever fails to load — no regression to a blank/stuck badge.
   const fresh = window.__marketsFreshness || {};
-  let srcCls = 's-mock', srcLabel = SRC;
-  if (SRC === 'ERROR' || fresh.ok === false) { srcCls = 's-error'; srcLabel = 'OFFLINE'; }
-  else if (SRC === 'STALE' || fresh.stale === true) { srcCls = 's-stale'; srcLabel = 'STALE'; }
-  else if (SRC === 'LIVE') { srcCls = 's-live'; srcLabel = 'LIVE'; }
+  const badge = (typeof window.freshnessBadge === 'function')
+    ? window.freshnessBadge(fresh, SRC)
+    : { cls: SRC.includes('LIVE') ? 's-live' : 's-mock', label: SRC, title: SRC };
   const srcb = document.getElementById('srcb');
-  srcb.className = 'sbadge ' + srcCls;
-  srcb.textContent = srcLabel;
-  srcb.title = fresh.servedFrom ? ('source: ' + fresh.servedFrom) : srcLabel;
-  document.getElementById('sts').textContent = srcLabel;
+  srcb.className = 'sbadge ' + badge.cls;
+  srcb.textContent = badge.label;
+  srcb.title = badge.title;
+  document.getElementById('sts').textContent = badge.label;
   // Show the TRUE data age (snapshot build time) when the edge reported it,
   // instead of always painting the current wall-clock as if it were fresh.
   const lu = document.getElementById('last-update');
@@ -11268,7 +11270,10 @@ window.fetchGeckoHighlights = async function(force = false) {
     statusEl.style.color = 'var(--acc)';
     statusEl.style.background = 'var(--s3)';
     const url = '/api/coingecko-highlights' + (force ? '?_t=' + Date.now() : '');
-    const res = await fetch(url);
+    // GECKO is now auth-gated (origin + Supabase JWT) like /api/markets, so
+    // forward the bearer token the same way the scanner does.
+    const authHeaders = await _getAuthHeaders();
+    const res = await fetch(url, { headers: { 'Accept': 'application/json', ...authHeaders } });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     _geckoData = data;
@@ -11363,9 +11368,15 @@ window.renderGeckoHighlights = function() {
 
         // Resolvable rows select in-app (plain text, so one click = one action);
         // unresolved rows keep the external CoinGecko link.
+        // Resolvable rows select in-app; unresolved rows may carry an external
+        // CoinGecko link. The href is scraped upstream, so route it through
+        // _safeUrl (http(s)/relative only) — a `javascript:`/`data:` href is
+        // dropped and the row degrades to plain text rather than a clickable
+        // script link.
         let nameHtml;
+        const geckoHref = scannerId ? '' : _safeUrl(item.href);
         if (scannerId) nameHtml = `<span class="gecko-name-text">${_esc(item.name)}</span>`;
-        else if (item.href) nameHtml = `<a href="${_esc(item.href)}" target="_blank" rel="noopener" class="gecko-link">${_esc(item.name)}</a>`;
+        else if (geckoHref) nameHtml = `<a href="${geckoHref}" target="_blank" rel="noopener" class="gecko-link">${_esc(item.name)}</a>`;
         else nameHtml = _esc(item.name);
         const symHtml = item.symbol ? `<span class="gecko-sym">${_esc(item.symbol)}</span>` : '';
 

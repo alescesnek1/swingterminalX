@@ -27,13 +27,13 @@ test('fresh data renders LIVE, stale renders STALE', () => {
   assert.match(js, /SRC\s*=\s*window\.__marketsFreshness\.stale\s*\?\s*['"]STALE['"]\s*:\s*['"]LIVE['"]/);
 });
 
-test('badge maps states to distinct classes (live=green, stale=amber, error=red)', () => {
-  assert.match(js, /'s-error'/);
-  assert.match(js, /'s-stale'/);
-  assert.match(js, /'s-live'/);
-  // The stale/error branches must not fall through to the live class.
-  assert.match(js, /SRC === 'STALE' \|\| fresh\.stale === true/);
-  assert.match(js, /SRC === 'ERROR' \|\| fresh\.ok === false/);
+test('badge decision is delegated to the pure freshness-badge module (with fallback)', () => {
+  // Phase 4: the live/stale/error mapping moved to freshness-badge.js (real
+  // behavior coverage in frontend.freshness-badge-behavior.test.mjs). terminal.js
+  // calls it via window.freshnessBadge and keeps a safe inline fallback.
+  assert.match(js, /window\.freshnessBadge\(fresh, SRC\)/);
+  assert.match(js, /typeof window\.freshnessBadge === 'function'/);
+  assert.match(js, /srcb\.className = 'sbadge ' \+ badge\.cls/);
 });
 
 test('degraded badge classes exist in CSS', () => {

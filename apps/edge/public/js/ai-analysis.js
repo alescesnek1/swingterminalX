@@ -13,6 +13,8 @@
 // every chunk via formatAnalysis().
 // ─────────────────────────────────────────────────────────────
 
+import { escapeText, formatAnalysis } from './ai-format.js';
+
 const API_URL = '/api/analyze';
 const BRIEFING_URL = '/api/briefing';
 const MKT_BRIEFING_URL = '/api/market-briefing';
@@ -206,27 +208,10 @@ function renderError(bodyEl, metaEl, error, status) {
   }
 }
 
-function escapeText(s) {
-  return String(s ?? '').replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  }[c]));
-}
-
-function formatAnalysis(text) {
-  if (!text) return '';
-  return text
-    .replace(/^### (.+)$/gm, '<h5>$1</h5>')
-    .replace(/^## (.+)$/gm, '<h4>$1</h4>')
-    .replace(/^# (.+)$/gm, '<h3>$1</h3>')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/^- (.+)$/gm, '<li>$1</li>')
-    .replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>')
-    .replace(/\n{2,}/g, '</p><p>')
-    .replace(/\n/g, '<br>')
-    .replace(/^/, '<p>')
-    .replace(/$/, '</p>');
-}
+// escapeText + formatAnalysis now live in ./ai-format.js (pure, testable).
+// formatAnalysis there escapes the upstream text BEFORE applying markdown,
+// closing the innerHTML XSS path that existed when raw model output was
+// converted straight to HTML.
 
 function extractBriefingText(payload) {
   if (!payload || typeof payload !== 'object') return '';
