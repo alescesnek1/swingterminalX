@@ -20,6 +20,7 @@
 import { logFatal, logWarn } from './lib/log.js';
 import { verifyAuth, checkOrigin, pickAllowOrigin } from './lib/security.js';
 import { getTier, COIN_CAPS, tierSeesDex, TIER_FREE, TIER_PRO } from './lib/tier.js';
+import { buildFreshnessMeta, freshnessHeaders, SERVED_LIVE, SERVED_STALE } from './lib/freshness.js';
 
 const COINGECKO_MARKETS_URL_PAGE1 =
   'https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=1&sparkline=true&price_change_percentage=1h,24h,7d';
@@ -897,6 +898,10 @@ export default async function handler(request) {
     // V6.8 Sprint 1 (FIX-6): O(1) tier lookup — no parse, no filter, no
     // stringify on the hot path.
     const body = tier === TIER_PRO ? bundle.proBody : bundle.freeBody;
+    // Batch B: freshness metadata. `bundle.at` is the true snapshot build
+    // time (== now for a fresh build, ≤ TTL old for an in-isolate cache
+    // hit), so the browser can show real data age instead of wall-clock.
+    const freshMeta = buildFreshnessMeta({ servedFrom: SERVED_LIVE, generatedAt: bundle.at, now });
     // V6.8 Sprint 1 (FIX-1): restore CDN caching. Cache-Control comes
     // straight from cacheHeaders() (s-maxage=30, SWR=60). MARKETS_SCHEMA_VERSION
     // bumps are the safe invalidation mechanism; `no-cache` was the wrong tool
@@ -905,6 +910,7 @@ export default async function handler(request) {
       ...cacheHeaders(request),
       'X-Tier': tier,
       'X-Markets-Schema': MARKETS_SCHEMA_VERSION,
+      ...freshnessHeaders(freshMeta),
       'Vary': 'Authorization, Origin',
     };
     return new Response(body, { status: 200, headers });
@@ -912,9 +918,14 @@ export default async function handler(request) {
     logFatal({ location: 'markets/handler', error: err, payload: { cached_fallback_available: !!_responseCache, tier } });
     if (_responseCache) {
       const body = tier === TIER_PRO ? _responseCache.proBody : _responseCache.freeBody;
+      // Batch B: mark this explicitly as a stale last-good snapshot so the
+      // UI can degrade the source badge (amber STALE) instead of showing
+      // green LIVE over a frozen book. Preserves the prior X-Served-From
+      // value and adds X-Stale / X-Generated-At / X-Age-Ms.
+      const staleMeta = buildFreshnessMeta({ servedFrom: SERVED_STALE, generatedAt: _responseCache.at, now: Date.now() });
       return new Response(body, {
         status: 200,
-        headers: { ...cacheHeaders(request), 'X-Served-From': 'stale-memory', 'X-Tier': tier, 'X-Markets-Schema': MARKETS_SCHEMA_VERSION },
+        headers: { ...cacheHeaders(request), 'X-Tier': tier, 'X-Markets-Schema': MARKETS_SCHEMA_VERSION, ...freshnessHeaders(staleMeta) },
       });
     }
     return new Response(JSON.stringify({ error: err.message }), {

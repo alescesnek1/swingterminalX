@@ -1742,9 +1742,24 @@ async function fetchData() {
       window.Toast?.error('Market data fetch failed', `HTTP ${r.status} — ${body.slice(0,140)}`, { endpoint: '/api/markets', code: r.status });
       throw new Error('HTTP ' + r.status);
     }
+    // Batch B: read freshness metadata off the response headers (the body
+    // stays a bare row array, so tier slicing is untouched). When the edge
+    // serves a last-good snapshot because upstream failed it sets
+    // X-Served-From: stale-memory + X-Stale: true — we must NOT paint that
+    // green LIVE.
+    const _servedFrom = (r.headers.get('X-Served-From') || 'live').toLowerCase();
+    const _staleHdr = r.headers.get('X-Stale') === 'true';
+    const _genAtRaw = r.headers.get('X-Generated-At');
+    const _genAtMs = _genAtRaw ? Date.parse(_genAtRaw) : NaN;
+    window.__marketsFreshness = {
+      ok: true,
+      servedFrom: _servedFrom,
+      stale: _staleHdr || _servedFrom !== 'live',
+      generatedAt: Number.isFinite(_genAtMs) ? _genAtMs : null,
+    };
     let rawData = await r.json();
-    console.log("🔍 Data from /api/markets:", rawData);
-    
+    if (window.__DEBUG) console.log("🔍 Data from /api/markets:", rawData);
+
     // Normalizace symbolů ze surových Binance stringů
     if (Array.isArray(rawData)) {
       rawData.forEach(d => {
@@ -1778,9 +1793,12 @@ async function fetchData() {
     }
 
     live = rawData;
-    SRC = 'BINANCE-LIVE';
+    // Batch B: honest source label. Only fresh, live-built snapshots get
+    // the green LIVE badge; a stale last-good snapshot is surfaced as STALE.
+    SRC = window.__marketsFreshness.stale ? 'STALE' : 'LIVE';
   } catch(e) {
     SRC = 'ERROR';
+    window.__marketsFreshness = { ok: false, servedFrom: 'error', stale: true, generatedAt: null };
     console.error('Data fetch err:', e);
     window.Toast?.error('Scanner refresh failed', e.message || String(e), { endpoint: '/api/markets' });
   }
@@ -1807,10 +1825,29 @@ function renderTopbar() {
   rb.querySelector('.regime-dot').style.background = REGIME.bucket === 'bear' ? 'var(--red)' : REGIME.bucket === 'chop' ? 'var(--amb)' : 'var(--grn)';
   document.getElementById('regime-text').textContent = (REGIME.label || REGIME.bucket || '—').toUpperCase() + ' · ' + (REGIME.score | 0);
 
-  document.getElementById('srcb').className = 'sbadge ' + (SRC.includes('LIVE') ? 's-live' : 's-mock');
-  document.getElementById('srcb').textContent = SRC;
-  document.getElementById('sts').textContent = SRC;
-  document.getElementById('last-update').textContent = new Date().toLocaleTimeString('cs-CZ');
+  // Batch B: honest source/freshness badge.
+  //   LIVE   → fresh live-built snapshot (green)
+  //   STALE  → last-good snapshot served because upstream failed (amber)
+  //   OFFLINE→ the fetch itself failed (red)
+  const fresh = window.__marketsFreshness || {};
+  let srcCls = 's-mock', srcLabel = SRC;
+  if (SRC === 'ERROR' || fresh.ok === false) { srcCls = 's-error'; srcLabel = 'OFFLINE'; }
+  else if (SRC === 'STALE' || fresh.stale === true) { srcCls = 's-stale'; srcLabel = 'STALE'; }
+  else if (SRC === 'LIVE') { srcCls = 's-live'; srcLabel = 'LIVE'; }
+  const srcb = document.getElementById('srcb');
+  srcb.className = 'sbadge ' + srcCls;
+  srcb.textContent = srcLabel;
+  srcb.title = fresh.servedFrom ? ('source: ' + fresh.servedFrom) : srcLabel;
+  document.getElementById('sts').textContent = srcLabel;
+  // Show the TRUE data age (snapshot build time) when the edge reported it,
+  // instead of always painting the current wall-clock as if it were fresh.
+  const lu = document.getElementById('last-update');
+  if (Number.isFinite(fresh.generatedAt)) {
+    const ageSec = Math.max(0, Math.round((Date.now() - fresh.generatedAt) / 1000));
+    lu.textContent = new Date(fresh.generatedAt).toLocaleTimeString('cs-CZ') + ' · ' + ageSec + 's';
+  } else {
+    lu.textContent = new Date().toLocaleTimeString('cs-CZ');
+  }
 
   const top10 = DATA.slice(0, 10);
   document.getElementById('tkr').innerHTML = top10.map(d => {

@@ -45,6 +45,10 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .sbadge{font-size:9px;padding:2px 6px;border-radius:2px;font-weight:600;letter-spacing:.04em}
 .s-live{background:rgba(0,212,132,.1);color:var(--grn);border:1px solid rgba(0,212,132,.25)}
 .s-mock{background:rgba(255,176,32,.1);color:var(--amb);border:1px solid rgba(255,176,32,.25)}
+/* Batch B: explicit degraded-data states. Amber = stale last-good snapshot,
+   red = fetch failed / offline. Never let stale data wear the green LIVE badge. */
+.s-stale{background:rgba(255,176,32,.12);color:var(--amb);border:1px solid rgba(255,176,32,.35)}
+.s-error{background:rgba(255,51,86,.12);color:var(--red);border:1px solid rgba(255,51,86,.35)}
 .hbtn{background:none;border:1px solid var(--b2);color:var(--txt2);font-family:var(--mono);font-size:9px;padding:2px 8px;border-radius:var(--rad);cursor:pointer;letter-spacing:.05em;transition:all .15s}
 .hbtn:hover{color:var(--acc);border-color:rgba(0,232,200,.4)}
 #last-update{font-size:9px;color:var(--txt3)}
