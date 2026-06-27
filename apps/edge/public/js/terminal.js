@@ -11147,6 +11147,46 @@ function _geckoDash(v) {
   return _esc(String(v));
 }
 
+// Navigation only: resolve a GECKO highlight item to an existing Scanner coin id,
+// conservatively. Exact, unambiguous symbol match first, then exact, unambiguous
+// name match. Ambiguous matches are rejected (no fuzzy mapping). Returns the
+// Scanner coin id (DATA[i].id, consumed by pickCoin) or null so the caller can
+// fail soft. This NEVER creates a trading signal — it only enables selection.
+const _geckoUnmatchedWarned = new Set();
+function _geckoScannerId(item) {
+  if (!item || typeof DATA === 'undefined' || !Array.isArray(DATA) || !DATA.length) return null;
+  // Only coin highlights map to Scanner coins (categories/unlocks are not coins).
+  if (!item.href || item.href.indexOf('/coins/') === -1) return null;
+
+  const sym = String(item.symbol || '').trim().toUpperCase();
+  const name = String(item.name || '').trim().toLowerCase();
+
+  // 1. Exact, unambiguous symbol match (against base symbol or pair base).
+  if (sym.length >= 2) {
+    const bySym = DATA.filter(d => {
+      const s1 = String(d.symbol || '').trim().toUpperCase();
+      const s2 = String(d.baseAsset || '').trim().toUpperCase();
+      return s1 === sym || s2 === sym;
+    });
+    if (bySym.length === 1) return bySym[0].id;
+    // multiple → ambiguous symbol; fall through to the more specific name match
+  }
+
+  // 2. Exact, unambiguous name match.
+  if (name) {
+    const byName = DATA.filter(d => String(d.name || '').trim().toLowerCase() === name);
+    if (byName.length === 1) return byName[0].id;
+  }
+
+  // Fail soft — no error. Deduped so the console is not flooded per render.
+  const key = sym + '|' + name;
+  if (!_geckoUnmatchedWarned.has(key)) {
+    _geckoUnmatchedWarned.add(key);
+    console.warn('[GECKO] scanner match not found', item);
+  }
+  return null;
+}
+
 // Decide which columns a section should honestly render, from its backend
 // valueMode plus the actual coverage of the rows being shown. Never invents a
 // column: price/24h only appear where values exist; volume sections show VOLUME;
@@ -11263,11 +11303,12 @@ window.renderGeckoHighlights = function() {
       cards += `<div class="gecko-card__empty">\u2014 no items \u2014</div>`;
     } else {
       const gridCols = layout.gridCols;
-      // Header row \u2014 labels reflect the section's real value mode.
-      let hdr = `<span class="gecko-col-rank">#</span><span class="gecko-col-name">COIN</span>`;
-      if (layout.showVolume) hdr += `<span class="gecko-col-price">VOLUME</span>`;
-      else if (layout.showPrice) hdr += `<span class="gecko-col-price">${layout.priceLabel}</span>`;
-      if (layout.showChange) hdr += `<span class="gecko-col-chg">${layout.changeLabel}</span>`;
+      // Header row \u2014 labels reflect the section's real value mode. Each header cell
+      // carries the stable `gecko-col-head` class for debugging/tests.
+      let hdr = `<span class="gecko-col-rank gecko-col-head">#</span><span class="gecko-col-name gecko-col-head">COIN</span>`;
+      if (layout.showVolume) hdr += `<span class="gecko-col-price gecko-col-head">VOLUME</span>`;
+      else if (layout.showPrice) hdr += `<span class="gecko-col-price gecko-col-head">${layout.priceLabel}</span>`;
+      if (layout.showChange) hdr += `<span class="gecko-col-chg gecko-col-head">${layout.changeLabel}</span>`;
       cards += `<div class="gecko-row gecko-row--hdr" style="grid-template-columns:${gridCols}">${hdr}</div>`;
 
       for (const item of validItems) {
@@ -11276,11 +11317,24 @@ window.renderGeckoHighlights = function() {
         if (typeof chgVal === 'number' && chgVal > 0) chgColor = 'var(--grn)';
         if (typeof chgVal === 'number' && chgVal < 0) chgColor = 'var(--red)';
 
-        let nameHtml = _esc(item.name);
-        if (item.href) nameHtml = `<a href="${_esc(item.href)}" target="_blank" rel="noopener" class="gecko-link">${_esc(item.name)}</a>`;
+        // Navigation only: if this coin resolves unambiguously to a Scanner coin,
+        // make the whole row select it there via the existing [data-coin-id]
+        // delegation (pickCoin + sv('scanner')). No signal, selection only.
+        const scannerId = _geckoScannerId(item);
+        let rowAttrs = `class="gecko-row" style="grid-template-columns:${gridCols}"`;
+        if (scannerId) {
+          rowAttrs = `class="gecko-row gecko-row--link" style="grid-template-columns:${gridCols}" data-coin-id="${_esc(scannerId)}" data-coin-tab="scanner" title="Open ${_esc(item.name)} in Scanner"`;
+        }
+
+        // Resolvable rows select in-app (plain text, so one click = one action);
+        // unresolved rows keep the external CoinGecko link.
+        let nameHtml;
+        if (scannerId) nameHtml = `<span class="gecko-name-text">${_esc(item.name)}</span>`;
+        else if (item.href) nameHtml = `<a href="${_esc(item.href)}" target="_blank" rel="noopener" class="gecko-link">${_esc(item.name)}</a>`;
+        else nameHtml = _esc(item.name);
         const symHtml = item.symbol ? `<span class="gecko-sym">${_esc(item.symbol)}</span>` : '';
 
-        cards += `<div class="gecko-row" style="grid-template-columns:${gridCols}">`;
+        cards += `<div ${rowAttrs}>`;
         cards += `<span class="gecko-col-rank">${item.rank || '\u2014'}</span>`;
         cards += `<span class="gecko-col-name gecko-row-name">${nameHtml}${symHtml}</span>`;
         if (layout.showVolume) cards += `<span class="gecko-col-price gecko-row-price gecko-row-volume">${_geckoDash(item.priceText)}</span>`;
@@ -11315,6 +11369,9 @@ window.renderGeckoHighlights = function() {
       .gecko-card__empty{padding:16px;text-align:center;color:var(--txt3);font-size:11px}
       .gecko-row{display:grid;grid-template-columns:36px 1fr auto auto;gap:6px;padding:4px 14px;align-items:center;font-size:12px}
       .gecko-row:hover{background:var(--s3)}
+      .gecko-row--link{cursor:pointer}
+      .gecko-row--link:hover{background:var(--s3);box-shadow:inset 2px 0 0 var(--acc)}
+      .gecko-name-text{color:var(--txt1)}
       .gecko-row--hdr{font-size:9px;color:var(--txt3);font-weight:600;letter-spacing:.3px;padding-bottom:4px;border-bottom:1px solid var(--b1);margin-bottom:2px}
       .gecko-row--hdr:hover{background:transparent}
       .gecko-col-rank{color:var(--txt3);font-size:11px;text-align:center}

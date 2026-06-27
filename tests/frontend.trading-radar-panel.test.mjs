@@ -538,7 +538,7 @@ test('GECKO UI renders columns by section value mode (price/volume/informational
   assert.match(terminalJs, /gecko-col-chg gecko-row-change/);
   // Volume sections show a VOLUME label + value, not a misleading PRICE.
   assert.match(terminalJs, /layout\.showVolume/);
-  assert.match(terminalJs, /<span class="gecko-col-price">VOLUME<\/span>/);
+  assert.match(terminalJs, /<span class="gecko-col-price gecko-col-head">VOLUME<\/span>/);
   assert.match(terminalJs, /gecko-row-price gecko-row-volume/);
   // ATH section relabels the change column rather than faking 24h.
   assert.match(terminalJs, /changeLabel = 'FROM ATH'/);
@@ -590,4 +590,62 @@ test('GECKO UI exposes a partial-data warning chip in the section header', () =>
   assert.match(terminalJs, /gecko-card__warn/);
   assert.match(terminalJs, /partial data/);
   assert.match(terminalJs, /if \(layout\.partial\)/);
+});
+
+test('GECKO UI tags column header cells with stable gecko-col-head class', () => {
+  // Every header cell (rank/name/price|volume/change) carries gecko-col-head so a
+  // `.gecko-col-head` query returns the column labels.
+  assert.match(terminalJs, /gecko-col-rank gecko-col-head">#/);
+  assert.match(terminalJs, /gecko-col-name gecko-col-head">COIN/);
+  assert.match(terminalJs, /gecko-col-price gecko-col-head">VOLUME/);
+  assert.match(terminalJs, /gecko-col-price gecko-col-head">\$\{layout\.priceLabel\}/);
+  assert.match(terminalJs, /gecko-col-chg gecko-col-head">\$\{layout\.changeLabel\}/);
+});
+
+test('GECKO coin rows wire into the existing Scanner pickCoin delegation (selection only)', () => {
+  // Conservative resolver exists and is consulted per row.
+  assert.match(terminalJs, /function _geckoScannerId\(item\)/);
+  assert.match(terminalJs, /const scannerId = _geckoScannerId\(item\)/);
+  // Resolvable rows carry data-coin-id + data-coin-tab="scanner" so the existing
+  // document-level [data-coin-id] delegation calls pickCoin(id) + sv('scanner').
+  assert.match(terminalJs, /gecko-row--link/);
+  assert.match(terminalJs, /data-coin-id="\$\{_esc\(scannerId\)\}" data-coin-tab="scanner"/);
+  // Fail-soft, no error, deduped warning when no match.
+  assert.match(terminalJs, /\[GECKO\] scanner match not found/);
+  // Navigation only — the gecko renderer must not emit any trading signal / entry.
+  const start = terminalJs.indexOf('window.renderGeckoHighlights = function');
+  const region = terminalJs.slice(start, start + 6000);
+  assert.doesNotMatch(region, /ENTRY_READY|executionIntent|placeOrder|sendTelegram|telegramEligible/);
+});
+
+test('GECKO Scanner resolver: exact symbol, then exact name, ambiguous and non-coin rejected', () => {
+  const fn = extractFn(terminalJs, '_geckoScannerId');
+  const origWarn = console.warn;
+  console.warn = () => {};
+  globalThis._geckoUnmatchedWarned = new Set();
+  globalThis.DATA = [
+    { id: 'bitcoin', symbol: 'BTC', name: 'Bitcoin' },
+    { id: 'velvet', symbol: 'VELVET', name: 'Velvet' },
+    { id: 'dup-a', symbol: 'DUP', name: 'Dup Alpha' },
+    { id: 'dup-b', symbol: 'DUP', name: 'Dup Beta' },
+  ];
+  try {
+    // Exact symbol match.
+    assert.equal(fn({ href: 'https://www.coingecko.com/en/coins/bitcoin', symbol: 'BTC', name: 'Mismatch' }), 'bitcoin');
+    // Exact name match when symbol is empty.
+    assert.equal(fn({ href: '/en/coins/velvet', symbol: '', name: 'Velvet' }), 'velvet');
+    // Ambiguous symbol with no unique name → no mapping.
+    assert.equal(fn({ href: '/en/coins/dup', symbol: 'DUP', name: 'Not Present' }), null);
+    // Non-coin href (category) → never mapped.
+    assert.equal(fn({ href: '/en/categories/defai', symbol: 'DEFAI', name: 'DeFAI' }), null);
+    // No match at all → null (soft fail).
+    assert.equal(fn({ href: '/en/coins/zzz', symbol: 'ZZZ', name: 'Nothing Here' }), null);
+    // Empty DATA → null.
+    globalThis.DATA = [];
+    assert.equal(fn({ href: '/en/coins/bitcoin', symbol: 'BTC', name: 'Bitcoin' }), null);
+  } finally {
+    console.warn = origWarn;
+    delete globalThis.DATA;
+    delete globalThis._geckoUnmatchedWarned;
+  }
 });
