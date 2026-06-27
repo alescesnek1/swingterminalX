@@ -25,6 +25,30 @@ const TARGET_SECTIONS = [
   'Missing Data Section' // For testing
 ];
 
+// Per-section value semantics. Drives honest UI rendering and diagnostics.
+//   price_change → row carries a spot price and/or a % change (coin market lists)
+//   volume       → row's primary $ value is trading volume, not price
+//   unlock       → row value is an unlock date/countdown (no price/change)
+//   category     → category cards (no price/change in source HTML)
+//   unknown      → informational rows with no price/change (e.g. upcoming vote counts)
+const SECTION_VALUE_MODE = {
+  trending_coins: 'price_change',
+  top_gainers: 'price_change',
+  top_losers: 'price_change',
+  new_coins: 'price_change',
+  most_viewed: 'price_change',
+  most_voted_coins: 'price_change',
+  price_change_since_ath: 'price_change',
+  highest_volume: 'volume',
+  incoming_token_unlocks: 'unlock',
+  upcoming_coins: 'unknown',
+  trending_categories: 'category',
+};
+
+export function sectionValueMode(key) {
+  return SECTION_VALUE_MODE[key] || 'unknown';
+}
+
 export function parseCoinGeckoHighlights(html) {
   if (!html || typeof html !== 'string') {
     return {
@@ -79,10 +103,22 @@ export function parseCoinGeckoHighlights(html) {
     
     const items = parseItemsFromBlock(block);
     if (items.length > 0) {
+      const key = current.title.toLowerCase().replace(/ /g, '_');
+      const priceCount = items.filter(i => i.priceText).length;
+      const change24hCount = items.filter(i => i.change24hText).length;
       sections.push({
-        key: current.title.toLowerCase().replace(/ /g, '_'),
+        key,
         title: current.title,
-        items
+        items,
+        // Per-section coverage diagnostics (debug only — never affects trading).
+        diagnostics: {
+          itemCount: items.length,
+          priceCount,
+          change24hCount,
+          missingPriceCount: items.length - priceCount,
+          missingChange24hCount: items.length - change24hCount,
+          valueMode: sectionValueMode(key)
+        }
       });
       totalItems += items.length;
     } else {

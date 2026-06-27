@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert';
 
-import { parseCoinGeckoHighlights, sanitizeName } from '../apps/edge/netlify/edge-functions/coingecko-highlights.js';
+import { parseCoinGeckoHighlights, sanitizeName, sectionValueMode } from '../apps/edge/netlify/edge-functions/coingecko-highlights.js';
 
 const mockHtml = `
 <html>
@@ -232,6 +232,121 @@ test('Parser drops rows that are empty or invalid after sanitization', (t) => {
   assert.strictEqual(yzi.name, 'YZI Labs (Prev. Binance Labs) Portfolio');
   // The empty-after-sanitization row was dropped entirely.
   assert.strictEqual(cats.items.find(i => i.href.endsWith('/blank')), undefined);
+});
+
+// ── Per-section value-mode + coverage diagnostics ──────────────────────────
+const diagHtml = `
+<html><body>
+  <div>
+    <h2>Top Gainers</h2>
+    <table>
+      <tr><td><a href="/en/coins/aaa">Alpha AAA</a></td><td>$1.50</td><td><span class="gecko-up">+12.0%</span></td></tr>
+      <tr><td><a href="/en/coins/bbb">Bravo BBB</a></td><td>$0.20</td><td><span class="gecko-up">+8.5%</span></td></tr>
+    </table>
+  </div>
+  <div>
+    <h2>Top Losers</h2>
+    <table>
+      <tr><td><a href="/en/coins/ccc">Charlie CCC</a></td><td>$3.00</td><td><span class="gecko-down">14.0%</span></td></tr>
+    </table>
+  </div>
+  <div>
+    <h2>Highest Volume</h2>
+    <table>
+      <tr><td><a href="/en/coins/ddd">Delta DDD</a></td><td>$45,000,000,000</td></tr>
+    </table>
+  </div>
+  <div>
+    <h2>Incoming Token Unlocks</h2>
+    <div><a href="/en/coins/eee">Echo EEE</a> 0 D 5 H 3 M</div>
+    <a href="/en/discover">See all unlocks</a>
+  </div>
+  <div>
+    <h2>Trending Categories</h2>
+    <div>
+      <a href="/en/categories/defai">DeFAI +174 more</a>
+      <a href="/en/categories/portfolio">YZI Labs Portfolio +156 more</a>
+    </div>
+  </div>
+</body></html>`;
+
+test('Section diagnostics: coverage counts are produced per section', (t) => {
+  const result = parseCoinGeckoHighlights(diagHtml);
+  const gainers = result.sections.find(s => s.key === 'top_gainers');
+  assert.ok(gainers && gainers.diagnostics, 'Top Gainers has diagnostics');
+  const d = gainers.diagnostics;
+  assert.strictEqual(d.itemCount, 2);
+  assert.strictEqual(d.priceCount, 2);
+  assert.strictEqual(d.change24hCount, 2);
+  assert.strictEqual(d.missingPriceCount, 0);
+  assert.strictEqual(d.missingChange24hCount, 0);
+  assert.strictEqual(d.valueMode, 'price_change');
+});
+
+test('Top Gainers fixture has price and positive 24h', (t) => {
+  const result = parseCoinGeckoHighlights(diagHtml);
+  const gainers = result.sections.find(s => s.key === 'top_gainers');
+  assert.strictEqual(gainers.items[0].name, 'Alpha');
+  assert.strictEqual(gainers.items[0].priceText, '$1.50');
+  assert.strictEqual(gainers.items[0].change24hPct, 12.0);
+  assert.strictEqual(gainers.items[0].change24hText, '+12.0%');
+});
+
+test('Top Losers fixture has price and negative 24h', (t) => {
+  const result = parseCoinGeckoHighlights(diagHtml);
+  const losers = result.sections.find(s => s.key === 'top_losers');
+  assert.strictEqual(losers.items[0].priceText, '$3.00');
+  assert.strictEqual(losers.items[0].change24hPct, -14.0);
+  assert.strictEqual(losers.items[0].change24hText, '-14.0%');
+});
+
+test('Highest Volume section is valueMode="volume"', (t) => {
+  const result = parseCoinGeckoHighlights(diagHtml);
+  const vol = result.sections.find(s => s.key === 'highest_volume');
+  assert.strictEqual(vol.diagnostics.valueMode, 'volume');
+  // Volume value is captured (in priceText) but there is no 24h change.
+  assert.strictEqual(vol.diagnostics.change24hCount, 0);
+  assert.strictEqual(vol.items[0].change24hText, '');
+});
+
+test('Incoming Token Unlocks section is valueMode="unlock" with no invented price/change', (t) => {
+  const result = parseCoinGeckoHighlights(diagHtml);
+  const unlocks = result.sections.find(s => s.key === 'incoming_token_unlocks');
+  assert.strictEqual(unlocks.diagnostics.valueMode, 'unlock');
+  assert.strictEqual(unlocks.diagnostics.priceCount, 0);
+  assert.strictEqual(unlocks.diagnostics.change24hCount, 0);
+  assert.strictEqual(unlocks.items[0].priceText, '');
+  assert.strictEqual(unlocks.items[0].change24hPct, null);
+  // Countdown fragment must not leak into the name.
+  assert.strictEqual(unlocks.items[0].name, 'Echo');
+});
+
+test('Trending Categories section is valueMode="category" with clean names', (t) => {
+  const result = parseCoinGeckoHighlights(diagHtml);
+  const cats = result.sections.find(s => s.key === 'trending_categories');
+  assert.strictEqual(cats.diagnostics.valueMode, 'category');
+  assert.strictEqual(cats.diagnostics.priceCount, 0);
+  assert.strictEqual(cats.items[0].name, 'DeFAI');
+});
+
+test('sectionValueMode classifies known sections and defaults to unknown', (t) => {
+  assert.strictEqual(sectionValueMode('top_gainers'), 'price_change');
+  assert.strictEqual(sectionValueMode('price_change_since_ath'), 'price_change');
+  assert.strictEqual(sectionValueMode('highest_volume'), 'volume');
+  assert.strictEqual(sectionValueMode('incoming_token_unlocks'), 'unlock');
+  assert.strictEqual(sectionValueMode('trending_categories'), 'category');
+  assert.strictEqual(sectionValueMode('upcoming_coins'), 'unknown');
+  assert.strictEqual(sectionValueMode('something_else'), 'unknown');
+});
+
+test('Missing values stay null and are never invented', (t) => {
+  const result = parseCoinGeckoHighlights(diagHtml);
+  const unlocks = result.sections.find(s => s.key === 'incoming_token_unlocks');
+  for (const item of unlocks.items) {
+    assert.strictEqual(item.change24hPct, null);
+    assert.strictEqual(item.priceText, '');
+    assert.strictEqual(item.change24hText, '');
+  }
 });
 
 test('Source guard: no Binance order endpoints, no Telegram sender, no worker mutation paths', (t) => {

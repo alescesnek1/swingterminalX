@@ -526,3 +526,68 @@ test('GECKO UI exposes stable debug/test selector classes on cards and rows', ()
   assert.match(terminalJs, /chgColor = 'var\(--red\)'/);
   assert.match(terminalJs, /_geckoDash\(item\.change24hText\)/);
 });
+
+test('GECKO UI renders columns by section value mode (price/volume/informational)', () => {
+  // A per-section layout decision exists and is driven by valueMode.
+  assert.match(terminalJs, /function _geckoSectionLayout\(/);
+  assert.match(terminalJs, /diag\.valueMode \|\| 'unknown'/);
+  // price/change sections still emit the stable price + change cells.
+  assert.match(terminalJs, /layout\.showPrice/);
+  assert.match(terminalJs, /layout\.showChange/);
+  assert.match(terminalJs, /gecko-col-price gecko-row-price/);
+  assert.match(terminalJs, /gecko-col-chg gecko-row-change/);
+  // Volume sections show a VOLUME label + value, not a misleading PRICE.
+  assert.match(terminalJs, /layout\.showVolume/);
+  assert.match(terminalJs, /<span class="gecko-col-price">VOLUME<\/span>/);
+  assert.match(terminalJs, /gecko-row-price gecko-row-volume/);
+  // ATH section relabels the change column rather than faking 24h.
+  assert.match(terminalJs, /changeLabel = 'FROM ATH'/);
+});
+
+test('GECKO UI section layout helper hides PRICE/24H for non-price sections and flags partial data', () => {
+  const layout = extractFn(terminalJs, '_geckoSectionLayout');
+  const sec = (key, valueMode) => ({ key, diagnostics: { valueMode } });
+
+  // Volume → VOLUME only, no change column, no PRICE.
+  const vol = layout(sec('highest_volume', 'volume'), [{ priceText: '$45B' }]);
+  assert.equal(vol.showVolume, true);
+  assert.equal(vol.showPrice, false);
+  assert.equal(vol.showChange, false);
+
+  // Unlock with no values → compact list (no price/24h columns).
+  const unlock = layout(sec('incoming_token_unlocks', 'unlock'), [{ priceText: '', change24hText: '' }]);
+  assert.equal(unlock.showPrice, false);
+  assert.equal(unlock.showChange, false);
+  assert.equal(unlock.gridCols, '36px 1fr');
+
+  // Category with no values → name-only list, no fake columns.
+  const cat = layout(sec('trending_categories', 'category'), [{ priceText: '', change24hText: '' }]);
+  assert.equal(cat.showPrice, false);
+  assert.equal(cat.showChange, false);
+
+  // ATH price_change with change-only rows → 24H column relabeled, no PRICE, no false partial.
+  const ath = layout(sec('price_change_since_ath', 'price_change'), [{ priceText: '', change24hText: '-52.2%' }]);
+  assert.equal(ath.showPrice, false);
+  assert.equal(ath.showChange, true);
+  assert.equal(ath.changeLabel, 'FROM ATH');
+  assert.equal(ath.partial, false);
+
+  // Coin market section fully populated → both columns, no warning.
+  const full = layout(sec('top_gainers', 'price_change'), [{ priceText: '$1', change24hText: '+5%' }]);
+  assert.equal(full.showPrice, true);
+  assert.equal(full.showChange, true);
+  assert.equal(full.partial, false);
+
+  // Coin market section missing some change values → partial-data warning.
+  const partial = layout(sec('trending_coins', 'price_change'), [
+    { priceText: '$1', change24hText: '+5%' },
+    { priceText: '$2', change24hText: '' },
+  ]);
+  assert.equal(partial.partial, true);
+});
+
+test('GECKO UI exposes a partial-data warning chip in the section header', () => {
+  assert.match(terminalJs, /gecko-card__warn/);
+  assert.match(terminalJs, /partial data/);
+  assert.match(terminalJs, /if \(layout\.partial\)/);
+});

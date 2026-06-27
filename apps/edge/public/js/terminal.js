@@ -11147,6 +11147,42 @@ function _geckoDash(v) {
   return _esc(String(v));
 }
 
+// Decide which columns a section should honestly render, from its backend
+// valueMode plus the actual coverage of the rows being shown. Never invents a
+// column: price/24h only appear where values exist; volume sections show VOLUME;
+// unlock/category/upcoming sections fall back to a compact name-only list.
+function _geckoSectionLayout(sec, validItems) {
+  const diag = sec.diagnostics || {};
+  const mode = diag.valueMode || 'unknown';
+  const n = validItems.length;
+  const vPrice = validItems.filter(i => i.priceText).length;
+  const vChange = validItems.filter(i => i.change24hText).length;
+
+  let showPrice = false, showChange = false, showVolume = false, partial = false;
+  let priceLabel = 'PRICE', changeLabel = '24H';
+
+  if (mode === 'volume') {
+    showVolume = true; // primary $ value is trading volume, not price
+  } else if (mode === 'price_change') {
+    showChange = true;            // coin-market lists always carry a change column
+    showPrice = vPrice > 0;       // ATH-style sections have no spot price \u2192 hide it
+    if (sec.key === 'price_change_since_ath') changeLabel = 'FROM ATH';
+    // Expected-but-missing data \u2192 flag the section honestly.
+    if (n > 0 && vChange < n) partial = true;
+    if (showPrice && vPrice < n) partial = true;
+  } else {
+    // unlock / category / unknown: informational. Only surface values that exist.
+    showPrice = vPrice > 0;
+    showChange = vChange > 0;
+  }
+
+  let gridCols = '36px 1fr';
+  if (showPrice || showVolume) gridCols += ' auto';
+  if (showChange) gridCols += ' auto';
+
+  return { mode, showPrice, showChange, showVolume, partial, priceLabel, changeLabel, gridCols };
+}
+
 window.fetchGeckoHighlights = async function(force = false) {
   const statusEl = document.getElementById('gecko-status');
   const infoEl = document.getElementById('gecko-info');
@@ -11208,19 +11244,32 @@ window.renderGeckoHighlights = function() {
     if (_geckoFilter !== 'all' && sec.key !== _geckoFilter) continue;
     const validItems = sec.items.filter(_geckoIsValidItem);
 
+    // Decide which columns this section honestly has, from its value mode and the
+    // actual coverage of the rendered rows (never pretend a column exists).
+    const layout = _geckoSectionLayout(sec, validItems);
+
     // Section card
     cards += `<div class="gecko-card">`;
     cards += `<div class="gecko-card__head">`;
     cards += `<span class="gecko-card__title gecko-card-title">${_esc(sec.title).toUpperCase()}</span>`;
+    cards += `<span class="gecko-card__meta">`;
+    if (layout.partial) cards += `<span class="gecko-card__warn" title="Some rows are missing expected price/24h data">partial data</span>`;
     cards += `<span class="gecko-card__count">${validItems.length}</span>`;
+    cards += `</span>`;
     cards += `</div>`;
     cards += `<div class="gecko-card__body">`;
 
     if (validItems.length === 0) {
       cards += `<div class="gecko-card__empty">\u2014 no items \u2014</div>`;
     } else {
-      // Header row
-      cards += `<div class="gecko-row gecko-row--hdr"><span class="gecko-col-rank">#</span><span class="gecko-col-name">COIN</span><span class="gecko-col-price">PRICE</span><span class="gecko-col-chg">24H</span></div>`;
+      const gridCols = layout.gridCols;
+      // Header row \u2014 labels reflect the section's real value mode.
+      let hdr = `<span class="gecko-col-rank">#</span><span class="gecko-col-name">COIN</span>`;
+      if (layout.showVolume) hdr += `<span class="gecko-col-price">VOLUME</span>`;
+      else if (layout.showPrice) hdr += `<span class="gecko-col-price">${layout.priceLabel}</span>`;
+      if (layout.showChange) hdr += `<span class="gecko-col-chg">${layout.changeLabel}</span>`;
+      cards += `<div class="gecko-row gecko-row--hdr" style="grid-template-columns:${gridCols}">${hdr}</div>`;
+
       for (const item of validItems) {
         let chgColor = 'var(--txt3)';
         const chgVal = item.change24hPct;
@@ -11231,11 +11280,12 @@ window.renderGeckoHighlights = function() {
         if (item.href) nameHtml = `<a href="${_esc(item.href)}" target="_blank" rel="noopener" class="gecko-link">${_esc(item.name)}</a>`;
         const symHtml = item.symbol ? `<span class="gecko-sym">${_esc(item.symbol)}</span>` : '';
 
-        cards += `<div class="gecko-row">`;
+        cards += `<div class="gecko-row" style="grid-template-columns:${gridCols}">`;
         cards += `<span class="gecko-col-rank">${item.rank || '\u2014'}</span>`;
         cards += `<span class="gecko-col-name gecko-row-name">${nameHtml}${symHtml}</span>`;
-        cards += `<span class="gecko-col-price gecko-row-price">${_geckoDash(item.priceText)}</span>`;
-        cards += `<span class="gecko-col-chg gecko-row-change" style="color:${chgColor}">${_geckoDash(item.change24hText)}</span>`;
+        if (layout.showVolume) cards += `<span class="gecko-col-price gecko-row-price gecko-row-volume">${_geckoDash(item.priceText)}</span>`;
+        else if (layout.showPrice) cards += `<span class="gecko-col-price gecko-row-price">${_geckoDash(item.priceText)}</span>`;
+        if (layout.showChange) cards += `<span class="gecko-col-chg gecko-row-change" style="color:${chgColor}">${_geckoDash(item.change24hText)}</span>`;
         cards += `</div>`;
       }
     }
@@ -11257,7 +11307,10 @@ window.renderGeckoHighlights = function() {
       .gecko-card{background:var(--s2);border:1px solid var(--b1);border-radius:var(--rad);overflow:hidden}
       .gecko-card__head{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:var(--s3);border-bottom:1px solid var(--b1)}
       .gecko-card__title{font-size:11px;font-weight:700;letter-spacing:.4px;color:var(--txt1)}
+      .gecko-card__meta{display:flex;align-items:center;gap:6px}
       .gecko-card__count{font-size:10px;color:var(--txt3);background:var(--s1);padding:1px 7px;border-radius:3px}
+      .gecko-card__warn{font-size:9px;font-weight:600;letter-spacing:.3px;text-transform:uppercase;color:var(--org);background:rgba(255,160,0,.12);padding:1px 6px;border-radius:3px}
+      .gecko-row-volume{color:var(--txt2)}
       .gecko-card__body{padding:6px 0}
       .gecko-card__empty{padding:16px;text-align:center;color:var(--txt3);font-size:11px}
       .gecko-row{display:grid;grid-template-columns:36px 1fr auto auto;gap:6px;padding:4px 14px;align-items:center;font-size:12px}
