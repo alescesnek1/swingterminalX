@@ -513,3 +513,16 @@ test('GECKO UI rendering, view switching, and data fetching are correctly hooked
   // Degraded empty state
   assert.match(terminalJs, /CoinGecko highlights unavailable or empty/);
 });
+
+test('GECKO UI exposes stable debug/test selector classes on cards and rows', () => {
+  // Stable classes required by the console diagnostic check, added alongside the
+  // existing BEM/col classes (additive — does not remove styling hooks).
+  assert.match(terminalJs, /gecko-card__title gecko-card-title/);
+  assert.match(terminalJs, /gecko-col-name gecko-row-name/);
+  assert.match(terminalJs, /gecko-col-price gecko-row-price/);
+  assert.match(terminalJs, /gecko-col-chg gecko-row-change/);
+  // 24h colour semantics preserved: positive green, negative red, missing muted dash.
+  assert.match(terminalJs, /chgColor = 'var\(--grn\)'/);
+  assert.match(terminalJs, /chgColor = 'var\(--red\)'/);
+  assert.match(terminalJs, /_geckoDash\(item\.change24hText\)/);
+});

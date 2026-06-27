@@ -11211,7 +11211,7 @@ window.renderGeckoHighlights = function() {
     // Section card
     cards += `<div class="gecko-card">`;
     cards += `<div class="gecko-card__head">`;
-    cards += `<span class="gecko-card__title">${_esc(sec.title).toUpperCase()}</span>`;
+    cards += `<span class="gecko-card__title gecko-card-title">${_esc(sec.title).toUpperCase()}</span>`;
     cards += `<span class="gecko-card__count">${validItems.length}</span>`;
     cards += `</div>`;
     cards += `<div class="gecko-card__body">`;
@@ -11233,9 +11233,9 @@ window.renderGeckoHighlights = function() {
 
         cards += `<div class="gecko-row">`;
         cards += `<span class="gecko-col-rank">${item.rank || '\u2014'}</span>`;
-        cards += `<span class="gecko-col-name">${nameHtml}${symHtml}</span>`;
-        cards += `<span class="gecko-col-price">${_geckoDash(item.priceText)}</span>`;
-        cards += `<span class="gecko-col-chg" style="color:${chgColor}">${_geckoDash(item.change24hText)}</span>`;
+        cards += `<span class="gecko-col-name gecko-row-name">${nameHtml}${symHtml}</span>`;
+        cards += `<span class="gecko-col-price gecko-row-price">${_geckoDash(item.priceText)}</span>`;
+        cards += `<span class="gecko-col-chg gecko-row-change" style="color:${chgColor}">${_geckoDash(item.change24hText)}</span>`;
         cards += `</div>`;
       }
     }

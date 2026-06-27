@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert';
 
-import { parseCoinGeckoHighlights } from '../apps/edge/netlify/edge-functions/coingecko-highlights.js';
+import { parseCoinGeckoHighlights, sanitizeName } from '../apps/edge/netlify/edge-functions/coingecko-highlights.js';
 
 const mockHtml = `
 <html>
@@ -170,6 +170,68 @@ test('Parser does not invent missing prices/symbols/change values', (t) => {
   assert.strictEqual(missing.items[0].priceText, '');
   assert.strictEqual(missing.items[0].change24hPct, null);
   assert.strictEqual(missing.items[0].change24hText, '');
+});
+
+test('Name sanitizer strips trailing "ca" market-cap artifact', (t) => {
+  assert.strictEqual(sanitizeName('Velvet ca'), 'Velvet');
+  assert.strictEqual(sanitizeName('Pudgy Penguins ca'), 'Pudgy Penguins');
+});
+
+test('Name sanitizer strips "D H M S" countdown fragments', (t) => {
+  assert.strictEqual(sanitizeName('Yield Guild Games D H M S ca'), 'Yield Guild Games');
+  assert.strictEqual(sanitizeName('Arbitrum 12D 3H 4M 5S'), 'Arbitrum');
+});
+
+test('Name sanitizer strips "+N more" overflow fragments', (t) => {
+  assert.strictEqual(sanitizeName('DeFAI +174 more ca'), 'DeFAI');
+  assert.strictEqual(
+    sanitizeName('YZI Labs (Prev. Binance Labs) Portfolio +156 more ca'),
+    'YZI Labs (Prev. Binance Labs) Portfolio'
+  );
+});
+
+test('Name sanitizer strips trailing numeric junk that is not a symbol', (t) => {
+  assert.strictEqual(sanitizeName('Hiki 753'), 'Hiki');
+});
+
+test('Name sanitizer strips raw / truncated HTML fragments', (t) => {
+  assert.strictEqual(sanitizeName('AthenaDAO <div class="tw-flex...'), 'AthenaDAO');
+  assert.strictEqual(sanitizeName('Foo <span class="text-green-500">+2%</span>'), 'Foo +2%');
+  // Raw HTML tags must never survive in a name.
+  assert.ok(!/[<>]/.test(sanitizeName('Bar <div class="tw-foo">baz')));
+});
+
+test('Name sanitizer preserves clean names and legitimate substrings', (t) => {
+  assert.strictEqual(sanitizeName('Bitcoin'), 'Bitcoin');
+  assert.strictEqual(sanitizeName('Pudgy Penguins'), 'Pudgy Penguins');
+  // "ca" only stripped as a standalone trailing token, not inside a word.
+  assert.strictEqual(sanitizeName('Inca'), 'Inca');
+});
+
+test('Parser drops rows that are empty or invalid after sanitization', (t) => {
+  const dirtyHtml = `
+    <html><body>
+      <h2>Trending Categories</h2>
+      <div>
+        <a href="/en/categories/defai">DeFAI +174 more ca</a>
+        <a href="/en/categories/yzi-labs">YZI Labs (Prev. Binance Labs) Portfolio +156 more ca</a>
+        <a href="/en/categories/blank"><div class="tw-flex"></div></a>
+      </div>
+    </body></html>`;
+  const result = parseCoinGeckoHighlights(dirtyHtml);
+  const cats = result.sections.find(s => s.key === 'trending_categories');
+  assert.ok(cats, 'Found Trending Categories section');
+  for (const item of cats.items) {
+    assert.ok(!/[<>]/.test(item.name), `name must not contain HTML: ${item.name}`);
+    assert.ok(!/\+\s*\d+\s*more/i.test(item.name), `name must not contain "+N more": ${item.name}`);
+    assert.ok(!/\bca\b\s*$/i.test(item.name), `name must not end with "ca": ${item.name}`);
+  }
+  const defai = cats.items.find(i => i.href.endsWith('/defai'));
+  assert.strictEqual(defai.name, 'DeFAI');
+  const yzi = cats.items.find(i => i.href.endsWith('/yzi-labs'));
+  assert.strictEqual(yzi.name, 'YZI Labs (Prev. Binance Labs) Portfolio');
+  // The empty-after-sanitization row was dropped entirely.
+  assert.strictEqual(cats.items.find(i => i.href.endsWith('/blank')), undefined);
 });
 
 test('Source guard: no Binance order endpoints, no Telegram sender, no worker mutation paths', (t) => {

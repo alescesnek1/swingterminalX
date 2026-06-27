@@ -143,7 +143,8 @@ function parseItemsFromBlock(block) {
   const seenHrefs = new Set();
   
   for (const item of items) {
-    if (item.name && !seenHrefs.has(item.href)) {
+    // Drop rows whose name is empty or obviously invalid after sanitization.
+    if (isValidName(item.name) && !seenHrefs.has(item.href)) {
       validItems.push(item);
       seenHrefs.add(item.href);
     }
@@ -154,6 +155,54 @@ function parseItemsFromBlock(block) {
 
 function stripTags(s) {
   return String(s || '').replace(/<\/?[^>]+>/g, ' ').replace(/\s+/g, ' ');
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Strict name sanitizer.
+// Removes parser artifacts from a coin/category name without inventing data.
+// Handles: raw/truncated HTML tags & attributes, "+123 more" link fragments,
+// "D H M S" countdown fragments, trailing "ca" (market cap) artifact, footer/nav
+// link text, and trailing numeric junk that is not a symbol.
+// ────────────────────────────────────────────────────────────────────────────
+export function sanitizeName(raw) {
+  if (raw == null) return '';
+  let s = String(raw);
+
+  // 1. Strip complete HTML tags, then truncated/partial tags (e.g. `<div class="tw-flex...`).
+  s = s.replace(/<\/?[a-z][^>]*>/gi, ' '); // complete tags
+  s = s.replace(/<\/?[a-z][^>]*$/gi, ' '); // truncated opening tag running to end of string
+  // Leftover bare HTML attribute / class fragments (e.g. class="tw-flex...", style=...).
+  s = s.replace(/\b(?:class|style|href|src|data-[\w-]+|aria-[\w-]+)\s*=\s*"[^"]*"?/gi, ' ');
+  s = s.replace(/\btw-[\w-]+/gi, ' '); // tailwind utility class fragments
+  // HTML entities.
+  s = s.replace(/&[a-z]+;/gi, ' ');
+  s = s.replace(/\s+/g, ' ').trim();
+
+  // 2. "+123 more" fragments (trending category overflow links).
+  s = s.replace(/\+\s*\d+\s*more\b/gi, ' ');
+
+  // 3. "D H M S" / "12D 3H 4M 5S" countdown fragments (token-unlock timers).
+  //    Requires at least two consecutive D/H/M/S tokens so single-letter names survive.
+  s = s.replace(/\b\d*\s*[DHMS](?:\s+\d*\s*[DHMS])+\b/g, ' ');
+  s = s.replace(/\s+/g, ' ').trim();
+
+  // 4. Trailing standalone "ca" artifact (market-cap link text).
+  s = s.replace(/\bca\b\s*$/i, ' ');
+  s = s.replace(/\s+/g, ' ').trim();
+
+  // 5. Trailing numeric junk that is not a symbol (e.g. "Hiki 753" -> "Hiki").
+  s = s.replace(/\s+[\d][\d,.]*$/g, '');
+
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+// A name is usable only if, after sanitization, it still has real word content.
+function isValidName(name) {
+  const n = String(name || '').trim();
+  if (n.length < 2) return false;
+  if (!/[A-Za-z0-9]/.test(n)) return false; // pure punctuation / junk
+  if (/[<>]/.test(n)) return false;          // residual HTML must never survive
+  return true;
 }
 
 function parseRawTextIntoItem(item) {
@@ -204,7 +253,7 @@ function parseRawTextIntoItem(item) {
   // Exclude tokens that look like price, percent, or pure large numbers (e.g. volume)
   const nameTokens = tokens.filter(t => !t.includes('$') && !t.includes('%') && !/^[0-9,.]+$/.test(t));
   
-  let name = nameTokens[0] || 'Unknown';
+  let name = nameTokens[0] || ''; // do not invent a name; empty rows are dropped later
   let symbol = '';
   
   for (let i = 1; i < nameTokens.length; i++) {
@@ -224,6 +273,9 @@ function parseRawTextIntoItem(item) {
   if (symbol && name.endsWith(symbol) && name !== symbol) {
       name = name.substring(0, name.length - symbol.length).trim();
   }
+
+  // Final strict sanitization pass — strip parser artifacts from the name.
+  name = sanitizeName(name);
 
   return {
     rank,
