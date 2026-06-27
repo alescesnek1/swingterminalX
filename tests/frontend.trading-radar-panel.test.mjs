@@ -606,23 +606,46 @@ test('GECKO coin rows wire into the existing Scanner pickCoin delegation (select
   // Conservative resolver exists and is consulted per row.
   assert.match(terminalJs, /function _geckoScannerId\(item\)/);
   assert.match(terminalJs, /const scannerId = _geckoScannerId\(item\)/);
-  // Resolvable rows carry data-coin-id + data-coin-tab="scanner" so the existing
-  // document-level [data-coin-id] delegation calls pickCoin(id) + sv('scanner').
+  // data-coin-id / data-coin-tab are only emitted INSIDE the `if (scannerId)`
+  // branch, so unresolved rows (scannerId === null) get neither attribute.
+  assert.match(terminalJs, /if \(scannerId\) \{\s*rowAttrs = `class="gecko-row gecko-row--link"[^`]*data-coin-id="\$\{_esc\(scannerId\)\}" data-coin-tab="scanner"/);
   assert.match(terminalJs, /gecko-row--link/);
-  assert.match(terminalJs, /data-coin-id="\$\{_esc\(scannerId\)\}" data-coin-tab="scanner"/);
-  // Fail-soft, no error, deduped warning when no match.
-  assert.match(terminalJs, /\[GECKO\] scanner match not found/);
+  // The resolver is silent — no console spam for the (expected) unresolved rows.
+  assert.doesNotMatch(terminalJs, /\[GECKO\] scanner match not found/);
   // Navigation only — the gecko renderer must not emit any trading signal / entry.
   const start = terminalJs.indexOf('window.renderGeckoHighlights = function');
   const region = terminalJs.slice(start, start + 6000);
   assert.doesNotMatch(region, /ENTRY_READY|executionIntent|placeOrder|sendTelegram|telegramEligible/);
 });
 
+test('GECKO Scanner resolver is silent on render: no console.warn for unresolved rows', () => {
+  const fn = extractFn(terminalJs, '_geckoScannerId');
+  const calls = [];
+  const origWarn = console.warn;
+  const origLog = console.log;
+  console.warn = (...a) => calls.push(a);
+  console.log = (...a) => calls.push(a);
+  globalThis.DATA = [{ id: 'bitcoin', symbol: 'BTC', name: 'Bitcoin' }];
+  try {
+    // A batch of unresolved rows (none present in the Scanner) — must stay silent.
+    for (const it of [
+      { href: '/en/coins/velvet', symbol: '', name: 'Velvet' },
+      { href: '/en/coins/pudgy', symbol: 'PENGU', name: 'Pudgy Penguins' },
+      { href: '/en/categories/defai', symbol: 'DEFAI', name: 'DeFAI' },
+      { href: '/en/coins/zzz', symbol: 'ZZZ', name: 'Nothing' },
+    ]) {
+      assert.equal(fn(it), null);
+    }
+    assert.equal(calls.length, 0, 'resolver must not log anything for unresolved rows');
+  } finally {
+    console.warn = origWarn;
+    console.log = origLog;
+    delete globalThis.DATA;
+  }
+});
+
 test('GECKO Scanner resolver: exact symbol, then exact name, ambiguous and non-coin rejected', () => {
   const fn = extractFn(terminalJs, '_geckoScannerId');
-  const origWarn = console.warn;
-  console.warn = () => {};
-  globalThis._geckoUnmatchedWarned = new Set();
   globalThis.DATA = [
     { id: 'bitcoin', symbol: 'BTC', name: 'Bitcoin' },
     { id: 'velvet', symbol: 'VELVET', name: 'Velvet' },
@@ -644,8 +667,6 @@ test('GECKO Scanner resolver: exact symbol, then exact name, ambiguous and non-c
     globalThis.DATA = [];
     assert.equal(fn({ href: '/en/coins/bitcoin', symbol: 'BTC', name: 'Bitcoin' }), null);
   } finally {
-    console.warn = origWarn;
     delete globalThis.DATA;
-    delete globalThis._geckoUnmatchedWarned;
   }
 });

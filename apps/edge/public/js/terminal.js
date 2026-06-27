@@ -11152,7 +11152,10 @@ function _geckoDash(v) {
 // name match. Ambiguous matches are rejected (no fuzzy mapping). Returns the
 // Scanner coin id (DATA[i].id, consumed by pickCoin) or null so the caller can
 // fail soft. This NEVER creates a trading signal — it only enables selection.
-const _geckoUnmatchedWarned = new Set();
+//
+// Silent by default: unresolved rows are EXPECTED (CoinGecko lists many coins not
+// in the Scanner), so this never logs during render — it just returns null and the
+// caller leaves the row non-clickable.
 function _geckoScannerId(item) {
   if (!item || typeof DATA === 'undefined' || !Array.isArray(DATA) || !DATA.length) return null;
   // Only coin highlights map to Scanner coins (categories/unlocks are not coins).
@@ -11178,12 +11181,7 @@ function _geckoScannerId(item) {
     if (byName.length === 1) return byName[0].id;
   }
 
-  // Fail soft — no error. Deduped so the console is not flooded per render.
-  const key = sym + '|' + name;
-  if (!_geckoUnmatchedWarned.has(key)) {
-    _geckoUnmatchedWarned.add(key);
-    console.warn('[GECKO] scanner match not found', item);
-  }
+  // No safe match — fail soft and silent (unresolved rows are expected, not errors).
   return null;
 }
 
