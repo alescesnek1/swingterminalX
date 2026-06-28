@@ -20,6 +20,12 @@ const DISCLAIMER = 'Observation only · not a trade signal';
 function _key(d) {
   return String((d && (d.id != null ? d.id : d.symbol)) || '').toLowerCase();
 }
+// Raw (non-lowercased) coin id — this is what the rest of the app uses as
+// data-coin-id / pickCoin(id), so chips must navigate with this exact value,
+// not the lowercased match key.
+function _rawId(d) {
+  return String((d && (d.id != null ? d.id : d.symbol)) || '');
+}
 function _sym(d) {
   return String((d && d.symbol) || _key(d) || '').toUpperCase();
 }
@@ -54,9 +60,9 @@ export function marketsDigest(prevMarkets, currMarkets, opts = {}) {
   const prevKeys = new Set(prevTop.map(_key).filter(Boolean));
 
   const entered = currTop.filter((d) => _key(d) && !prevKeys.has(_key(d)))
-    .map((d) => ({ id: _key(d), symbol: _sym(d) })).slice(0, maxItems);
+    .map((d) => ({ id: _rawId(d), symbol: _sym(d) })).slice(0, maxItems);
   const left = prevTop.filter((d) => _key(d) && !currKeys.has(_key(d)))
-    .map((d) => ({ id: _key(d), symbol: _sym(d) })).slice(0, maxItems);
+    .map((d) => ({ id: _rawId(d), symbol: _sym(d) })).slice(0, maxItems);
 
   // 24h-change delta for coins present in BOTH snapshots, sorted by the size
   // of the move (largest absolute change first). Observation, not a call.
@@ -72,7 +78,7 @@ export function marketsDigest(prevMarkets, currMarkets, opts = {}) {
     if (from == null || to == null) continue;
     const delta = to - from;
     if (!Number.isFinite(delta) || Math.abs(delta) < 0.01) continue;
-    movers.push({ symbol: _sym(d), from, to, delta });
+    movers.push({ id: _rawId(d), symbol: _sym(d), from, to, delta });
   }
   movers.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
 

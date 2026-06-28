@@ -1897,7 +1897,10 @@ function renderChangeDigest() {
     nowMs: window.__marketsSnapshotAt || Date.now(),
   });
 
-  const pill = (sym) => `<span class="cd-pill" data-coin-id="${_esc(String(sym).toLowerCase())}" data-coin-tab="scanner">${_esc(sym)}</span>`;
+  // Chips navigate via the existing [data-coin-id] click delegation (pickCoin +
+  // sv('scanner')) — selection only, never a signal. Use the RAW coin id the
+  // rest of the app keys on, so the click actually resolves the right coin.
+  const pill = (it) => `<span class="cd-pill" data-coin-id="${_esc(String(it.id || ''))}" data-coin-tab="scanner">${_esc(it.symbol)}</span>`;
   const rows = [];
 
   if (d.firstSnapshot) {
@@ -1906,12 +1909,12 @@ function renderChangeDigest() {
     rows.push(`<div class="cd-empty">No notable changes since the previous snapshot.</div>`);
   } else {
     const m = d.markets;
-    if (m.entered.length) rows.push(`<div class="cd-line"><span class="cd-tag cd-in">ENTERED TOP</span>${m.entered.map(x => pill(x.symbol)).join('')}</div>`);
-    if (m.left.length)    rows.push(`<div class="cd-line"><span class="cd-tag cd-out">LEFT TOP</span>${m.left.map(x => pill(x.symbol)).join('')}</div>`);
+    if (m.entered.length) rows.push(`<div class="cd-line"><span class="cd-tag cd-in">ENTERED TOP</span>${m.entered.map(pill).join('')}</div>`);
+    if (m.left.length)    rows.push(`<div class="cd-line"><span class="cd-tag cd-out">LEFT TOP</span>${m.left.map(pill).join('')}</div>`);
     if (m.movers.length) {
       const mv = m.movers.map(x => {
         const cls = x.delta >= 0 ? 'pos' : 'neg';
-        return `<div class="cd-mover">${pill(x.symbol)} <span class="cd-mv">24h ${_esc(fp(x.from,1))} → ${_esc(fp(x.to,1))}</span> <span class="${cls}">Δ${_esc(fp(x.delta,1))}</span></div>`;
+        return `<div class="cd-mover">${pill(x)} <span class="cd-mv">24h ${_esc(fp(x.from,1))} → ${_esc(fp(x.to,1))}</span> <span class="${cls}">Δ${_esc(fp(x.delta,1))}</span></div>`;
       }).join('');
       rows.push(`<div class="cd-line cd-col"><span class="cd-tag">BIGGEST 24H MOVES</span>${mv}</div>`);
     }
@@ -1923,9 +1926,11 @@ function renderChangeDigest() {
     }
   }
 
+  const freshCls = d.comparisonLevel === 'limited' ? 'cd-fresh cd-fresh--limited' : 'cd-fresh';
   el.innerHTML =
-    `<div class="cd-head"><span class="cd-title">WHAT CHANGED</span><span class="cd-disc">${_esc(d.disclaimer)}</span></div>` +
-    `<div class="cd-fresh">${_esc(d.freshnessNote)}</div>` +
+    `<div class="cd-head"><span class="cd-title">WHAT CHANGED</span></div>` +
+    `<div class="cd-disc">${_esc(d.disclaimer)}</div>` +
+    `<div class="${freshCls}">${_esc(d.freshnessNote)}</div>` +
     rows.join('');
 }
 

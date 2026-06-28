@@ -30,6 +30,23 @@ test('new and removed coins in the top set are detected', () => {
   assert.deepEqual(m.left.map((x) => x.symbol), ['SOL']);
 });
 
+test('entered/left/mover items carry the RAW coin id used by pickCoin (not the lowercased symbol)', () => {
+  // d.id is the CoinGecko id (e.g. "bitcoin"), distinct from the symbol; chips
+  // must navigate with the exact id the app keys on or the click silently no-ops.
+  const prev = [{ id: 'bitcoin', symbol: 'BTC', score: 9, price_change_percentage_24h: 1 }];
+  const curr = [
+    { id: 'bitcoin', symbol: 'BTC', score: 9, price_change_percentage_24h: 4 },
+    { id: 'dogwifcoin', symbol: 'WIF', score: 9.5, price_change_percentage_24h: 2 },
+  ];
+  const m = marketsDigest(prev, curr, { topN: 1 }); // top-1 → WIF (9.5) enters, BTC leaves
+  assert.equal(m.entered[0].id, 'dogwifcoin');     // raw id, not "wif"
+  assert.equal(m.entered[0].symbol, 'WIF');
+  assert.equal(m.left[0].id, 'bitcoin');
+  // movers preserve the raw id too.
+  const m2 = marketsDigest(prev, curr, { topN: 10 });
+  assert.equal(m2.movers.find((x) => x.symbol === 'BTC').id, 'bitcoin');
+});
+
 test('24h-change movers are sorted by absolute delta since the previous refresh', () => {
   const prev = [coin('btc', 9, 1), coin('eth', 8, 2), coin('sol', 7, 0)];
   const curr = [coin('btc', 9, 3), coin('eth', 8, 1.5), coin('sol', 7, 9)]; // Δ: btc +2, eth -0.5, sol +9
