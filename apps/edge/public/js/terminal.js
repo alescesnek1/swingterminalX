@@ -11291,7 +11291,12 @@ window.fetchGeckoHighlights = async function(force = false) {
     statusEl.textContent = 'ERROR';
     statusEl.style.color = 'var(--red)';
     statusEl.style.background = 'rgba(255,60,60,.12)';
-    if (infoEl) infoEl.textContent = err.message;
+    // If a prior snapshot is still on screen, say so explicitly — the stale
+    // cards must not be mistaken for live data. Otherwise show the unavailable
+    // empty state. (Display-only: the cards themselves are left untouched.)
+    if (infoEl) infoEl.textContent = _geckoData
+      ? `Showing last snapshot · refresh failed (${err.message})`
+      : err.message;
     if (!_geckoData) container.innerHTML = `<div class="gecko-empty">CoinGecko highlights unavailable: ${_esc(err.message)}</div>`;
   }
 };
