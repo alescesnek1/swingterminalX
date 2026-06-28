@@ -59,11 +59,19 @@ function _esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 function _safeUrl(u) {
+  // Canonical, unit-tested implementation lives in url-safety.js
+  // (window.__urlSafety). The inline fallback below is the IDENTICAL check
+  // so the URL allowlist still holds even if that module fails to load —
+  // a security sink must never silently open up.
+  if (window.__urlSafety && typeof window.__urlSafety.safeUrl === 'function') {
+    return window.__urlSafety.safeUrl(u);
+  }
   const s = String(u || '').trim();
   if (!s) return '';
-  // Allow only http(s) and explicit relative paths. Block javascript:,
-  // data:, vbscript:, file:, ftp:, etc.
-  if (/^(https?:\/\/|\/)/i.test(s)) return _esc(s);
+  // Allow only http(s) and single-slash relative paths. The (?!\/) lookahead
+  // rejects protocol-relative //host (and ///host) which resolve to a foreign
+  // origin. Block javascript:, data:, vbscript:, file:, ftp:, etc.
+  if (/^(https?:\/\/|\/(?!\/))/i.test(s)) return _esc(s);
   return '';
 }
 
@@ -11229,35 +11237,22 @@ function _geckoScannerId(item) {
 // column: price/24h only appear where values exist; volume sections show VOLUME;
 // unlock/category/upcoming sections fall back to a compact name-only list.
 function _geckoSectionLayout(sec, validItems) {
-  const diag = sec.diagnostics || {};
-  const mode = diag.valueMode || 'unknown';
-  const n = validItems.length;
-  const vPrice = validItems.filter(i => i.priceText).length;
-  const vChange = validItems.filter(i => i.change24hText).length;
-
-  let showPrice = false, showChange = false, showVolume = false, partial = false;
-  let priceLabel = 'PRICE', changeLabel = '24H';
-
-  if (mode === 'volume') {
-    showVolume = true; // primary $ value is trading volume, not price
-  } else if (mode === 'price_change') {
-    showChange = true;            // coin-market lists always carry a change column
-    showPrice = vPrice > 0;       // ATH-style sections have no spot price \u2192 hide it
-    if (sec.key === 'price_change_since_ath') changeLabel = 'FROM ATH';
-    // Expected-but-missing data \u2192 flag the section honestly.
-    if (n > 0 && vChange < n) partial = true;
-    if (showPrice && vPrice < n) partial = true;
-  } else {
-    // unlock / category / unknown: informational. Only surface values that exist.
-    showPrice = vPrice > 0;
-    showChange = vChange > 0;
+  // Canonical, unit-tested implementation lives in gecko-layout.js
+  // (window.__geckoLayout). terminal.js delegates so the column-honesty
+  // logic has real behavior coverage (frontend.gecko-layout.test.mjs).
+  if (window.__geckoLayout && typeof window.__geckoLayout.sectionLayout === 'function') {
+    return window.__geckoLayout.sectionLayout(sec, validItems);
   }
-
+  // Inline fallback (module failed to load): stay HONEST \u2014 surface only the
+  // columns whose values actually exist in the rows, never invent one.
+  const items = Array.isArray(validItems) ? validItems : [];
+  const vPrice = items.filter(i => i && i.priceText).length;
+  const vChange = items.filter(i => i && i.change24hText).length;
+  const showPrice = vPrice > 0, showChange = vChange > 0;
   let gridCols = '36px 1fr';
-  if (showPrice || showVolume) gridCols += ' auto';
+  if (showPrice) gridCols += ' auto';
   if (showChange) gridCols += ' auto';
-
-  return { mode, showPrice, showChange, showVolume, partial, priceLabel, changeLabel, gridCols };
+  return { mode: 'unknown', showPrice, showChange, showVolume: false, partial: false, priceLabel: 'PRICE', changeLabel: '24H', gridCols };
 }
 
 window.fetchGeckoHighlights = async function(force = false) {

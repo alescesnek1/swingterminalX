@@ -3,6 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
 const terminalJs = fs.readFileSync(new URL('../apps/edge/public/js/terminal.js', import.meta.url), 'utf8');
+// GECKO section-column honesty now lives in the pure, importable gecko-layout.js
+// module (terminal.js delegates to it). The two GECKO layout tests below read
+// the canonical module instead of the old inline terminal.js copy. Behavioural
+// coverage also lives in frontend.gecko-layout.test.mjs.
+const geckoLayoutJs = fs.readFileSync(new URL('../apps/edge/public/js/gecko-layout.js', import.meta.url), 'utf8');
 const terminalCss = fs.readFileSync(new URL('../apps/edge/public/css/terminal.css', import.meta.url), 'utf8');
 const indexHtml = fs.readFileSync(new URL('../apps/edge/public/index.html', import.meta.url), 'utf8');
 const botSrc = fs.readFileSync(new URL('../netlify/functions/bot.mjs', import.meta.url), 'utf8');
@@ -528,9 +533,11 @@ test('GECKO UI exposes stable debug/test selector classes on cards and rows', ()
 });
 
 test('GECKO UI renders columns by section value mode (price/volume/informational)', () => {
-  // A per-section layout decision exists and is driven by valueMode.
+  // The per-section layout decision is driven by valueMode and now lives in the
+  // pure gecko-layout.js module; terminal.js delegates to it (window.__geckoLayout).
   assert.match(terminalJs, /function _geckoSectionLayout\(/);
-  assert.match(terminalJs, /diag\.valueMode \|\| 'unknown'/);
+  assert.match(terminalJs, /window\.__geckoLayout[\s\S]*?sectionLayout\(sec, validItems\)/);
+  assert.match(geckoLayoutJs, /diag\.valueMode \|\| 'unknown'/);
   // price/change sections still emit the stable price + change cells.
   assert.match(terminalJs, /layout\.showPrice/);
   assert.match(terminalJs, /layout\.showChange/);
@@ -541,11 +548,11 @@ test('GECKO UI renders columns by section value mode (price/volume/informational
   assert.match(terminalJs, /<span class="gecko-col-price gecko-col-head">VOLUME<\/span>/);
   assert.match(terminalJs, /gecko-row-price gecko-row-volume/);
   // ATH section relabels the change column rather than faking 24h.
-  assert.match(terminalJs, /changeLabel = 'FROM ATH'/);
+  assert.match(geckoLayoutJs, /changeLabel = 'FROM ATH'/);
 });
 
 test('GECKO UI section layout helper hides PRICE/24H for non-price sections and flags partial data', () => {
-  const layout = extractFn(terminalJs, '_geckoSectionLayout');
+  const layout = extractFn(geckoLayoutJs, 'geckoSectionLayout');
   const sec = (key, valueMode) => ({ key, diagnostics: { valueMode } });
 
   // Volume → VOLUME only, no change column, no PRICE.

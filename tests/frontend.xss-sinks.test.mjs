@@ -18,9 +18,10 @@ test('_esc escapes the five HTML-significant characters', () => {
   assert.match(js, /function _esc\(s\)\s*\{[\s\S]*&amp;[\s\S]*&lt;[\s\S]*&gt;[\s\S]*&quot;[\s\S]*&#39;/);
 });
 
-test('_safeUrl only allows http(s) / relative and escapes the result', () => {
+test('_safeUrl only allows http(s) / single-slash relative and escapes the result', () => {
   assert.match(js, /function _safeUrl\(u\)/);
-  assert.match(js, /\^\(https\?:\\\/\\\/\|\\\/\)/); // the /^(https?:\/\/|\/)/ allowlist
+  // /^(https?:\/\/|\/(?!\/))/ allowlist — the (?!\/) guard blocks protocol-relative //host.
+  assert.match(js, /\^\(https\?:\\\/\\\/\|\\\/\(\?!\\\/\)\)/);
 });
 
 test('GECKO external link href is sanitized with _safeUrl, not raw _esc', () => {
