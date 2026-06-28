@@ -1871,6 +1871,64 @@ function renderTopbar() {
   }).join('');
 }
 
+// ─────────────────────────────────────────────────────────────
+// "WHAT CHANGED?" digest — OBSERVATION ONLY.
+//
+// Renders a compact left-rail card summarising what moved since the previous
+// snapshot (coins entering/leaving the top set, biggest 24h moves, newly
+// trending GECKO names). The diff logic is the pure, unit-tested
+// change-digest.js module (window.__changeDigest). This is a read-only aid:
+// it produces NO trade signal, never touches RADAR/Telegram/Auto-Trader, and
+// always shows the "not a trade signal" disclaimer.
+// ─────────────────────────────────────────────────────────────
+function renderChangeDigest() {
+  const el = document.getElementById('change-digest');
+  if (!el) return;
+  const cd = window.__changeDigest;
+  if (!cd || typeof cd.buildChangeDigest !== 'function') { el.innerHTML = ''; return; }
+
+  const d = cd.buildChangeDigest({
+    prevMarkets: window.__prevMarketsSnapshot || null,
+    currMarkets: Array.isArray(DATA) ? DATA : [],
+    prevGecko: (_geckoPrev && _geckoPrev.sections) || null,
+    currGecko: (_geckoData && _geckoData.sections) || null,
+    freshness: window.__marketsFreshness || {},
+    prevAtMs: window.__prevMarketsSnapshotAt || null,
+    nowMs: window.__marketsSnapshotAt || Date.now(),
+  });
+
+  const pill = (sym) => `<span class="cd-pill" data-coin-id="${_esc(String(sym).toLowerCase())}" data-coin-tab="scanner">${_esc(sym)}</span>`;
+  const rows = [];
+
+  if (d.firstSnapshot) {
+    rows.push(`<div class="cd-empty">${_esc(d.freshnessNote)}</div>`);
+  } else if (!d.hasChanges) {
+    rows.push(`<div class="cd-empty">No notable changes since the previous snapshot.</div>`);
+  } else {
+    const m = d.markets;
+    if (m.entered.length) rows.push(`<div class="cd-line"><span class="cd-tag cd-in">ENTERED TOP</span>${m.entered.map(x => pill(x.symbol)).join('')}</div>`);
+    if (m.left.length)    rows.push(`<div class="cd-line"><span class="cd-tag cd-out">LEFT TOP</span>${m.left.map(x => pill(x.symbol)).join('')}</div>`);
+    if (m.movers.length) {
+      const mv = m.movers.map(x => {
+        const cls = x.delta >= 0 ? 'pos' : 'neg';
+        return `<div class="cd-mover">${pill(x.symbol)} <span class="cd-mv">24h ${_esc(fp(x.from,1))} → ${_esc(fp(x.to,1))}</span> <span class="${cls}">Δ${_esc(fp(x.delta,1))}</span></div>`;
+      }).join('');
+      rows.push(`<div class="cd-line cd-col"><span class="cd-tag">BIGGEST 24H MOVES</span>${mv}</div>`);
+    }
+    if (d.gecko && d.gecko.newBySection && d.gecko.newBySection.length) {
+      const g = d.gecko.newBySection.map(s =>
+        `<div class="cd-gecko"><span class="cd-gecko-sec">${_esc(String(s.section).toUpperCase())}</span> ${s.names.map(n => `<span class="cd-gname">${_esc(n)}</span>`).join('')}</div>`
+      ).join('');
+      rows.push(`<div class="cd-line cd-col"><span class="cd-tag">NEW IN GECKO</span>${g}</div>`);
+    }
+  }
+
+  el.innerHTML =
+    `<div class="cd-head"><span class="cd-title">WHAT CHANGED</span><span class="cd-disc">${_esc(d.disclaimer)}</span></div>` +
+    `<div class="cd-fresh">${_esc(d.freshnessNote)}</div>` +
+    rows.join('');
+}
+
 // V6.4: hard cap at 500 active coins in the scanner DOM.
 // Server ships up to 1000; scanner paginates; movers uses the full pool.
 const MAX_RENDERED = 500;
@@ -3706,7 +3764,15 @@ document.addEventListener('refresh_now', () => { doRefresh(); });
 async function doRefresh() {
   document.getElementById('sts').textContent = 'FETCHING...';
   const live = await fetchData();
-  if (live && live.length) DATA = live;
+  if (live && live.length) {
+    // Observation-only "WHAT CHANGED?" digest: retain the prior snapshot
+    // (and its timestamp) so the next render can diff it against the new one.
+    // Read-only — never feeds RADAR/Telegram/Auto-Trader.
+    window.__prevMarketsSnapshot = (Array.isArray(DATA) && DATA.length) ? DATA : null;
+    window.__prevMarketsSnapshotAt = window.__marketsSnapshotAt || null;
+    DATA = live;
+    window.__marketsSnapshotAt = Date.now();
+  }
 
   // V6.9 Sprint 2: compute sig(d) EXACTLY ONCE per refresh cycle.
   // The full result is cached on the coin (`d._sig`) and the score is
@@ -3784,6 +3850,7 @@ async function doRefresh() {
   renderMovers();
   renderAlerts();
   renderCockpit();
+  try { renderChangeDigest(); } catch (e) { /* digest is non-critical, never block render */ }
 
   // LiveFeed: push refresh event
   LiveFeed.push(`Data refreshed — ${DATA.length} coins loaded`, 'info');
@@ -11157,6 +11224,7 @@ window.paperBotInstance = paperBotInstance;
 // COINGECKO HIGHLIGHTS (READ-ONLY)
 // ============================================================================
 let _geckoData = null;
+let _geckoPrev = null; // prior GECKO snapshot, for the observation-only "WHAT CHANGED?" digest
 let _geckoFilter = 'all';
 
 // Priority order for sections — important ones first.
@@ -11271,6 +11339,9 @@ window.fetchGeckoHighlights = async function(force = false) {
     const res = await fetch(url, { headers: { 'Accept': 'application/json', ...authHeaders } });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
+    // Retain the prior GECKO snapshot before overwriting, so the
+    // observation-only digest can diff newly-trending coin names. Read-only.
+    if (_geckoData) _geckoPrev = _geckoData;
     _geckoData = data;
     if (data.ok) {
       statusEl.textContent = 'LIVE';
@@ -11287,6 +11358,8 @@ window.fetchGeckoHighlights = async function(force = false) {
     const itemCount = data.diagnostics ? data.diagnostics.itemCount : 0;
     infoEl.textContent = `${secCount} sections \u00B7 ${itemCount} items \u00B7 ${timeStr}`;
     window.renderGeckoHighlights();
+    // Refresh the observation-only digest so newly-trending GECKO names surface.
+    try { renderChangeDigest(); } catch (e) { /* non-critical */ }
   } catch (err) {
     statusEl.textContent = 'ERROR';
     statusEl.style.color = 'var(--red)';
