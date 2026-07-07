@@ -48,6 +48,7 @@ export const COCKPIT_ACTIONS = Object.freeze({
   REDUCE_RISK: 'REDUCE_RISK',
   EXIT: 'EXIT',
   INCOMPLETE_SETUP: 'INCOMPLETE_SETUP',
+  MANUAL_REVIEW: 'MANUAL_REVIEW',
   NO_LIVE_PRICE: 'NO_LIVE_PRICE',
 });
 
@@ -69,17 +70,41 @@ function realizedFromPartials(trade, entry, qty) {
   return { takenFraction, realizedPnl };
 }
 
-// Auto-detect + merge persisted TP hits. A TP is "hit" if price reached the zone
-// at any point (persisted) or the live price is at/above it now.
+// Auto-detect + merge persisted TP hits. A TP is "hit" if the live price is
+// at/above it now, OR a persisted hit was recorded AT THE SAME LEVEL that is
+// configured now. Persisted hits are level-aware ({ price, at }); legacy boolean
+// `true` records are NOT trusted (re-derived from live) so a stale hit clears the
+// moment the TP level is edited.
 export function detectTpHits(trade = {}, current = null) {
   const persisted = (trade && trade.tpHits) || {};
   const tp = [n(trade.tp1), n(trade.tp2), n(trade.tp3)];
+  const persistedHit = (rec, lvl) =>
+    !!(rec && typeof rec === 'object' && rec.price != null && lvl != null && Number(rec.price) === Number(lvl));
   const live = (lvl) => lvl != null && current != null && current >= lvl;
   return {
-    tp1: !!(persisted.tp1 || live(tp[0])),
-    tp2: !!(persisted.tp2 || live(tp[1])),
-    tp3: !!(persisted.tp3 || live(tp[2])),
+    tp1: !!(persistedHit(persisted.tp1, tp[0]) || live(tp[0])),
+    tp2: !!(persistedHit(persisted.tp2, tp[1]) || live(tp[1])),
+    tp3: !!(persistedHit(persisted.tp3, tp[2]) || live(tp[2])),
   };
+}
+
+// Structural setup validation. For a long: stop must sit BELOW entry and every
+// provided TP ABOVE entry. Short is not yet supported here → always manual review
+// so we never apply long-only stop/TP math to a short position.
+export function validateSetup(side, entry, stop, tps = []) {
+  const isShort = String(side || 'long').toLowerCase() === 'short';
+  if (isShort) return { valid: false, reason: 'short trades not yet supported — manual review' };
+  if (entry == null || !(entry > 0)) return { valid: true }; // entry validated at the input layer
+  if (stop != null && stop > 0 && stop >= entry) {
+    return { valid: false, reason: 'Invalid long setup: stop must be below entry' };
+  }
+  for (let i = 0; i < tps.length; i++) {
+    const tp = tps[i];
+    if (tp != null && tp > 0 && tp <= entry) {
+      return { valid: false, reason: `Invalid long setup: TP${i + 1} must be above entry` };
+    }
+  }
+  return { valid: true };
 }
 
 export function evaluateTradeCockpit(trade = {}, market = {}, regime = {}, now = Date.now()) {
@@ -96,13 +121,38 @@ export function evaluateTradeCockpit(trade = {}, market = {}, regime = {}, now =
   const lastUpdate = market.updatedAt ? new Date(market.updatedAt).getTime() : (hasPrice ? now : null);
   const stale = lastUpdate != null && (now - lastUpdate) > STALE_MS;
   const safetyStatus = String(trade.safetyStatus || market.safetyStatus || 'UNKNOWN').toUpperCase();
+  const side = String(trade.side || 'long').toLowerCase();
 
   const base = {
-    symbol, mode: 'caution', priceUnavailable: false, lowConfidence: false, missingComponents: [],
+    symbol, side, mode: 'caution', priceUnavailable: false, lowConfidence: false, missingComponents: [],
     stopHit: false, safetyStatus, stale,
     tpHits: detectTpHits(trade, hasPrice ? current : null),
     timeInTradeMs: ageMs, lastUpdateMs: lastUpdate,
   };
+
+  // ── Structural setup validation: an invalid stop/TP geometry (or an
+  // unsupported short) OVERRIDES everything. Never emit a hard STOP/TP/EXIT
+  // verdict on a structurally invalid setup — force manual review instead. ──
+  const setup = validateSetup(side, entry, stop, tps);
+  if (!setup.valid) {
+    const pnlPctInv = (hasPrice && entry > 0) ? ((current - entry) / entry) * 100 : null;
+    return {
+      ...base,
+      status: 'INVALID_SETUP', action: COCKPIT_ACTIONS.MANUAL_REVIEW, mode: 'manual',
+      priceUnavailable: !hasPrice, lowConfidence: true,
+      stopHit: false, tpHits: { tp1: false, tp2: false, tp3: false },
+      missingComponents: ['orderBook', 'flow', 'derivatives'],
+      tradeHealthScore: null,
+      current: hasPrice ? round(current, 8) : null, entryPrice: entry, quantity: qty,
+      pnlPct: pnlPctInv == null ? null : round(pnlPctInv, 2),
+      unrealizedPnlUsd: null, realizedPnl: null, totalPnl: null, positionValue: null,
+      distanceToStopPct: null, distanceToTpPct: [null, null, null], nextTp: null,
+      suggestedStop: null, nextDecisionLevel: 'fix setup — manual review',
+      scores: { momentum: null, orderBook: null, flow: null, derivatives: null, market: null, progress: null },
+      reason: [setup.reason],
+      whyMissing: [], invalidation: setup.reason,
+    };
+  }
 
   // ── No live price: never fake PnL by using entry ──
   if (!hasPrice) {
@@ -233,6 +283,12 @@ export function evaluateTradeCockpit(trade = {}, market = {}, regime = {}, now =
   } else if (health >= 36) {
     status = 'TAKE_PROFIT_AGGRESSIVE'; action = pnlPct != null && pnlPct > 0 ? COCKPIT_ACTIONS.PROTECT_PROFIT : COCKPIT_ACTIONS.REDUCE_RISK; mode = 'profit';
     reasons.push('weak health — reduce / protect');
+  } else if (lowConfidence) {
+    // Critical health but the score is built on partial data (order book / flow /
+    // derivatives missing). Do NOT auto-exit on a low-confidence score — a hard
+    // exit here must come from a price-only trigger (stop hit) handled above.
+    status = 'MANUAL_REVIEW'; action = COCKPIT_ACTIONS.REDUCE_RISK; mode = 'caution';
+    reasons.push('weak health but low-confidence data — manual review (no auto-exit)');
   } else {
     status = 'EXIT_ALL'; action = COCKPIT_ACTIONS.EXIT; mode = 'exit';
     reasons.push('health critical — exit');
@@ -251,7 +307,7 @@ export function evaluateTradeCockpit(trade = {}, market = {}, regime = {}, now =
   const r2 = (v) => (v == null ? null : round(v, 2));
 
   return {
-    ...base, status, action, mode, lowConfidence, missingComponents,
+    ...base, side, status, action, mode, lowConfidence, missingComponents,
     tradeHealthScore: r0(health),
     current: round(current, 8), entryPrice: entry, quantity: qty,
     pnlPct: r2(pnlPct), unrealizedPnlUsd: r2(unrealizedPnlUsd), realizedPnl: round(realizedPnl, 2), totalPnl,
@@ -320,7 +376,7 @@ export function summarizeCockpit(evaluations = []) {
   const totalPnl = rows.reduce((sum, r) => sum + (n(r.totalPnl, 0) || 0), 0);
   const unrealized = rows.reduce((sum, r) => sum + (n(r.unrealizedPnlUsd, 0) || 0), 0);
   const healthRows = rows.filter((r) => r.tradeHealthScore != null);
-  const needsAction = rows.filter((r) => ['EXIT', 'TAKE_PARTIAL', 'TAKE_MORE', 'PROTECT_PROFIT', 'REDUCE_RISK', 'INCOMPLETE_SETUP', 'MOVE_STOP'].includes(r.action)).length;
+  const needsAction = rows.filter((r) => ['EXIT', 'TAKE_PARTIAL', 'TAKE_MORE', 'PROTECT_PROFIT', 'REDUCE_RISK', 'INCOMPLETE_SETUP', 'MANUAL_REVIEW', 'MOVE_STOP'].includes(r.action)).length;
   return {
     openTrades: rows.length,
     totalPositionValue: round(totalValue, 2),
@@ -329,7 +385,7 @@ export function summarizeCockpit(evaluations = []) {
     totalPnlPct: totalValue > 0 ? round((totalPnl / totalValue) * 100, 2) : 0,
     needsActionCount: needsAction,
     holdCount: count(['HOLD', 'HOLD_STRONG', 'ADD_ALLOWED']),
-    cautionCount: count(['HOLD_BUT_WATCH', 'MANUAL_REVIEW', 'INCOMPLETE_SETUP']),
+    cautionCount: count(['HOLD_BUT_WATCH', 'MANUAL_REVIEW', 'INCOMPLETE_SETUP', 'INVALID_SETUP']),
     takeProfitCount: count(['TAKE_PROFIT', 'TAKE_PROFIT_AGGRESSIVE']),
     exitCount: count(['EXIT_ALL', 'EMERGENCY_EXIT', 'RISK_OFF_EXIT']),
     noPriceCount: rows.filter((r) => r.status === 'NO_LIVE_PRICE').length,

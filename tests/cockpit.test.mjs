@@ -9,6 +9,7 @@ import {
   detectTpHits,
   buildCockpitAlerts,
   prefillFromRadarCandidate,
+  validateSetup,
   COCKPIT_ACTIONS,
 } from '../scripts/cockpit/trade-cockpit.mjs';
 
@@ -93,8 +94,9 @@ test('stop hit → EXIT + stopHit flag', () => {
 });
 
 test('near stop → REDUCE_RISK', () => {
+  // Valid long: stop BELOW entry, current just above the stop (danger zone).
   const r = evaluateTradeCockpit(
-    { symbol: 'INJUSDT', entryPrice: 18, quantity: 100, stopLoss: 19.7, tp1: 25, tp2: 28, tp3: 30 },
+    { symbol: 'INJUSDT', entryPrice: 21, quantity: 100, stopLoss: 19.7, tp1: 25, tp2: 28, tp3: 30 },
     full({ currentPrice: 19.86 }), { score: 70 },
   );
   assert.equal(r.action, COCKPIT_ACTIONS.REDUCE_RISK);
@@ -169,6 +171,118 @@ test('prefillFromRadarCandidate maps entry zone / stop / invalidation / TP from 
   assert.equal(t.tp3, 150);
   assert.equal(t.fromRadar, true);
   assert.equal(t.safetyStatus, 'UNKNOWN');
+});
+
+// ── Phase 1: live-trade validation safety ──────────────────────────────────
+
+test('KITE regression: long with stop above entry → INVALID_SETUP, no stop/TP/EXIT verdict', () => {
+  const r = evaluateTradeCockpit(
+    { symbol: 'KITEUSDT', side: 'long', entryPrice: 0.1084, quantity: 10000, stopLoss: 0.8900, tp1: 0.1980, tp2: 0.2390, tp3: 0.2560 },
+    full({ currentPrice: 0.1059 }), { score: 70 },
+  );
+  assert.equal(r.status, 'INVALID_SETUP');
+  assert.equal(r.action, COCKPIT_ACTIONS.MANUAL_REVIEW);
+  assert.equal(r.stopHit, false);
+  assert.notEqual(r.status, 'EXIT_ALL');
+  assert.equal(r.tpHits.tp1, false);
+  assert.equal(r.tpHits.tp2, false);
+  assert.equal(r.tpHits.tp3, false);
+  assert.match(r.reason.join(' '), /stop must be below entry/i);
+  // No hard-exit / TP alerts must be produced for an invalid setup.
+  const alerts = buildCockpitAlerts(r, {});
+  assert.equal(alerts.some((a) => a.type === 'STOP_HIT'), false);
+  assert.equal(alerts.some((a) => /TP\d_HIT/.test(a.type)), false);
+});
+
+test('long with a TP below entry → INVALID_SETUP', () => {
+  const r = evaluateTradeCockpit(
+    { symbol: 'ARBUSDT', side: 'long', entryPrice: 1, quantity: 100, stopLoss: 0.9, tp1: 0.8 },
+    full({ currentPrice: 0.95 }), { score: 70 },
+  );
+  assert.equal(r.status, 'INVALID_SETUP');
+  assert.match(r.reason.join(' '), /TP1 must be above entry/i);
+});
+
+test('valid long stop still hard-exits when current <= stop', () => {
+  const r = evaluateTradeCockpit(
+    { symbol: 'INJUSDT', side: 'long', entryPrice: 20, quantity: 100, stopLoss: 19, tp1: 24 },
+    full({ currentPrice: 18.9 }), { score: 60 },
+  );
+  assert.equal(r.status, 'EXIT_ALL');
+  assert.equal(r.stopHit, true);
+  assert.equal(r.action, COCKPIT_ACTIONS.EXIT);
+});
+
+test('valid long TP hit only when current >= TP', () => {
+  const below = evaluateTradeCockpit(
+    { symbol: 'INJUSDT', side: 'long', entryPrice: 18, quantity: 100, stopLoss: 17, tp1: 20 },
+    full({ currentPrice: 19.5 }), { score: 70 },
+  );
+  assert.equal(below.tpHits.tp1, false);
+  const at = evaluateTradeCockpit(
+    { symbol: 'INJUSDT', side: 'long', entryPrice: 18, quantity: 100, stopLoss: 17, tp1: 20 },
+    full({ currentPrice: 20 }), { score: 70 },
+  );
+  assert.equal(at.tpHits.tp1, true);
+});
+
+test('persisted tpHits go stale after the TP level is edited', () => {
+  // Recorded a hit at old level 20; the level was later edited up to 25 and price
+  // is below the new level → the stale hit must NOT count and must not alert.
+  const trade = {
+    symbol: 'INJUSDT', side: 'long', entryPrice: 18, quantity: 100, stopLoss: 17,
+    tp1: 25, tp2: 28, tp3: 30, tpHits: { tp1: { price: 20, at: '2026-01-01T00:00:00Z' } },
+  };
+  const r = evaluateTradeCockpit(trade, full({ currentPrice: 22 }), { score: 70 });
+  assert.equal(r.tpHits.tp1, false);
+  const alerts = buildCockpitAlerts(r, {});
+  assert.equal(alerts.some((a) => a.type === 'TP1_HIT'), false);
+});
+
+test('reload simulation: an already-alerted state does not re-emit STOP/TP alerts', () => {
+  const trade = { symbol: 'INJUSDT', side: 'long', entryPrice: 18, quantity: 100, stopLoss: 17, tp1: 20, tp2: 23, tp3: 26 };
+  const r = evaluateTradeCockpit(trade, full({ currentPrice: 20.5 }), { score: 70 });
+  // First observation emits TP1.
+  const first = buildCockpitAlerts(r, {});
+  assert.ok(first.some((a) => a.type === 'TP1_HIT'));
+  // Persisted last-alerted snapshot (what the frontend now stores on the trade).
+  const persistedPrev = { tpHits: { ...r.tpHits }, status: r.status, stopHit: r.stopHit, safetyStatus: r.safetyStatus };
+  const afterReload = buildCockpitAlerts(r, persistedPrev);
+  assert.equal(afterReload.some((a) => a.type === 'TP1_HIT'), false);
+  assert.equal(afterReload.some((a) => a.type === 'STOP_HIT'), false);
+});
+
+test('all microstructure missing + weak health → no score-driven EXIT_ALL (manual review)', () => {
+  const r = evaluateTradeCockpit(
+    { symbol: 'INJUSDT', side: 'long', entryPrice: 100, quantity: 10, stopLoss: 80, tp1: 120 },
+    { currentPrice: 92, change1hPct: -2, change4hPct: -3, vwapLost: true, reclaimLost: true }, // no book/flow/deriv
+    { score: 30 },
+  );
+  assert.equal(r.lowConfidence, true);
+  assert.equal(r.scores.orderBook, null);
+  assert.equal(r.scores.flow, null);
+  assert.equal(r.scores.derivatives, null);
+  assert.notEqual(r.status, 'EXIT_ALL');
+  assert.equal(r.status, 'MANUAL_REVIEW');
+});
+
+test('explicit short → INVALID_SETUP / manual review (no long-math verdict yet)', () => {
+  const r = evaluateTradeCockpit(
+    { symbol: 'INJUSDT', side: 'short', entryPrice: 20, quantity: 100, stopLoss: 22, tp1: 16 },
+    full({ currentPrice: 21 }), { score: 70 },
+  );
+  assert.equal(r.status, 'INVALID_SETUP');
+  assert.equal(r.action, COCKPIT_ACTIONS.MANUAL_REVIEW);
+  assert.equal(r.stopHit, false);
+  assert.match(r.reason.join(' '), /short/i);
+});
+
+test('validateSetup: long geometry rules and short gating', () => {
+  assert.equal(validateSetup('long', 10, 9, [12, 14]).valid, true);
+  assert.equal(validateSetup('long', 10, 11, [12]).valid, false);
+  assert.equal(validateSetup('long', 10, 9, [8]).valid, false);
+  assert.equal(validateSetup('short', 10, 12, [8]).valid, false);
+  assert.equal(validateSetup(undefined, 10, 9, [12]).valid, true); // missing side defaults long
 });
 
 test('summary reports health, needs-action, winner/risk, stale and no-price counts', () => {

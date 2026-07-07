@@ -80,3 +80,50 @@ test('frontend cockpit summary surfaces needs-action, avg health, winner/risk, n
   assert.match(terminalJs, /WINNER/);
   assert.match(terminalJs, /NO PRICE/);
 });
+
+// ── Phase 1: live-trade validation safety (source guards) ───────────────────
+
+test('frontend cockpit has an explicit side field (long/short) wired into the form', () => {
+  assert.match(indexHtml, /id="cockpit-side"/);
+  assert.match(indexHtml, /value="long"/);
+  assert.match(indexHtml, /value="short"/);
+  // save + fill must read/write the side field; default is long for legacy trades
+  assert.match(terminalJs, /getElementById\('cockpit-side'\)/);
+  assert.match(terminalJs, /trade\.side \|\| 'long'|trade\.side \? .* : 'long'|String\(trade\.side \|\| 'long'\)/);
+});
+
+test('frontend cockpit validates setup structurally and renders INVALID_SETUP (never long-math EXIT on bad geometry)', () => {
+  assert.match(terminalJs, /_cpValidateSetup/);
+  assert.match(terminalJs, /INVALID_SETUP/);
+  assert.match(terminalJs, /stop must be below entry/);
+  assert.match(terminalJs, /TP\$\{i \+ 1\} must be above entry/);
+  // short is gated to manual review until short math exists
+  assert.match(terminalJs, /short trades not yet supported/);
+  assert.match(terminalJs, /MANUAL_REVIEW/);
+});
+
+test('frontend cockpit KITE regression is structurally guarded (stop-above-entry cannot pass validation)', () => {
+  // The validator rejects a long whose stop >= entry, which is exactly the KITE
+  // case (entry 0.1084 / stop 0.8900). Guard the exact predicate stays present.
+  assert.match(terminalJs, /stop != null && stop > 0 && stop >= entry/);
+});
+
+test('frontend cockpit TP hit buttons are level-aware and reversible (no permanent fabrication)', () => {
+  // level-aware persisted record instead of a bare boolean `true`
+  assert.match(terminalJs, /tpHits\['tp' \+ i\] = \{ price: lvl/);
+  // detection trusts a persisted hit only at the same configured level
+  assert.match(terminalJs, /persistedHit = \(rec, lvl\) =>/);
+  // fabricating a partial exit requires deliberate confirmation
+  assert.match(terminalJs, /confirm\(/);
+  // toggling an already-marked TP un-marks it
+  assert.match(terminalJs, /delete t\.tpHits\['tp' \+ i\]/);
+});
+
+test('frontend cockpit persists last-alerted state so reloads do not replay STOP/TP alerts', () => {
+  assert.match(terminalJs, /alertState/);
+  assert.match(terminalJs, /if \(!Cockpit\.prev\[t\.id\] && t\.alertState\)/);
+});
+
+test('frontend cockpit does not auto-exit on low-confidence weak health (missing microstructure)', () => {
+  assert.match(terminalJs, /else if \(lowConfidence\) \{ status = 'MANUAL_REVIEW'/);
+});

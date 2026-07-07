@@ -4089,7 +4089,7 @@ function _cpMarketFor(symbol) {
 }
 function _cpPresent(...vals) { return vals.some(v => v !== null && v !== undefined); }
 // Action verbs — mirror of COCKPIT_ACTIONS in scripts/cockpit/trade-cockpit.mjs.
-const CP_ACT = { HOLD:'HOLD', WATCH:'WATCH', TAKE_PARTIAL:'TAKE_PARTIAL', TAKE_MORE:'TAKE_MORE', MOVE_STOP:'MOVE_STOP', PROTECT_PROFIT:'PROTECT_PROFIT', REDUCE_RISK:'REDUCE_RISK', EXIT:'EXIT', INCOMPLETE_SETUP:'INCOMPLETE_SETUP', NO_LIVE_PRICE:'NO_LIVE_PRICE' };
+const CP_ACT = { HOLD:'HOLD', WATCH:'WATCH', TAKE_PARTIAL:'TAKE_PARTIAL', TAKE_MORE:'TAKE_MORE', MOVE_STOP:'MOVE_STOP', PROTECT_PROFIT:'PROTECT_PROFIT', REDUCE_RISK:'REDUCE_RISK', EXIT:'EXIT', INCOMPLETE_SETUP:'INCOMPLETE_SETUP', MANUAL_REVIEW:'MANUAL_REVIEW', NO_LIVE_PRICE:'NO_LIVE_PRICE' };
 const CP_NEAR_STOP_PCT = 1.5;
 function _cpRealized(trade, entry, qty) {
   const partials = Array.isArray(trade.partials) ? trade.partials : [];
@@ -4102,11 +4102,32 @@ function _cpRealized(trade, entry, qty) {
   }
   return { taken, realized };
 }
+// Level-aware TP-hit detection (mirror of detectTpHits in trade-cockpit.mjs).
+// Persisted hits are trusted only when recorded at the SAME level configured now
+// ({ price, at }); legacy boolean `true` is re-derived from live price so a stale
+// hit clears the moment the TP level is edited.
 function _cpTpHits(trade, current) {
   const ph = (trade && trade.tpHits) || {};
   const tp = [_cpNum(trade.tp1), _cpNum(trade.tp2), _cpNum(trade.tp3)];
+  const persistedHit = (rec, lvl) => !!(rec && typeof rec === 'object' && rec.price != null && lvl != null && Number(rec.price) === Number(lvl));
   const live = (lvl) => lvl != null && current != null && current >= lvl;
-  return { tp1: !!(ph.tp1 || live(tp[0])), tp2: !!(ph.tp2 || live(tp[1])), tp3: !!(ph.tp3 || live(tp[2])) };
+  return {
+    tp1: !!(persistedHit(ph.tp1, tp[0]) || live(tp[0])),
+    tp2: !!(persistedHit(ph.tp2, tp[1]) || live(tp[1])),
+    tp3: !!(persistedHit(ph.tp3, tp[2]) || live(tp[2])),
+  };
+}
+// Structural setup validation (mirror of validateSetup in trade-cockpit.mjs).
+function _cpValidateSetup(side, entry, stop, tps) {
+  const isShort = String(side || 'long').toLowerCase() === 'short';
+  if (isShort) return { valid: false, reason: 'short trades not yet supported — manual review' };
+  if (entry == null || !(entry > 0)) return { valid: true };
+  if (stop != null && stop > 0 && stop >= entry) return { valid: false, reason: 'Invalid long setup: stop must be below entry' };
+  for (let i = 0; i < tps.length; i++) {
+    const tp = tps[i];
+    if (tp != null && tp > 0 && tp <= entry) return { valid: false, reason: `Invalid long setup: TP${i + 1} must be above entry` };
+  }
+  return { valid: true };
 }
 // Active trade-manager evaluation. Mirrors scripts/cockpit/trade-cockpit.mjs.
 function evaluateCockpitTrade(trade) {
@@ -4120,12 +4141,30 @@ function evaluateCockpitTrade(trade) {
   const tps = [_cpNum(trade.tp1), _cpNum(trade.tp2), _cpNum(trade.tp3)];
   const hasAnyTp = tps.some(t => t != null && t > 0);
   const safetyStatus = String(trade.safetyStatus || market.safetyStatus || 'UNKNOWN').toUpperCase();
+  const side = String(trade.side || 'long').toLowerCase();
   const stale = !(DATA && DATA.length);
   const tpHits = _cpTpHits(trade, hasPrice ? current : null);
 
+  // Structural validation overrides everything: never show a hard STOP/TP/EXIT
+  // verdict on an invalid stop/TP geometry (or an unsupported short).
+  const setup = _cpValidateSetup(side, entry, stop, tps);
+  if (!setup.valid) {
+    const pnlPctInv = (hasPrice && entry > 0) ? ((current - entry) / entry) * 100 : null;
+    return {
+      trade, market, side, status: 'INVALID_SETUP', action: CP_ACT.MANUAL_REVIEW, mode: 'manual',
+      priceUnavailable: !hasPrice, lowConfidence: true, stopHit: false, safetyStatus, stale,
+      tpHits: { tp1: false, tp2: false, tp3: false },
+      health: null, pnlPct: pnlPctInv, unrealizedPnlUsd: null, realizedPnl: null, totalPnl: null, value: null,
+      distStop: null, tpDistances: [null, null, null], nextTp: null, suggestedStop: null,
+      scores: { momentum: null, orderBook: null, flow: null, derivatives: null, market: null, progress: null },
+      reason: [setup.reason], missingComponents: ['orderBook', 'flow', 'derivatives'],
+      current: hasPrice ? current : null, nextDecisionLevel: 'fix setup — manual review',
+    };
+  }
+
   if (!hasPrice) {
     return {
-      trade, market, status: 'NO_LIVE_PRICE', action: CP_ACT.NO_LIVE_PRICE, mode: 'manual',
+      trade, market, side, status: 'NO_LIVE_PRICE', action: CP_ACT.NO_LIVE_PRICE, mode: 'manual',
       priceUnavailable: true, lowConfidence: true, stopHit: false, safetyStatus, stale, tpHits,
       health: null, pnlUsd: null, pnlPct: null, realizedPnl: _cpRealized(trade, entry, qty).realized || null, totalPnl: null, value: null,
       distStop: null, tpDistances: [null, null, null], nextTp: null, suggestedStop: null,
@@ -4191,6 +4230,7 @@ function evaluateCockpitTrade(trade) {
   else if (health >= 66) { status = 'HOLD'; action = (pnlPct != null && pnlPct >= 6) ? CP_ACT.MOVE_STOP : CP_ACT.HOLD; mode = 'hold'; reasons.push((pnlPct != null && pnlPct >= 6) ? 'healthy + in profit — trail/move stop up' : 'healthy — hold and trail'); }
   else if (health >= 51) { status = 'HOLD_BUT_WATCH'; action = CP_ACT.WATCH; mode = 'caution'; reasons.push('mixed health — watch, no add'); }
   else if (health >= 36) { status = 'TAKE_PROFIT_AGGRESSIVE'; action = (pnlPct != null && pnlPct > 0) ? CP_ACT.PROTECT_PROFIT : CP_ACT.REDUCE_RISK; mode = 'profit'; reasons.push('weak health — reduce / protect'); }
+  else if (lowConfidence) { status = 'MANUAL_REVIEW'; action = CP_ACT.REDUCE_RISK; mode = 'caution'; reasons.push('weak health but low-confidence data — manual review (no auto-exit)'); }
   else { status = 'EXIT_ALL'; action = CP_ACT.EXIT; mode = 'exit'; reasons.push('health critical — exit'); }
 
   if (safetyStatus !== 'SAFE') reasons.push(`safety ${safetyStatus}`);
@@ -4200,13 +4240,13 @@ function evaluateCockpitTrade(trade) {
     : (stop > 0 && distStop != null && nextTp && Math.abs(distStop) < Math.abs(nextTp.distancePct ?? 999)) ? `stop ${stop}`
     : nextTp ? `TP${nextTp.idx} ${nextTp.price}` : (stop > 0 ? `stop ${stop}` : 'trail structure / next candle');
 
-  return { trade, market, status, action, mode, priceUnavailable: false, lowConfidence, missingComponents, stopHit, safetyStatus, stale, tpHits,
+  return { trade, market, side, status, action, mode, priceUnavailable: false, lowConfidence, missingComponents, stopHit, safetyStatus, stale, tpHits,
     health: health == null ? null : Math.round(health), pnlPct, unrealizedPnlUsd, realizedPnl: realized, totalPnl, value,
     distStop, tpDistances, nextTp, suggestedStop, scores: { momentum, orderBook: book, flow, derivatives, market: marketScore, progress },
     reason: reasons.slice(0, 5), current, nextDecisionLevel, remaining };
 }
 function _cpPriority(status) {
-  return { EMERGENCY_EXIT:1, EXIT_ALL:2, RISK_OFF_EXIT:2, TAKE_PROFIT_AGGRESSIVE:3, TAKE_PROFIT:4, MANUAL_REVIEW:4, INCOMPLETE_SETUP:5, MISSING_RISK_DATA:5, HOLD_BUT_WATCH:5, NO_LIVE_PRICE:6, ADD_ALLOWED:6, HOLD:7, HOLD_STRONG:8 }[status] || 9;
+  return { EMERGENCY_EXIT:1, EXIT_ALL:2, RISK_OFF_EXIT:2, INVALID_SETUP:2, TAKE_PROFIT_AGGRESSIVE:3, TAKE_PROFIT:4, MANUAL_REVIEW:4, INCOMPLETE_SETUP:5, MISSING_RISK_DATA:5, HOLD_BUT_WATCH:5, NO_LIVE_PRICE:6, ADD_ALLOWED:6, HOLD:7, HOLD_STRONG:8 }[status] || 9;
 }
 function _cpAge(ts) {
   const t = ts ? new Date(ts).getTime() : 0;
@@ -4383,13 +4423,26 @@ function renderCockpit() {
   Cockpit.prev = Cockpit.prev || {};
   let mutated = false;
   let rows = Cockpit.trades.map(t => {
+    // Reload-replay safety: seed the in-memory prev from the last-alerted snapshot
+    // persisted on the trade, so reopening the page does NOT re-fire old STOP/TP
+    // alerts as if they just happened.
+    if (!Cockpit.prev[t.id] && t.alertState) Cockpit.prev[t.id] = t.alertState;
     const r = evaluateCockpitTrade(t);
     _cpPushAlerts(_cpGenAlerts(r, Cockpit.prev[t.id]));
-    Cockpit.prev[t.id] = { tpHits: { ...r.tpHits }, status: r.status, stopHit: r.stopHit, safetyStatus: r.safetyStatus };
-    // Persist newly auto-detected TP hits onto the trade so they survive reload.
+    const snapshot = { tpHits: { ...r.tpHits }, status: r.status, stopHit: r.stopHit, safetyStatus: r.safetyStatus };
+    Cockpit.prev[t.id] = snapshot;
+    // Persist the alerted snapshot so a page reload starts from "already alerted".
+    if (JSON.stringify(t.alertState) !== JSON.stringify(snapshot)) { t.alertState = snapshot; mutated = true; }
+    // Persist newly auto-detected TP hits as LEVEL-AWARE records ({ price, at }) so
+    // they survive reload but are ignored if the TP level is later edited.
     const th = t.tpHits || {};
-    if ((r.tpHits.tp1 && !th.tp1) || (r.tpHits.tp2 && !th.tp2) || (r.tpHits.tp3 && !th.tp3)) {
-      t.tpHits = { ...th, ...r.tpHits }; mutated = true;
+    for (let i = 1; i <= 3; i++) {
+      const lvl = _cpNum(t['tp' + i]);
+      if (r.tpHits['tp' + i] && lvl != null) {
+        const rec = th['tp' + i];
+        const already = rec && typeof rec === 'object' && Number(rec.price) === Number(lvl);
+        if (!already) { th['tp' + i] = { price: lvl, at: new Date().toISOString(), auto: true }; t.tpHits = th; mutated = true; }
+      }
     }
     return r;
   });
@@ -4413,7 +4466,7 @@ function renderCockpit() {
   const unreal = rows.reduce((s,r)=>s+(r.unrealizedPnlUsd||0),0);
   const healthRows = rows.filter(r => r.health != null);
   const avgHealth = healthRows.length ? Math.round(healthRows.reduce((s,r)=>s+r.health,0)/healthRows.length) : null;
-  const needsAction = rows.filter(r => ['EXIT','TAKE_PARTIAL','TAKE_MORE','PROTECT_PROFIT','REDUCE_RISK','INCOMPLETE_SETUP','MOVE_STOP'].includes(r.action)).length;
+  const needsAction = rows.filter(r => ['EXIT','TAKE_PARTIAL','TAKE_MORE','PROTECT_PROFIT','REDUCE_RISK','INCOMPLETE_SETUP','MANUAL_REVIEW','MOVE_STOP'].includes(r.action)).length;
   const winner = rows.filter(r=>r.totalPnl!=null).sort((a,b)=>b.totalPnl-a.totalPnl)[0]?.trade.symbol || '--';
   const risk = healthRows.slice().sort((a,b)=>a.health-b.health)[0]?.trade.symbol || '--';
   const noPrice = rows.filter(r=>r.status==='NO_LIVE_PRICE').length;
@@ -4517,6 +4570,7 @@ function saveCockpitFromForm(e) {
     ...existing, id, symbol,
     venue: document.getElementById('cockpit-venue').value || 'Binance',
     entryType: document.getElementById('cockpit-entry-type').value || 'manual',
+    side: (document.getElementById('cockpit-side')?.value || existing.side || 'long').toLowerCase(),
     entryPrice, quantity,
     stopLoss: _cpNum(document.getElementById('cockpit-stop').value),
     tp1: _cpNum(document.getElementById('cockpit-tp1').value),
@@ -4532,14 +4586,20 @@ function saveCockpitFromForm(e) {
   };
   Cockpit.trades = Cockpit.trades.filter(t => t.id !== id).concat(trade);
   saveCockpitTrades();
+  // Structural warning (non-blocking): the position is saved so it appears in the
+  // list, but if the stop/TP geometry is invalid for the side the card will show
+  // INVALID_SETUP — surface the reason here too so it is not a surprise.
+  const setup = _cpValidateSetup(trade.side, trade.entryPrice, trade.stopLoss, [trade.tp1, trade.tp2, trade.tp3]);
   resetCockpitForm();
   renderCockpit();
+  if (!setup.valid) _cpShowError(`Saved, but setup needs review: ${setup.reason}.`);
 }
 function _cpFillForm(t) {
   document.getElementById('cockpit-id').value = t.id || '';
   document.getElementById('cockpit-symbol').value = t.symbol || '';
   document.getElementById('cockpit-venue').value = t.venue || 'Binance';
   document.getElementById('cockpit-entry-type').value = t.entryType || 'manual';
+  const sideEl = document.getElementById('cockpit-side'); if (sideEl) sideEl.value = (t.side || 'long').toLowerCase();
   document.getElementById('cockpit-entry').value = t.entryPrice ?? '';
   document.getElementById('cockpit-qty').value = t.quantity ?? '';
   document.getElementById('cockpit-stop').value = t.stopLoss ?? '';
@@ -4612,12 +4672,26 @@ function initCockpit() {
       const t = Cockpit.trades.find(x => x.id === tp.dataset.cpId);
       if (!t) return;
       const i = Number(tp.dataset.cpTp);
-      t.tpHits = t.tpHits || {}; t.tpHits['tp' + i] = true;
-      // Record a partial exit at the TP level (manual "taken" marker) for realized PnL.
+      const lvl = _cpNum(t['tp' + i]);
+      t.tpHits = t.tpHits || {};
+      const rec = t.tpHits['tp' + i];
+      const marked = rec && typeof rec === 'object' && Number(rec.price) === Number(lvl);
+      // Toggle OFF: clicking an already-marked TP un-marks it and removes any
+      // manual partial recorded for it (reversible — no permanent fabrication).
+      if (marked) {
+        delete t.tpHits['tp' + i];
+        t.partials = (Array.isArray(t.partials) ? t.partials : []).filter(p => !(p.tpIndex === i && p.manual));
+        saveCockpitTrades(); renderCockpit();
+        return;
+      }
+      // Mark a LEVEL-AWARE hit. Recording a fabricated partial exit (which moves
+      // realized PnL) requires a deliberate confirmation.
+      t.tpHits['tp' + i] = { price: lvl, at: new Date().toISOString(), manual: true };
       t.partials = Array.isArray(t.partials) ? t.partials : [];
       if (!t.partials.some(p => p.tpIndex === i)) {
         const frac = i === 1 ? 0.3 : i === 2 ? 0.35 : 0.35;
-        t.partials.push({ tpIndex: i, fraction: frac, price: _cpNum(t['tp' + i]) });
+        const ok = (typeof confirm !== 'function') || confirm(`Record a ${Math.round(frac * 100)}% partial exit at TP${i} (${_cpFmt(lvl)})? This updates realized PnL.`);
+        if (ok) t.partials.push({ tpIndex: i, fraction: frac, price: lvl, manual: true });
       }
       saveCockpitTrades(); renderCockpit();
       return;
