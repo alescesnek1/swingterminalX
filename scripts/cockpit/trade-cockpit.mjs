@@ -395,3 +395,137 @@ export function summarizeCockpit(evaluations = []) {
     biggestWinner: rows.filter((r) => r.totalPnl != null).sort((a, b) => b.totalPnl - a.totalPnl)[0]?.symbol || '--',
   };
 }
+
+// ─────────────────────────────────────────────────────────────
+// M1 — Coinee-inspired, Terminal-X-native manual-review layer.
+//
+// Two PURE, presentation-only helpers that expose data Terminal-X ALREADY has,
+// more honestly. They change no score, gate, action, ENTRY_READY, or Telegram
+// behaviour; they never fabricate a value; they never emit an execution verb.
+// Missing inputs render as N/A / "manual review", never as a neutral-positive
+// default. The returned objects are display models only (no action / status /
+// entryReady / telegram field), so they cannot drive an exit or unlock an alert.
+//
+// Honest terminology (never rename to imply data we lack):
+//   • "Flow (taker)"      — windowed taker delta, NOT a true CVD series
+//   • "Orderbook (depth)" — resting depth walls, NOT confirmed whale orders
+//   • "Funding"           — funding-rate context, NOT an entry signal
+// Nothing here is a "liquidation heatmap" — we have no liquidation feed.
+// ─────────────────────────────────────────────────────────────
+
+export const REVIEW_CARD_KEYS = Object.freeze([
+  'structure', 'flow', 'funding', 'oi', 'orderbook', 'safety', 'news', 'regime',
+]);
+
+// Extreme-funding thresholds (8h funding, percent units) — mirror the trap
+// thresholds the funding-divergence feed already uses, for labelling only.
+const FUNDING_EXTREME_POS_PCT = 0.03;   // +3 bps — longs paying heavily
+const FUNDING_EXTREME_NEG_PCT = -0.005; // -0.5 bps — shorts paying
+
+// Build the 8-card manual-review checklist for one tracked trade. Reads only the
+// already-computed evaluation + the honest market lookup + optional funding
+// context (from the existing funding-divergence feed). Pure: does not mutate its
+// inputs and returns a plain display object.
+export function buildReviewChecklist(evalResult = {}, market = {}, context = {}) {
+  const scores = (evalResult && evalResult.scores) || {};
+  const fundingCtx = context && context.funding && typeof context.funding === 'object' ? context.funding : null;
+  const stale = evalResult && evalResult.stale === true;
+  const liveFresh = stale ? false : true;
+
+  const cards = [];
+  const add = (key, label, o = {}) => cards.push({
+    key,
+    label,
+    status: o.status === 'ok' ? 'ok' : 'na',
+    value: o.value == null ? null : String(o.value),
+    source: o.source == null ? null : String(o.source),
+    note: o.note == null ? null : String(o.note),
+    fresh: typeof o.fresh === 'boolean' ? o.fresh : null,
+  });
+
+  // 1. STRUCTURE — momentum / higher-low / vwap (scanner)
+  if (scores.momentum != null) add('structure', 'Structure', { status: 'ok', value: `score ${Math.round(scores.momentum)}`, source: 'scanner', fresh: liveFresh });
+  else add('structure', 'Structure', { status: 'na', note: 'manual review', source: 'scanner' });
+
+  // 2. FLOW — windowed taker delta (NOT CVD)
+  if (scores.flow != null) add('flow', 'Flow (taker)', { status: 'ok', value: `score ${Math.round(scores.flow)}`, source: 'scanner microstructure', fresh: liveFresh });
+  else add('flow', 'Flow (taker)', { status: 'na', note: 'Flow unavailable', source: 'scanner microstructure' });
+
+  // 3. FUNDING — scored funding, else funding-divergence context, else N/A
+  const funding = n(market.fundingRate);
+  if (funding != null) add('funding', 'Funding', { status: 'ok', value: `${round(funding, 4)}%`, source: 'premiumIndex', fresh: liveFresh });
+  else if (fundingCtx && Number.isFinite(Number(fundingCtx.funding_pct))) add('funding', 'Funding', { status: 'ok', value: `${round(Number(fundingCtx.funding_pct), 4)}%${fundingCtx.signal ? ` · ${fundingCtx.signal}` : ''}`, source: fundingCtx.source || 'funding-divergence', note: 'context only' });
+  else add('funding', 'Funding', { status: 'na', note: 'Funding unavailable', source: 'premiumIndex' });
+
+  // 4. OI Δ
+  const oi = n(market.openInterestChangePct);
+  if (oi != null) add('oi', 'OI Δ', { status: 'ok', value: `${round(oi, 2)}%`, source: 'futures OI', fresh: liveFresh });
+  else add('oi', 'OI Δ', { status: 'na', note: 'OI unavailable', source: 'futures OI' });
+
+  // 5. ORDERBOOK — resting depth walls (NOT confirmed whale orders)
+  if (scores.orderBook != null) add('orderbook', 'Orderbook (depth)', { status: 'ok', value: `score ${Math.round(scores.orderBook)}`, source: 'depth', fresh: liveFresh });
+  else add('orderbook', 'Orderbook (depth)', { status: 'na', note: 'Orderbook unavailable', source: 'depth' });
+
+  // 6. SAFETY — UNKNOWN is missing context (blocks alerts), not a health value
+  const safety = String(evalResult.safetyStatus || 'UNKNOWN').toUpperCase();
+  if (safety === 'UNKNOWN') add('safety', 'Safety', { status: 'na', value: 'UNKNOWN', source: 'safety model', note: 'Safety UNKNOWN blocks alerts' });
+  else add('safety', 'Safety', { status: 'ok', value: safety, source: 'safety model' });
+
+  // 7. NEWS / risk flags
+  const newsFlags = [];
+  if (market.newsRisk) newsFlags.push(`news ${market.newsRisk}`);
+  if (market.exploitRisk === true) newsFlags.push('exploit');
+  if (market.hackRisk === true) newsFlags.push('hack');
+  if (market.delistingRisk === true) newsFlags.push('delisting');
+  const newsPresent = market.newsRisk != null || market.exploitRisk === true || market.hackRisk === true || market.delistingRisk === true;
+  if (newsPresent) add('news', 'News/Risk', { status: 'ok', value: newsFlags.join(', ') || 'clear', source: 'safety/news' });
+  else add('news', 'News/Risk', { status: 'na', note: 'News unavailable/degraded', source: 'safety/news' });
+
+  // 8. MARKET REGIME
+  const regimeScore = scores.market != null ? scores.market : n(market.marketRegimeScore);
+  if (regimeScore != null) add('regime', 'Market regime', { status: 'ok', value: `score ${Math.round(regimeScore)}`, source: 'regime model', fresh: liveFresh });
+  else add('regime', 'Market regime', { status: 'na', note: 'Market regime unavailable', source: 'regime model' });
+
+  const naCount = cards.filter((c) => c.status === 'na').length;
+  // "Manual review required" when trading context we would act on is missing, or
+  // safety is UNKNOWN. Advisory presentation only — drives NO action/exit/alert.
+  const isNa = (key) => { const c = cards.find((x) => x.key === key); return c ? c.status === 'na' : true; };
+  const manualReview = safety === 'UNKNOWN' || ['flow', 'orderbook', 'oi'].some(isNa);
+
+  return { contextOnly: true, cards, naCount, manualReview };
+}
+
+// Group the existing funding-divergence signals into an at-a-glance funding
+// context read-model. Pure over the SAME data the scanner table already stamps —
+// it is context, never an entry signal, and carries no action/telegram field.
+export function summarizeFundingContext(signals = []) {
+  const rows = Array.isArray(signals) ? signals : [];
+  const norm = [];
+  const states = { SHORTS_TRAPPED: 0, LONGS_TRAPPED: 0, CROWDED_LONG: 0 };
+  for (const s of rows) {
+    if (!s || typeof s !== 'object') continue;
+    const funding_pct = Number(s.funding_pct);
+    if (!Number.isFinite(funding_pct)) continue;
+    const sig = String(s.signal || '').toUpperCase();
+    if (Object.prototype.hasOwnProperty.call(states, sig)) states[sig] += 1;
+    norm.push({
+      symbol: String(s.symbol || s.pair || '').toUpperCase(),
+      funding_pct: round(funding_pct, 4),
+      price_change_24h_pct: Number.isFinite(Number(s.price_change_24h_pct)) ? round(Number(s.price_change_24h_pct), 2) : null,
+      signal: sig || null,
+      bias: s.bias ? String(s.bias).toLowerCase() : null,
+    });
+  }
+  const extremePositive = norm.filter((r) => r.funding_pct >= FUNDING_EXTREME_POS_PCT).sort((a, b) => b.funding_pct - a.funding_pct).slice(0, 10);
+  const extremeNegative = norm.filter((r) => r.funding_pct <= FUNDING_EXTREME_NEG_PCT).sort((a, b) => a.funding_pct - b.funding_pct).slice(0, 10);
+  const divergences = norm.filter((r) => r.signal).slice(0, 20);
+  return {
+    contextOnly: true,
+    source: 'funding-divergence',
+    count: norm.length,
+    states,
+    extremePositive,
+    extremeNegative,
+    divergences,
+  };
+}

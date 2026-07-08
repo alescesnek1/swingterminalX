@@ -127,3 +127,51 @@ test('frontend cockpit persists last-alerted state so reloads do not replay STOP
 test('frontend cockpit does not auto-exit on low-confidence weak health (missing microstructure)', () => {
   assert.match(terminalJs, /else if \(lowConfidence\) \{ status = 'MANUAL_REVIEW'/);
 });
+
+// ── M1: manual-review checklist + funding context (context-only presentation) ──
+
+test('frontend cockpit renders the 8-card manual review checklist', () => {
+  assert.match(terminalJs, /_cpBuildReviewChecklist/);
+  assert.match(terminalJs, /_cpReviewChecklistHtml/);
+  assert.match(terminalJs, /CP_REVIEW_CARD_KEYS = \['structure', 'flow', 'funding', 'oi', 'orderbook', 'safety', 'news', 'regime'\]/);
+  // the checklist is injected into each cockpit card
+  assert.match(terminalJs, /\$\{_cpReviewChecklistHtml\(r\)\}/);
+  assert.match(indexHtml, /id="cockpit-funding-context"/);
+  assert.match(terminalCss, /\.cockpit-review/);
+  assert.match(terminalCss, /\.review-card\.na/);
+});
+
+test('frontend cockpit checklist uses honest N/A labels and never fabricates values', () => {
+  for (const label of [
+    'Flow unavailable', 'Orderbook unavailable', 'OI unavailable', 'Funding unavailable',
+    'Safety UNKNOWN blocks alerts', 'News unavailable/degraded', 'Market regime unavailable', 'manual review',
+  ]) {
+    assert.ok(terminalJs.includes(label), `missing honest label: ${label}`);
+  }
+  // "manual review required" banner is present
+  assert.match(terminalJs, /MANUAL REVIEW REQUIRED/);
+});
+
+test('frontend cockpit checklist uses honest terminology (no CVD / whale orders / liquidation heatmap)', () => {
+  assert.match(terminalJs, /Flow \(taker\)/);      // not "CVD"
+  assert.match(terminalJs, /Orderbook \(depth\)/); // not "Whale Orders"
+  assert.doesNotMatch(terminalJs, /liquidation heatmap/i);
+  assert.doesNotMatch(terminalJs, /\bCVD\b/);
+  assert.doesNotMatch(terminalJs, /Retail Sentiment/i);
+});
+
+test('frontend cockpit funding panel is context-only and cannot drive trading', () => {
+  assert.match(terminalJs, /_cpFundingContextHtml/);
+  assert.match(terminalJs, /_cpSummarizeFundingContext/);
+  assert.match(terminalJs, /FUNDING DIVERGENCE · CONTEXT ONLY/);
+  assert.match(terminalJs, /does not affect RADAR \/ ENTRY_READY \/ cockpit action \/ Telegram/);
+  // reads the EXISTING divergence map — no new fetch is introduced
+  assert.match(terminalJs, /DIVERGENCE_MAP/);
+  assert.doesNotMatch(terminalJs, /fetch\('\/api\/funding-extremes'/);
+});
+
+test('frontend cockpit M1 layer introduces no Coinee reference or fetch', () => {
+  assert.doesNotMatch(terminalJs, /coinee/i);
+  assert.doesNotMatch(indexHtml, /coinee/i);
+  assert.doesNotMatch(terminalCss, /coinee/i);
+});

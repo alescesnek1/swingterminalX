@@ -4129,6 +4129,144 @@ function _cpValidateSetup(side, entry, stop, tps) {
   }
   return { valid: true };
 }
+// ── M1 manual-review layer (mirror of buildReviewChecklist / summarizeFundingContext
+// in scripts/cockpit/trade-cockpit.mjs). PRESENTATION ONLY: reads data the cockpit
+// already computed, never changes a score/gate/action, never fabricates a value,
+// and returns no execution verb. Honest terminology: "Flow (taker)" is a windowed
+// taker delta, not a cumulative-delta series; "Orderbook (depth)" is resting depth,
+// not confirmed whale orders; "Funding" is context, not a signal. Nothing here
+// claims to be a liquidation map — there is no liquidation feed.
+const CP_FUNDING_EXTREME_POS_PCT = 0.03;
+const CP_FUNDING_EXTREME_NEG_PCT = -0.005;
+const CP_REVIEW_CARD_KEYS = ['structure', 'flow', 'funding', 'oi', 'orderbook', 'safety', 'news', 'regime'];
+
+// Funding context for one base symbol, read from the existing DIVERGENCE_MAP.
+function _cpReadDivergenceContext(baseSym) {
+  try {
+    if (typeof DIVERGENCE_MAP === 'undefined' || !DIVERGENCE_MAP) return null;
+    const s = DIVERGENCE_MAP.get(String(baseSym || '').toUpperCase());
+    if (!s || !Number.isFinite(Number(s.funding_pct))) return null;
+    return { funding_pct: Number(s.funding_pct), signal: s.signal || null, source: 'funding-divergence' };
+  } catch { return null; }
+}
+
+function _cpBuildReviewChecklist(r, market, context) {
+  const scores = (r && r.scores) || {};
+  const fundingCtx = context && context.funding && typeof context.funding === 'object' ? context.funding : null;
+  const stale = r && r.stale === true;
+  const liveFresh = stale ? false : true;
+  const cards = [];
+  const rnd = (v, d = 2) => { const x = Number(v); return Number.isFinite(x) ? Number(x.toFixed(d)) : null; };
+  const add = (key, label, o = {}) => cards.push({
+    key, label,
+    status: o.status === 'ok' ? 'ok' : 'na',
+    value: o.value == null ? null : String(o.value),
+    source: o.source == null ? null : String(o.source),
+    note: o.note == null ? null : String(o.note),
+    fresh: typeof o.fresh === 'boolean' ? o.fresh : null,
+  });
+
+  if (scores.momentum != null) add('structure', 'Structure', { status: 'ok', value: `score ${Math.round(scores.momentum)}`, source: 'scanner', fresh: liveFresh });
+  else add('structure', 'Structure', { status: 'na', note: 'manual review', source: 'scanner' });
+
+  if (scores.flow != null) add('flow', 'Flow (taker)', { status: 'ok', value: `score ${Math.round(scores.flow)}`, source: 'scanner microstructure', fresh: liveFresh });
+  else add('flow', 'Flow (taker)', { status: 'na', note: 'Flow unavailable', source: 'scanner microstructure' });
+
+  const funding = _cpNum(market.fundingRate);
+  if (funding != null) add('funding', 'Funding', { status: 'ok', value: `${rnd(funding, 4)}%`, source: 'premiumIndex', fresh: liveFresh });
+  else if (fundingCtx && Number.isFinite(Number(fundingCtx.funding_pct))) add('funding', 'Funding', { status: 'ok', value: `${rnd(Number(fundingCtx.funding_pct), 4)}%${fundingCtx.signal ? ` · ${fundingCtx.signal}` : ''}`, source: fundingCtx.source || 'funding-divergence', note: 'context only' });
+  else add('funding', 'Funding', { status: 'na', note: 'Funding unavailable', source: 'premiumIndex' });
+
+  const oi = _cpNum(market.openInterestChangePct);
+  if (oi != null) add('oi', 'OI Δ', { status: 'ok', value: `${rnd(oi, 2)}%`, source: 'futures OI', fresh: liveFresh });
+  else add('oi', 'OI Δ', { status: 'na', note: 'OI unavailable', source: 'futures OI' });
+
+  if (scores.orderBook != null) add('orderbook', 'Orderbook (depth)', { status: 'ok', value: `score ${Math.round(scores.orderBook)}`, source: 'depth', fresh: liveFresh });
+  else add('orderbook', 'Orderbook (depth)', { status: 'na', note: 'Orderbook unavailable', source: 'depth' });
+
+  const safety = String(r.safetyStatus || 'UNKNOWN').toUpperCase();
+  if (safety === 'UNKNOWN') add('safety', 'Safety', { status: 'na', value: 'UNKNOWN', source: 'safety model', note: 'Safety UNKNOWN blocks alerts' });
+  else add('safety', 'Safety', { status: 'ok', value: safety, source: 'safety model' });
+
+  const newsFlags = [];
+  if (market.newsRisk) newsFlags.push(`news ${market.newsRisk}`);
+  if (market.exploitRisk === true) newsFlags.push('exploit');
+  if (market.hackRisk === true) newsFlags.push('hack');
+  if (market.delistingRisk === true) newsFlags.push('delisting');
+  const newsPresent = market.newsRisk != null || market.exploitRisk === true || market.hackRisk === true || market.delistingRisk === true;
+  if (newsPresent) add('news', 'News/Risk', { status: 'ok', value: newsFlags.join(', ') || 'clear', source: 'safety/news' });
+  else add('news', 'News/Risk', { status: 'na', note: 'News unavailable/degraded', source: 'safety/news' });
+
+  const regimeScore = scores.market != null ? scores.market : _cpNum(market.marketRegimeScore);
+  if (regimeScore != null) add('regime', 'Market regime', { status: 'ok', value: `score ${Math.round(regimeScore)}`, source: 'regime model', fresh: liveFresh });
+  else add('regime', 'Market regime', { status: 'na', note: 'Market regime unavailable', source: 'regime model' });
+
+  const naCount = cards.filter(c => c.status === 'na').length;
+  const isNa = (key) => { const c = cards.find(x => x.key === key); return c ? c.status === 'na' : true; };
+  const manualReview = safety === 'UNKNOWN' || ['flow', 'orderbook', 'oi'].some(isNa);
+  return { contextOnly: true, cards, naCount, manualReview };
+}
+
+function _cpReviewChecklistHtml(r) {
+  const market = (r && r.market) || {};
+  const baseSym = String((r.trade && r.trade.symbol) || '').replace(/USDT$|USDC$/i, '').toUpperCase();
+  const model = _cpBuildReviewChecklist(r, market, { funding: _cpReadDivergenceContext(baseSym) });
+  const chip = (c) => {
+    const cls = c.status === 'ok' ? 'ok' : 'na';
+    const val = c.status === 'ok' ? _esc(c.value || '') : _esc(c.note || 'N/A');
+    const tip = `${_esc(c.label)}${c.source ? ` · source: ${_esc(c.source)}` : ''}${c.fresh === false ? ' · stale' : ''}${c.note && c.status === 'ok' ? ` · ${_esc(c.note)}` : ''}`;
+    return `<div class="review-card ${cls}" title="${tip}"><span>${_esc(c.label)}</span><b>${val}</b></div>`;
+  };
+  const banner = model.manualReview
+    ? '<div class="review-manual">MANUAL REVIEW REQUIRED — missing/UNKNOWN context (no auto-exit, no alert)</div>'
+    : '';
+  return `<div class="cockpit-review" data-context-only="1" title="Manual review context — does not change status, action, ENTRY_READY, or Telegram">${model.cards.map(chip).join('')}</div>${banner}`;
+}
+
+// Funding divergence / extremes — context-only panel over the existing
+// DIVERGENCE_MAP. Never an entry signal; never affects RADAR / ENTRY_READY /
+// cockpit action / Telegram.
+function _cpSummarizeFundingContext(signals) {
+  const rows = Array.isArray(signals) ? signals : [];
+  const norm = [];
+  const states = { SHORTS_TRAPPED: 0, LONGS_TRAPPED: 0, CROWDED_LONG: 0 };
+  const rnd = (v, d = 2) => { const x = Number(v); return Number.isFinite(x) ? Number(x.toFixed(d)) : null; };
+  for (const s of rows) {
+    if (!s || typeof s !== 'object') continue;
+    const funding_pct = Number(s.funding_pct);
+    if (!Number.isFinite(funding_pct)) continue;
+    const sig = String(s.signal || '').toUpperCase();
+    if (Object.prototype.hasOwnProperty.call(states, sig)) states[sig] += 1;
+    norm.push({
+      symbol: String(s.symbol || s.pair || '').toUpperCase(),
+      funding_pct: rnd(funding_pct, 4),
+      price_change_24h_pct: Number.isFinite(Number(s.price_change_24h_pct)) ? rnd(Number(s.price_change_24h_pct), 2) : null,
+      signal: sig || null,
+    });
+  }
+  const extremePositive = norm.filter(r => r.funding_pct >= CP_FUNDING_EXTREME_POS_PCT).sort((a, b) => b.funding_pct - a.funding_pct).slice(0, 10);
+  const extremeNegative = norm.filter(r => r.funding_pct <= CP_FUNDING_EXTREME_NEG_PCT).sort((a, b) => a.funding_pct - b.funding_pct).slice(0, 10);
+  return { contextOnly: true, source: 'funding-divergence', count: norm.length, states, extremePositive, extremeNegative };
+}
+
+function _cpFundingContextHtml() {
+  let signals = [];
+  try { if (typeof DIVERGENCE_MAP !== 'undefined' && DIVERGENCE_MAP) signals = Array.from(DIVERGENCE_MAP.values()); } catch {}
+  const model = _cpSummarizeFundingContext(signals);
+  const head = '<div class="fx-head">FUNDING DIVERGENCE · CONTEXT ONLY <span class="fx-note">not a signal · does not affect RADAR / ENTRY_READY / cockpit action / Telegram</span></div>';
+  if (!model.count) {
+    return `<div class="cockpit-funding-context empty">${head}<div class="fx-empty">no divergence signals right now (or feed unavailable) — manual review</div></div>`;
+  }
+  const chip = (r) => `<span class="fx-chip ${Number(r.funding_pct) >= 0 ? 'pos' : 'neg'}" title="${_esc(r.signal || 'divergence')} · 24h ${r.price_change_24h_pct == null ? '--' : r.price_change_24h_pct + '%'}">${_esc(r.symbol)} ${Number(r.funding_pct) >= 0 ? '+' : ''}${_esc(r.funding_pct)}%</span>`;
+  const pos = model.extremePositive.map(chip).join('') || '<span class="fx-none">none</span>';
+  const neg = model.extremeNegative.map(chip).join('') || '<span class="fx-none">none</span>';
+  return `<div class="cockpit-funding-context">${head}
+    <div class="fx-row"><span class="fx-label">Extreme + (longs pay)</span><div class="fx-chips">${pos}</div></div>
+    <div class="fx-row"><span class="fx-label">Extreme − (shorts pay)</span><div class="fx-chips">${neg}</div></div>
+    <div class="fx-states">SHORTS_TRAPPED ${model.states.SHORTS_TRAPPED} · LONGS_TRAPPED ${model.states.LONGS_TRAPPED} · CROWDED_LONG ${model.states.CROWDED_LONG}</div>
+  </div>`;
+}
+
 // Active trade-manager evaluation. Mirrors scripts/cockpit/trade-cockpit.mjs.
 function evaluateCockpitTrade(trade) {
   const market = _cpMarketFor(trade.symbol);
@@ -4404,6 +4542,10 @@ function renderCockpit() {
   const focusEl = document.getElementById('cockpit-radar-focus');
   if (focusEl) focusEl.innerHTML = _cpRadarFocusHtml();
 
+  // Funding divergence / extremes — context-only panel (existing DIVERGENCE_MAP).
+  const fxEl = document.getElementById('cockpit-funding-context');
+  if (fxEl) fxEl.innerHTML = _cpFundingContextHtml();
+
   // Onboarding hero is the empty-state surface. Once a position exists the
   // cards must dominate, so hide the hero and collapse the add/tools panel.
   const hasTrades = Cockpit.trades.length > 0;
@@ -4521,6 +4663,7 @@ function renderCockpit() {
         </div>
         <div class="cockpit-scores">${scoreChip('MOM',r.scores.momentum)}${scoreChip('BOOK',r.scores.orderBook)}${scoreChip('FLOW',r.scores.flow)}${scoreChip('DERIV',r.scores.derivatives)}${scoreChip('MKT',r.scores.market)}${scoreChip('PROG',r.scores.progress)}</div>
         <div class="cockpit-next"><b>Why:</b> ${_esc(r.reason.join(' | '))} ${miss}</div>
+        ${_cpReviewChecklistHtml(r)}
         ${suggest}
       </div>
       <div class="cockpit-actions">

@@ -10,6 +10,9 @@ import {
   buildCockpitAlerts,
   prefillFromRadarCandidate,
   validateSetup,
+  buildReviewChecklist,
+  summarizeFundingContext,
+  REVIEW_CARD_KEYS,
   COCKPIT_ACTIONS,
 } from '../scripts/cockpit/trade-cockpit.mjs';
 
@@ -283,6 +286,115 @@ test('validateSetup: long geometry rules and short gating', () => {
   assert.equal(validateSetup('long', 10, 9, [8]).valid, false);
   assert.equal(validateSetup('short', 10, 12, [8]).valid, false);
   assert.equal(validateSetup(undefined, 10, 9, [12]).valid, true); // missing side defaults long
+});
+
+// ── M1: manual-review checklist + funding context (presentation only) ───────
+
+const evalWith = (marketOver = {}, tradeOver = {}, regime = { score: 70 }) => evaluateTradeCockpit(
+  { symbol: 'INJUSDT', entryPrice: 18, quantity: 100, stopLoss: 17, tp1: 20, tp2: 23, tp3: 26, ...tradeOver },
+  full(marketOver), regime,
+);
+
+test('buildReviewChecklist returns exactly the 8 cards in fixed order', () => {
+  const r = evalWith();
+  const model = buildReviewChecklist(r, full(), {});
+  assert.equal(model.contextOnly, true);
+  assert.equal(model.cards.length, 8);
+  assert.deepEqual(model.cards.map((c) => c.key), REVIEW_CARD_KEYS);
+});
+
+test('buildReviewChecklist shows real values on full data + SAFE, no manual review', () => {
+  const r = evalWith({}, { safetyStatus: 'SAFE' });
+  const model = buildReviewChecklist(r, full(), {});
+  const byKey = Object.fromEntries(model.cards.map((c) => [c.key, c]));
+  for (const k of ['structure', 'flow', 'funding', 'oi', 'orderbook', 'regime']) {
+    assert.equal(byKey[k].status, 'ok', `${k} should be ok on full data`);
+    assert.ok(byKey[k].value, `${k} should carry a value`);
+  }
+  assert.equal(byKey.safety.status, 'ok');
+  assert.equal(byKey.safety.value, 'SAFE');
+  assert.equal(model.manualReview, false);
+});
+
+test('buildReviewChecklist shows honest N/A labels when data missing (no fabrication)', () => {
+  // Only price + momentum present; book/flow/deriv/funding/oi absent.
+  const r = evaluateTradeCockpit(
+    { symbol: 'INJUSDT', entryPrice: 18, quantity: 100, stopLoss: 17, tp1: 20 },
+    { currentPrice: 18.5, change1hPct: 1, change4hPct: 2 }, {},
+  );
+  const model = buildReviewChecklist(r, { currentPrice: 18.5, change1hPct: 1, change4hPct: 2 }, {});
+  const byKey = Object.fromEntries(model.cards.map((c) => [c.key, c]));
+  assert.equal(byKey.flow.status, 'na');
+  assert.equal(byKey.flow.note, 'Flow unavailable');
+  assert.equal(byKey.orderbook.note, 'Orderbook unavailable');
+  assert.equal(byKey.oi.note, 'OI unavailable');
+  assert.equal(byKey.funding.note, 'Funding unavailable');
+  assert.equal(byKey.safety.note, 'Safety UNKNOWN blocks alerts');
+  assert.equal(byKey.news.note, 'News unavailable/degraded');
+  assert.equal(byKey.regime.note, 'Market regime unavailable');
+  // No card ever carries a fabricated numeric value when status is na.
+  for (const c of model.cards) if (c.status === 'na') assert.equal(c.value == null || c.value === 'UNKNOWN', true);
+  assert.equal(model.manualReview, true); // missing flow/orderbook/oi + safety UNKNOWN
+});
+
+test('buildReviewChecklist funding uses divergence context (labelled context only) when scored funding absent', () => {
+  const r = evaluateTradeCockpit(
+    { symbol: 'INJUSDT', entryPrice: 18, quantity: 100, stopLoss: 17, tp1: 20 },
+    { currentPrice: 18.5, change1hPct: 1 }, {},
+  );
+  const model = buildReviewChecklist(r, { currentPrice: 18.5 }, { funding: { funding_pct: -0.012, signal: 'SHORTS_TRAPPED', source: 'funding-divergence' } });
+  const funding = model.cards.find((c) => c.key === 'funding');
+  assert.equal(funding.status, 'ok');
+  assert.equal(funding.note, 'context only');
+  assert.match(funding.value, /-0\.012%/);
+  assert.match(funding.value, /SHORTS_TRAPPED/);
+});
+
+test('buildReviewChecklist is pure and carries no execution/gate fields (cannot exit or unlock alerts)', () => {
+  const r = evalWith();
+  const before = JSON.parse(JSON.stringify(r));
+  const model = buildReviewChecklist(r, full(), {});
+  // Does not mutate the evaluation.
+  assert.deepEqual(JSON.parse(JSON.stringify(r)), before);
+  // No execution verb / gate name anywhere in the model.
+  const blob = JSON.stringify(model);
+  for (const forbidden of ['EXIT_ALL', 'EMERGENCY_EXIT', 'ENTRY_READY', 'telegram', 'Telegram', 'TAKE_PROFIT', 'HOLD_STRONG']) {
+    assert.equal(blob.includes(forbidden), false, `review model must not include ${forbidden}`);
+  }
+  // The model exposes no top-level action / entryReady / telegram driver; the only
+  // per-card `status` is the presence flag ('ok' | 'na'), never an execution verb.
+  for (const k of ['action', 'entryReady', 'telegram']) assert.equal(k in model, false);
+  for (const c of model.cards) {
+    for (const k of ['action', 'entryReady', 'telegram']) assert.equal(k in c, false);
+    assert.ok(c.status === 'ok' || c.status === 'na', 'card.status is a presence flag only');
+  }
+});
+
+test('summarizeFundingContext groups extremes + states as context only (no signal/action field)', () => {
+  const signals = [
+    { symbol: 'AAA', funding_pct: 0.05, price_change_24h_pct: 0.3, signal: 'CROWDED_LONG', bias: 'bearish' },
+    { symbol: 'BBB', funding_pct: 0.021, price_change_24h_pct: -4, signal: 'LONGS_TRAPPED', bias: 'bearish' },
+    { symbol: 'CCC', funding_pct: -0.008, price_change_24h_pct: 5, signal: 'SHORTS_TRAPPED', bias: 'bullish' },
+    { symbol: 'DDD', funding_pct: 0.001, price_change_24h_pct: 1 }, // not extreme, no signal
+    { symbol: 'EEE', funding_pct: 'x' }, // invalid → dropped
+  ];
+  const m = summarizeFundingContext(signals);
+  assert.equal(m.contextOnly, true);
+  assert.equal(m.source, 'funding-divergence');
+  assert.equal(m.count, 4); // EEE dropped
+  assert.equal(m.states.CROWDED_LONG, 1);
+  assert.equal(m.states.LONGS_TRAPPED, 1);
+  assert.equal(m.states.SHORTS_TRAPPED, 1);
+  assert.deepEqual(m.extremePositive.map((r) => r.symbol), ['AAA']); // >= +0.03; BBB(0.021) excluded
+  assert.deepEqual(m.extremeNegative.map((r) => r.symbol), ['CCC']); // <= -0.005
+  assert.equal('action' in m, false);
+  assert.equal('signal' in m, false);
+});
+
+test('summarizeFundingContext tolerates junk input', () => {
+  assert.equal(summarizeFundingContext().count, 0);
+  assert.equal(summarizeFundingContext(null).count, 0);
+  assert.equal(summarizeFundingContext([null, 1, 'x', {}]).count, 0);
 });
 
 test('summary reports health, needs-action, winner/risk, stale and no-price counts', () => {
