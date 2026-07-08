@@ -1994,6 +1994,11 @@ html,body{overflow-x:hidden;max-width:100vw}
 /* Pressure Zones — context-only proxy panel (display only; no gate influence) */
 .radar-pressure-zones{border-color:rgba(255,176,32,.22);background:rgba(255,176,32,.05)}
 .radar-pressure-zones__note b{color:var(--txt3);font-weight:normal;font-size:9px;font-style:italic}
+/* Trade Readiness — context-only operator summary (display only; no gate influence) */
+.radar-trade-readiness{border:1px solid var(--b2,#1a2540);border-radius:8px;padding:9px 12px;margin:0 0 10px;background:rgba(61,158,255,.04)}
+.radar-trade-readiness__headline{font-size:13px;font-weight:800;margin-top:3px}
+.radar-trade-readiness__row{font-size:12px;margin-top:3px;color:var(--txt2)}
+.radar-trade-readiness__row b{color:var(--txt3)}
 .radar-status-chip{display:inline-flex;align-items:center;min-height:21px;padding:3px 7px;border-radius:4px;font-size:10px;font-weight:800;border:1px solid rgba(255,255,255,.1)}
 .radar-status-chip--pass{color:#a8ffd8;background:rgba(0,255,128,.1);border-color:rgba(0,255,128,.22)}
 .radar-status-chip--wait{color:#cfe2ff;background:rgba(61,158,255,.1);border-color:rgba(61,158,255,.22)}

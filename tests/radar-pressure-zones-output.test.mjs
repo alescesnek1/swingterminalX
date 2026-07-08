@@ -106,12 +106,13 @@ test('isolation: pressureZones is computed after all gate work and referenced on
   // computeRadarPressureZones appears exactly twice: its definition + one call.
   const refs = (TR_SRC.match(/computeRadarPressureZones\s*\(/g) || []).length;
   assert.equal(refs, 2, 'expected one definition + one call site');
-  // The single call site is the additive output property, computed inline.
-  assert.match(TR_SRC, /pressureZones: computeRadarPressureZones\(m, klinesSnapshot, now\)/);
+  // The single call site is a const computed at output-shaping time, then spread
+  // into the output object via shorthand.
+  assert.match(TR_SRC, /const pressureZones = computeRadarPressureZones\(m, klinesSnapshot, now\)/);
   // It must NOT be threaded onto the market object used by universe/scoring.
   assert.doesNotMatch(TR_SRC, /\.\.\.computed,\s*computedStructuralKlinesSymbol[\s\S]{0,40}pressureZones/);
   // The call site sits AFTER the V1 gate + actionability are computed for the row.
   const gateIdx = TR_SRC.indexOf('const entryReadyV1 =');
-  const callIdx = TR_SRC.indexOf('pressureZones: computeRadarPressureZones(');
+  const callIdx = TR_SRC.indexOf('const pressureZones = computeRadarPressureZones(');
   assert.ok(gateIdx > 0 && callIdx > gateIdx, 'pressureZones must be projected after gate computation');
 });

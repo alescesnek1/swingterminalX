@@ -8026,6 +8026,22 @@ function _renderTradingRadar(radar, esc) {
     const zHigh = rPrimary && rPrimary.level_zone_high != null ? _fleetFmtRadarPrice(rPrimary.level_zone_high) : '--';
 
     focusHtml = `<div class="radar-focus-card">
+      ${(() => {
+        // Context-only operator readiness summary (server-computed; display only).
+        // It mirrors existing status and never creates a new ENTRY_READY-like state.
+        const tr = selected.tradeReadiness;
+        if (!tr) return '';
+        const joinList = (arr) => (Array.isArray(arr) && arr.length) ? arr.map((x) => esc(String(x))).join(' · ') : 'none';
+        const readyCls = tr.actionable ? 'radar-micro-yes' : 'radar-micro-no';
+        return `<div class="radar-trade-readiness">
+        <div style="${cardLabel}">TRADE READINESS · what to check next</div>
+        <div class="radar-trade-readiness__headline ${readyCls}">${esc(tr.headline)}</div>
+        <div class="radar-trade-readiness__row"><b>Blocked by:</b> ${joinList(tr.blockers)}</div>
+        <div class="radar-trade-readiness__row"><b>Supporting context:</b> ${joinList(tr.supportive)}</div>
+        <div class="radar-trade-readiness__row"><b>Missing data:</b> ${joinList(tr.missing)}</div>
+        <div class="radar-trade-readiness__row"><b>Next check:</b> ${esc(tr.nextCheck)}</div>
+      </div>`;
+      })()}
       <div class="radar-operator-summary radar-decision-cards" style="display:flex; flex-direction:column; gap:8px; margin-bottom:10px;">
         <div class="radar-decision-card radar-decision-card--entry" style="${cardBase} border:1px solid ${entryTone};">
           <div style="${cardLabel}">Entry</div>

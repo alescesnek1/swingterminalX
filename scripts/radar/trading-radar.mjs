@@ -2223,6 +2223,78 @@ export function computeRadarPressureZones(market, klinesSnapshot, nowMs = Date.n
     disclaimer: 'Derived proxy from closed candles; not liquidation data; not order-book data.',
   };
 }
+
+// Display-only thresholds for the readiness SUMMARY (labels only — they change no
+// gate, score, or threshold anywhere in the engine).
+const READINESS_FUNDING_POS_PCT = 0.03;
+const READINESS_FUNDING_NEG_PCT = -0.005;
+const READINESS_PRESSURE_NEAR_PCT = 1.5;
+
+// Context-only operator readiness summary. PURE presentation over fields the
+// candidate ALREADY carries. It introduces NO new status, never re-decides a
+// gate, and returns NO ENTRY_READY / BUY / SELL / signal / telegram / score /
+// execution field. `actionable` merely MIRRORS the already-computed gate
+// actionability — it is not a new gate. Pressure Zones and Funding are only ever
+// SUPPORTING context here, never blockers on their own. Missing data is reported
+// as-is, never invented.
+export function buildTradeReadinessSummary(input = {}) {
+  const s = input && typeof input === 'object' ? input : {};
+  const actionability = String(s.actionability || '').toUpperCase();
+  const actionable = actionability === 'ENTRY_READY';
+  const safety = String(s.safetyStatus || 'UNKNOWN').toUpperCase();
+  const blockers = [];
+  const supportive = [];
+
+  // ── Blockers: derived only from existing gate outputs / safety / data presence.
+  if (safety !== 'SAFE') blockers.push(`safety ${safety.toLowerCase()} (verify before any manual entry)`);
+  const blockedByRaw = s.blockedBy == null ? '' : String(s.blockedBy).trim();
+  if (blockedByRaw && !['--', 'none'].includes(blockedByRaw.toLowerCase())) blockers.push(blockedByRaw);
+  if (s.hasRollingMicrostructure !== true) blockers.push('rolling flow/absorption data missing');
+  const absorbBlocked = s.absorptionBlockedReason != null && !['none', 'not blocked', ''].includes(String(s.absorptionBlockedReason).trim().toLowerCase());
+  if (absorbBlocked) blockers.push('strict absorb not confirmed');
+  const reclaimBlocked = s.reclaimBlockedReason != null && !['none', 'not blocked', ''].includes(String(s.reclaimBlockedReason).trim().toLowerCase());
+  if (reclaimBlocked) blockers.push('reclaim not confirmed');
+
+  // ── Supporting context (NEVER a blocker by itself).
+  const pz = s.pressureZones;
+  if (pz && pz.available === true && Array.isArray(pz.zones) && Number.isFinite(Number(pz.referencePrice)) && Number(pz.referencePrice) > 0) {
+    const ref = Number(pz.referencePrice);
+    const near = pz.zones.find((z) => Number.isFinite(Number(z.price)) && Math.abs((Number(z.price) - ref) / ref) * 100 <= READINESS_PRESSURE_NEAR_PCT);
+    if (near) supportive.push(`pressure zone nearby (${near.type} @ ${near.price})`);
+  }
+  const funding = Number(s.fundingRate);
+  if (Number.isFinite(funding) && (funding >= READINESS_FUNDING_POS_PCT || funding <= READINESS_FUNDING_NEG_PCT)) {
+    supportive.push(`funding extreme (${funding}%)`);
+  }
+  if (s.structurePresent === true) supportive.push('structure present (reclaim level computed)');
+
+  // ── Missing data (as reported by the candidate; never fabricated).
+  const missSet = new Set();
+  for (const x of Array.isArray(s.missingData) ? s.missingData : []) if (x) missSet.add(String(x));
+  if (s.hasRollingMicrostructure !== true) missSet.add('rolling flow');
+  const missing = Array.from(missSet).slice(0, 8);
+
+  const headline = actionable
+    ? 'READY: yes — confirmed by RADAR gates (verify safety + manual review)'
+    : 'READY: no, waiting for confirmed gates';
+  let nextCheck;
+  if (actionable) nextCheck = 'verify safety SAFE + manual review before any manual entry';
+  else if (safety !== 'SAFE') nextCheck = 'resolve safety (verify listing/contract) — alerts stay blocked until SAFE';
+  else if (s.hasRollingMicrostructure !== true) nextCheck = 'wait for trusted rolling microstructure (strict absorb)';
+  else if (reclaimBlocked) nextCheck = 'wait for reclaim confirmation';
+  else if (absorbBlocked) nextCheck = 'wait for strict absorb confirmation';
+  else nextCheck = (s.nextConfirmation && String(s.nextConfirmation).trim()) || 'manual review';
+
+  return {
+    contextOnly: true,
+    actionable,
+    headline,
+    blockers: blockers.slice(0, 6),
+    supportive: supportive.slice(0, 6),
+    missing,
+    nextCheck,
+  };
+}
 export function evaluateTradingRadar({
   markets = [],
   scannerCandidates = [],
@@ -2442,6 +2514,24 @@ export function evaluateTradingRadar({
         }
       }
 
+      // Context-only additive display blocks, computed AFTER all gate/score work
+      // and never fed back into it. Neither is read by any gate/Absorb/Reclaim/
+      // ENTRY_READY/Telegram path.
+      const pressureZones = computeRadarPressureZones(m, klinesSnapshot, now);
+      const tradeReadiness = buildTradeReadinessSummary({
+        actionability: effectiveActionability,
+        blockedBy: v1.BLOCKED_BY,
+        nextConfirmation: v1.NEXT_CONFIRMATION,
+        safetyStatus: safety.safetyStatus,
+        hasRollingMicrostructure: microDiag.hasRollingMicrostructure,
+        absorptionBlockedReason: microDiag.absorptionBlockedReason,
+        reclaimBlockedReason: microDiag.reclaimBlockedReason,
+        missingData: missingForMarket(m),
+        pressureZones,
+        fundingRate: m.fundingRate,
+        structurePresent: m.computedReclaimLevel != null || m.computedStructuralConfidence != null,
+      });
+
       return {
         symbol: m.symbol,
         computedBreakdownLevel: m.computedBreakdownLevel,
@@ -2457,7 +2547,10 @@ export function evaluateTradingRadar({
         computedStructuralKlinesSymbol: m.computedStructuralKlinesSymbol,
         // Context-only Pressure Zones proxy (additive display block; no raw
         // candles; never read by any gate/score/Absorb/Reclaim/ENTRY_READY/Telegram).
-        pressureZones: computeRadarPressureZones(m, klinesSnapshot, now),
+        pressureZones,
+        // Context-only operator readiness SUMMARY (additive display block; mirrors
+        // existing status, introduces no new gate; never read by any gate path).
+        tradeReadiness,
         ...attentionMetadata,
         stage: stageInfo.stage,
         actionability: effectiveActionability,
