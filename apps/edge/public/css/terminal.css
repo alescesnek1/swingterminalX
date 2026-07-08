@@ -346,6 +346,8 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .cockpit-funding-context .fx-chip.neg{color:var(--grn);border-color:rgba(0,232,200,.3)}
 .cockpit-funding-context .fx-none{color:var(--txt3);font-size:8px}
 .cockpit-funding-context .fx-states{margin-top:5px;color:var(--txt3);font-size:8px;letter-spacing:.02em}
+.cockpit-funding-context .fx-market{margin-top:7px;padding-top:6px;border-top:1px solid var(--b1)}
+.cockpit-funding-context .fx-subhead{font-size:9px;letter-spacing:.04em;color:var(--txt2);margin-bottom:4px}
 .cockpit-actions{display:flex;flex-direction:column;gap:5px}.cockpit-actions button{background:var(--s1);border:1px solid var(--b2);border-radius:var(--rad);color:var(--txt2);font-family:var(--mono);font-size:9px;padding:5px;cursor:pointer}.cockpit-actions button:hover{color:var(--acc);border-color:rgba(0,232,200,.35)}
 .cockpit-card__detail{grid-column:1/-1;display:none;border-top:1px solid var(--b1);padding-top:8px;color:var(--txt2);font-size:10px;line-height:1.5}.cockpit-card.expanded .cockpit-card__detail{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .cockpit-empty{padding:28px;text-align:center;color:var(--txt3);background:var(--s2);border:1px solid var(--b1);border-radius:var(--rad)}
@@ -1470,6 +1472,7 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .sniper-lbl{color:var(--txt3);font-size:9px;letter-spacing:.04em}
 .sniper-val{color:var(--txt1);font-weight:700;font-size:11px;font-variant-numeric:tabular-nums}
 .sniper-val--big{color:#ffb020;font-size:14px;font-weight:800}
+.sniper-honesty{margin-top:6px;padding-top:5px;border-top:1px solid var(--b1);color:var(--txt3);font-size:8px;line-height:1.4;letter-spacing:.02em}
 
 /* ═══════════ CINEMATIC TAB TRANSITIONS ═══════════ */
 /* V6.2: removed opacity:0 / transform trap from .view base — display:none

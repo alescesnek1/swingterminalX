@@ -529,3 +529,28 @@ export function summarizeFundingContext(signals = []) {
     divergences,
   };
 }
+
+// Pure grouping reference for the MARKET-WIDE funding context block that the
+// /api/funding-divergence endpoint attaches (buildFundingContext mirrors this
+// shape). Given a full list of {symbol,pair,funding_pct,...} rows across USDⓈ-M
+// perps, return the top positive / negative funding names. Context only — no
+// signal/bias/confidence, never fed to any gate, score, or Telegram path.
+export function summarizeMarketFunding(rows = [], opts = {}) {
+  const topN = Number.isFinite(Number(opts.topN)) && Number(opts.topN) > 0 ? Math.min(Math.trunc(Number(opts.topN)), 50) : 12;
+  const norm = [];
+  for (const r of Array.isArray(rows) ? rows : []) {
+    if (!r || typeof r !== 'object') continue;
+    const funding_pct = Number(r.funding_pct);
+    if (!Number.isFinite(funding_pct)) continue;
+    norm.push({
+      symbol: String(r.symbol || r.pair || '').toUpperCase(),
+      pair: r.pair ? String(r.pair).toUpperCase() : null,
+      funding_pct: round(funding_pct, 4),
+      mark_price: Number.isFinite(Number(r.mark_price)) ? Number(r.mark_price) : null,
+      price_change_24h_pct: Number.isFinite(Number(r.price_change_24h_pct)) ? round(Number(r.price_change_24h_pct), 2) : null,
+    });
+  }
+  const top_positive = norm.filter((r) => r.funding_pct > 0).sort((a, b) => b.funding_pct - a.funding_pct).slice(0, topN);
+  const top_negative = norm.filter((r) => r.funding_pct < 0).sort((a, b) => a.funding_pct - b.funding_pct).slice(0, topN);
+  return { context_only: true, source: 'funding-divergence', universe_count: norm.length, top_positive, top_negative };
+}

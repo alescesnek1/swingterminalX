@@ -175,3 +175,33 @@ test('frontend cockpit M1 layer introduces no Coinee reference or fetch', () => 
   assert.doesNotMatch(indexHtml, /coinee/i);
   assert.doesNotMatch(terminalCss, /coinee/i);
 });
+
+// ── M2: market-wide funding context + depth-wall honesty labels ─────────────
+
+test('frontend funding panel renders market-wide FUNDING CONTEXT ONLY from a separate store', () => {
+  // market-wide context is stored separately from the scoring divergence map
+  assert.match(terminalJs, /let FUNDING_CONTEXT = null;/);
+  assert.match(terminalJs, /FUNDING_CONTEXT = \(j\.funding_context/);
+  assert.match(terminalJs, /_cpMarketFundingHtml/);
+  assert.match(terminalJs, /FUNDING CONTEXT ONLY/);
+  assert.match(terminalJs, /top_positive/);
+  assert.match(terminalJs, /top_negative/);
+  // the existing scoring path still reads only DIVERGENCE_MAP, never FUNDING_CONTEXT
+  assert.match(terminalJs, /DIVERGENCE_MAP\.get\(String\(symbol \|\| ''\)\.toUpperCase\(\)\)/);
+  assert.doesNotMatch(terminalJs, /_readDivergenceSignal[\s\S]{0,200}FUNDING_CONTEXT/);
+});
+
+test('frontend divergence-map population is unchanged (context field does not feed the signal map)', () => {
+  // DIVERGENCE_MAP is still filled only from j.signals
+  assert.match(terminalJs, /for \(const s of \(j\.signals \|\| \[\]\)\) \{\s*DIVERGENCE_MAP\.set/);
+});
+
+test('frontend depth-wall (sniper) panel carries honest resting-order caveats (not whale orders)', () => {
+  assert.match(terminalJs, /sniper-honesty/);
+  assert.match(terminalJs, /Resting limit orders/);
+  assert.match(terminalJs, /can be pulled/);
+  assert.match(terminalJs, /not executed flow/);
+  assert.match(terminalJs, /Absorption needs rolling-flow confirmation/);
+  assert.doesNotMatch(terminalJs, /whale orders/i);
+  assert.match(terminalCss, /\.sniper-honesty/);
+});

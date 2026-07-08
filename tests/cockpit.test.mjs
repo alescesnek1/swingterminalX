@@ -12,6 +12,7 @@ import {
   validateSetup,
   buildReviewChecklist,
   summarizeFundingContext,
+  summarizeMarketFunding,
   REVIEW_CARD_KEYS,
   COCKPIT_ACTIONS,
 } from '../scripts/cockpit/trade-cockpit.mjs';
@@ -395,6 +396,39 @@ test('summarizeFundingContext tolerates junk input', () => {
   assert.equal(summarizeFundingContext().count, 0);
   assert.equal(summarizeFundingContext(null).count, 0);
   assert.equal(summarizeFundingContext([null, 1, 'x', {}]).count, 0);
+});
+
+// ── M2: market-wide funding context (top +/- funding across perps) ──────────
+
+test('summarizeMarketFunding groups top positive / negative funding (context only)', () => {
+  const rows = [
+    { symbol: 'AAA', pair: 'AAAUSDT', funding_pct: 0.08, mark_price: 1.2, price_change_24h_pct: 3 },
+    { symbol: 'BBB', pair: 'BBBUSDT', funding_pct: 0.02, mark_price: 10 },
+    { symbol: 'CCC', pair: 'CCCUSDT', funding_pct: -0.03, mark_price: 0.5, price_change_24h_pct: -6 },
+    { symbol: 'DDD', pair: 'DDDUSDT', funding_pct: -0.011, mark_price: 4 },
+    { symbol: 'EEE', pair: 'EEEUSDT', funding_pct: 0 }, // exactly zero → neither list
+    { symbol: 'FFF', funding_pct: 'nan' },              // invalid → dropped
+  ];
+  const m = summarizeMarketFunding(rows);
+  assert.equal(m.context_only, true);
+  assert.equal(m.source, 'funding-divergence');
+  assert.equal(m.universe_count, 5); // FFF dropped; EEE counted in universe
+  assert.deepEqual(m.top_positive.map((r) => r.symbol), ['AAA', 'BBB']); // desc
+  assert.deepEqual(m.top_negative.map((r) => r.symbol), ['CCC', 'DDD']); // most negative first
+  // no signal / bias / confidence / action leaks into the context model
+  const blob = JSON.stringify(m);
+  for (const forbidden of ['signal', 'bias', 'confidence', 'action', 'ENTRY_READY', 'telegram']) {
+    assert.equal(blob.toLowerCase().includes(forbidden.toLowerCase()), false, `market funding must not include ${forbidden}`);
+  }
+});
+
+test('summarizeMarketFunding respects topN cap and tolerates junk', () => {
+  const many = Array.from({ length: 30 }, (_, i) => ({ symbol: `P${i}`, funding_pct: (i + 1) * 0.001 }));
+  const m = summarizeMarketFunding(many, { topN: 5 });
+  assert.equal(m.top_positive.length, 5);
+  assert.equal(summarizeMarketFunding().universe_count, 0);
+  assert.equal(summarizeMarketFunding(null).universe_count, 0);
+  assert.equal(summarizeMarketFunding(['x', 3, null, {}]).universe_count, 0);
 });
 
 test('summary reports health, needs-action, winner/risk, stale and no-price counts', () => {

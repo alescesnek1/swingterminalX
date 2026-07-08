@@ -756,6 +756,10 @@ function computeMomentumScore(d) {
 // renderList() can stamp a SHORTS_TRAPPED / LONGS_TRAPPED tag next to
 // the signal label. Throttled to once per refresh tick (~120s).
 const DIVERGENCE_MAP = new Map(); // base symbol → signal object
+// Market-wide funding CONTEXT (top +/- funding across USDⓈ-M perps), stored
+// separately from DIVERGENCE_MAP so it never touches the divergence-signal
+// scoring path. Context only — read by the cockpit funding panel, nothing else.
+let FUNDING_CONTEXT = null;
 async function fetchDivergence() {
   try {
     const authHeaders = await _getAuthHeaders();
@@ -769,6 +773,8 @@ async function fetchDivergence() {
     for (const s of (j.signals || [])) {
       DIVERGENCE_MAP.set(String(s.symbol || '').toUpperCase(), s);
     }
+    // Context-only companion block; never merged into DIVERGENCE_MAP / scoring.
+    FUNDING_CONTEXT = (j.funding_context && typeof j.funding_context === 'object') ? j.funding_context : null;
     // High-confidence signals get a LiveFeed push (throttled below).
     for (const s of (j.signals || []).slice(0, 5)) {
       if (s.confidence >= 0.5) {
@@ -2386,6 +2392,7 @@ function pickCoin(id) {
             <span class="sniper-lbl">vs 24H LOW</span>
             <span class="sniper-lbl">${snipAll.proximity_to_24h_low_pct >= 0 ? '+' : ''}${snipAll.proximity_to_24h_low_pct.toFixed(2)}%</span>
           </div>` : ''}
+          <div class="sniper-honesty">Resting limit orders — can be pulled; not executed flow. Absorption needs rolling-flow confirmation.</div>
         </div>`;
     })()}
 
@@ -4134,7 +4141,7 @@ function _cpValidateSetup(side, entry, stop, tps) {
 // already computed, never changes a score/gate/action, never fabricates a value,
 // and returns no execution verb. Honest terminology: "Flow (taker)" is a windowed
 // taker delta, not a cumulative-delta series; "Orderbook (depth)" is resting depth,
-// not confirmed whale orders; "Funding" is context, not a signal. Nothing here
+// not confirmed large-trader execution; "Funding" is context, not a signal. Nothing here
 // claims to be a liquidation map — there is no liquidation feed.
 const CP_FUNDING_EXTREME_POS_PCT = 0.03;
 const CP_FUNDING_EXTREME_NEG_PCT = -0.005;
@@ -4249,13 +4256,32 @@ function _cpSummarizeFundingContext(signals) {
   return { contextOnly: true, source: 'funding-divergence', count: norm.length, states, extremePositive, extremeNegative };
 }
 
+// Market-wide top funding chips, rendered from the endpoint's context-only
+// `funding_context` block. Never a signal; never affects any gate/action/alert.
+function _cpMarketFundingHtml() {
+  const fc = (typeof FUNDING_CONTEXT !== 'undefined' && FUNDING_CONTEXT && typeof FUNDING_CONTEXT === 'object') ? FUNDING_CONTEXT : null;
+  if (!fc || (!Array.isArray(fc.top_positive) && !Array.isArray(fc.top_negative))) return '';
+  const chip = (r) => `<span class="fx-chip ${Number(r.funding_pct) >= 0 ? 'pos' : 'neg'}" title="mark ${r.mark_price == null ? '--' : _esc(r.mark_price)} · 24h ${r.price_change_24h_pct == null ? '--' : r.price_change_24h_pct + '%'}">${_esc(r.symbol)} ${Number(r.funding_pct) >= 0 ? '+' : ''}${_esc(r.funding_pct)}%</span>`;
+  const pos = (Array.isArray(fc.top_positive) ? fc.top_positive : []).map(chip).join('') || '<span class="fx-none">none</span>';
+  const neg = (Array.isArray(fc.top_negative) ? fc.top_negative : []).map(chip).join('') || '<span class="fx-none">none</span>';
+  const universe = Number.isFinite(Number(fc.universe_count)) ? Number(fc.universe_count) : null;
+  return `<div class="fx-market">
+    <div class="fx-subhead">FUNDING CONTEXT ONLY <span class="fx-note">top funding across ${universe == null ? '' : universe + ' '}USDⓈ-M perps · not a signal</span></div>
+    <div class="fx-row"><span class="fx-label">Top + (longs pay)</span><div class="fx-chips">${pos}</div></div>
+    <div class="fx-row"><span class="fx-label">Top − (shorts pay)</span><div class="fx-chips">${neg}</div></div>
+  </div>`;
+}
+
 function _cpFundingContextHtml() {
   let signals = [];
   try { if (typeof DIVERGENCE_MAP !== 'undefined' && DIVERGENCE_MAP) signals = Array.from(DIVERGENCE_MAP.values()); } catch {}
   const model = _cpSummarizeFundingContext(signals);
+  const market = _cpMarketFundingHtml();
   const head = '<div class="fx-head">FUNDING DIVERGENCE · CONTEXT ONLY <span class="fx-note">not a signal · does not affect RADAR / ENTRY_READY / cockpit action / Telegram</span></div>';
   if (!model.count) {
-    return `<div class="cockpit-funding-context empty">${head}<div class="fx-empty">no divergence signals right now (or feed unavailable) — manual review</div></div>`;
+    // No trap-state signals, but the market-wide funding context may still exist.
+    const emptyDiv = '<div class="fx-empty">no divergence signals right now (or feed unavailable) — manual review</div>';
+    return `<div class="cockpit-funding-context ${market ? '' : 'empty'}">${head}${emptyDiv}${market}</div>`;
   }
   const chip = (r) => `<span class="fx-chip ${Number(r.funding_pct) >= 0 ? 'pos' : 'neg'}" title="${_esc(r.signal || 'divergence')} · 24h ${r.price_change_24h_pct == null ? '--' : r.price_change_24h_pct + '%'}">${_esc(r.symbol)} ${Number(r.funding_pct) >= 0 ? '+' : ''}${_esc(r.funding_pct)}%</span>`;
   const pos = model.extremePositive.map(chip).join('') || '<span class="fx-none">none</span>';
@@ -4264,6 +4290,7 @@ function _cpFundingContextHtml() {
     <div class="fx-row"><span class="fx-label">Extreme + (longs pay)</span><div class="fx-chips">${pos}</div></div>
     <div class="fx-row"><span class="fx-label">Extreme − (shorts pay)</span><div class="fx-chips">${neg}</div></div>
     <div class="fx-states">SHORTS_TRAPPED ${model.states.SHORTS_TRAPPED} · LONGS_TRAPPED ${model.states.LONGS_TRAPPED} · CROWDED_LONG ${model.states.CROWDED_LONG}</div>
+    ${market}
   </div>`;
 }
 

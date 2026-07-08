@@ -82,6 +82,38 @@ function scoreSquish(absFundingPct, absPricePct) {
   return +Math.min(1, x).toFixed(3);
 }
 
+// Market-wide funding CONTEXT (top positive / negative funding across USDⓈ-M
+// perps), built from the SAME premium data the divergence scan already fetched.
+// This is context only: it carries no signal/bias/confidence, is never merged
+// into `signals`, and never reaches RADAR, ENTRY_READY, scoring, or Telegram.
+// The `signals` classification above is completely untouched by this block.
+const FUNDING_CONTEXT_TOP_N = 12;
+function buildFundingContext(premiumData, tickerByPair) {
+  const rows = [];
+  if (Array.isArray(premiumData)) {
+    for (const p of premiumData) {
+      const pair = p && p.symbol;
+      if (!pair || pair.includes('_')) continue;       // skip dated/quarterly futures
+      if (!/(USDT|USDC)$/.test(pair)) continue;         // USDⓈ-M perps only
+      const fundingPct = parseFloat(p.lastFundingRate) * 100;
+      if (!Number.isFinite(fundingPct)) continue;
+      const markPrice = parseFloat(p.markPrice);
+      const t = tickerByPair.get(pair);
+      const priceChangePct = t ? parseFloat(t.priceChangePercent) : NaN;
+      rows.push({
+        symbol: pair.replace(/USDT$|USDC$|BUSD$/, ''),
+        pair,
+        funding_pct: +fundingPct.toFixed(4),
+        mark_price: Number.isFinite(markPrice) ? markPrice : null,
+        price_change_24h_pct: Number.isFinite(priceChangePct) ? +priceChangePct.toFixed(2) : null,
+      });
+    }
+  }
+  const top_positive = rows.filter((r) => r.funding_pct > 0).sort((a, b) => b.funding_pct - a.funding_pct).slice(0, FUNDING_CONTEXT_TOP_N);
+  const top_negative = rows.filter((r) => r.funding_pct < 0).sort((a, b) => a.funding_pct - b.funding_pct).slice(0, FUNDING_CONTEXT_TOP_N);
+  return { context_only: true, source: 'funding-divergence', universe_count: rows.length, top_positive, top_negative };
+}
+
 async function buildDivergencePayload() {
   const [premiumData, tickerData] = await Promise.all([
     fetchWithTimeout(FUTURES_PREMIUM_URL, 'fut-premium-bulk'),
@@ -122,6 +154,8 @@ async function buildDivergencePayload() {
     generated_at: new Date().toISOString(),
     signal_count: signals.length,
     signals: signals.slice(0, 40),
+    // Context-only companion block — see buildFundingContext. Not a signal.
+    funding_context: buildFundingContext(premiumData, tickerByPair),
   };
 }
 
