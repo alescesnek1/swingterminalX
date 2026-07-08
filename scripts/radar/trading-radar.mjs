@@ -11,6 +11,7 @@ import { buildSafetyDiagnostics, evaluateKnownSafety, classifyMarketSafety } fro
 import { matchCoinGeckoTrendingToMarketSymbol } from '../market/coingecko-highlights.mjs';
 import { computeStructuralReclaimLevels } from './structural-reclaim.mjs';
 import { getFreshClosedKlinesForSymbol } from './klines-snapshot.mjs';
+import { computePressureZones } from './pressure-zones.mjs';
 import { getFreshRollingMicrostructureForSymbol, normalizeRollingMicrostructureSnapshot } from './rolling-microstructure-snapshot.mjs';
 const WEIRD_BASE_RE = /(UP|DOWN|BULL|BEAR)$|\d+(L|S)$/;
 const QUOTES = new Set(['USDC', 'USDT']);
@@ -2187,6 +2188,41 @@ function withComputedStructuralReclaim(market, klinesSnapshot, nowMs = Date.now(
   if (!computed) return market;
   return { ...market, ...computed, computedStructuralKlinesSymbol: symbol };
 }
+
+// Context-only PROXY for the browser: derive a compact Pressure Zones block from
+// the SAME fresh closed klines the structural-reclaim step already reads. This is
+// ADDITIVE DISPLAY DATA computed at output-shaping time only — it is never merged
+// onto the market object used by the universe/scoring pipeline, and is never read
+// by any gate, score, stage, Absorb/Reclaim, ENTRY_READY, Telegram, or Cockpit
+// path. It exposes NO raw candles. It never throws and never fabricates: absent /
+// stale / insufficient klines yield an explicit unavailable marker.
+export function computeRadarPressureZones(market, klinesSnapshot, nowMs = Date.now()) {
+  const symbol = safeKlinesSymbolFromCandidate(market);
+  if (!symbol) return { available: false, proxy: true, reason: 'NO_CLOSED_KLINES' };
+  const candles = getFreshClosedKlinesForSymbol(klinesSnapshot, symbol, { minCandles: 1, nowMs });
+  if (!candles || candles.length === 0) return { available: false, proxy: true, reason: 'NO_CLOSED_KLINES' };
+  const timeframe = (klinesSnapshot && klinesSnapshot.timeframe) || '1h';
+  const result = computePressureZones(candles, { timeframe });
+  if (!result) return { available: false, proxy: true, reason: 'INSUFFICIENT_CANDLES' };
+  // Compact projection: at most 3 nearest zones, no raw candles / timestamp arrays.
+  const zones = (Array.isArray(result.zones) ? result.zones : []).slice(0, 3).map((z) => ({
+    price: z.price,
+    type: z.side,
+    strength: z.strength,
+    basis: Array.isArray(z.basis) ? z.basis.slice() : [],
+  }));
+  return {
+    available: true,
+    proxy: true,
+    label: 'PRESSURE ZONES · derived proxy — not liquidation data',
+    source: 'closed-klines',
+    timeframe: result.timeframe || timeframe,
+    candlesUsed: result.candlesUsed,
+    referencePrice: result.referencePrice,
+    zones,
+    disclaimer: 'Derived proxy from closed candles; not liquidation data; not order-book data.',
+  };
+}
 export function evaluateTradingRadar({
   markets = [],
   scannerCandidates = [],
@@ -2419,6 +2455,9 @@ export function evaluateTradingRadar({
         sourceCandleIndex: m.sourceCandleIndex,
         breakdownCandleIndex: m.breakdownCandleIndex,
         computedStructuralKlinesSymbol: m.computedStructuralKlinesSymbol,
+        // Context-only Pressure Zones proxy (additive display block; no raw
+        // candles; never read by any gate/score/Absorb/Reclaim/ENTRY_READY/Telegram).
+        pressureZones: computeRadarPressureZones(m, klinesSnapshot, now),
         ...attentionMetadata,
         stage: stageInfo.stage,
         actionability: effectiveActionability,

@@ -8151,6 +8151,28 @@ function _renderTradingRadar(radar, esc) {
         <div class="radar-microstructure__row"><span>Missing absorption fields</span><div class="radar-chip-row">${chipList(selected.missingAbsorptionFields, 'radar-status-chip radar-status-chip--missing')}</div></div>
         <div class="radar-microstructure__row"><span>Missing reclaim fields</span><div class="radar-chip-row">${chipList(selected.missingReclaimFields, 'radar-status-chip radar-status-chip--missing')}</div></div>
       </div>
+      ${(() => {
+        // Context-only Pressure Zones proxy. Display only — derived from closed
+        // candles; NOT liquidation data, NOT order-book data. Never a gate/score.
+        const pz = selected.pressureZones;
+        if (!pz || pz.available !== true) {
+          return `<div class="radar-microstructure radar-pressure-zones">
+        <div class="radar-microstructure__title">PRESSURE ZONES · derived proxy — not liquidation data</div>
+        <div class="radar-microstructure__row"><span>Status</span><b class="radar-micro-no">Pressure Zones unavailable — no fresh closed candle snapshot</b></div>
+      </div>`;
+        }
+        const typeCls = (t) => t === 'support' ? 'radar-micro-yes' : t === 'resistance' ? 'radar-micro-no' : '';
+        const zoneRows = (Array.isArray(pz.zones) ? pz.zones : []).slice(0, 3).map((z) => `
+        <div class="radar-microstructure__row"><span>${esc(String(z.type || 'pivot').toUpperCase())} ${esc(_fleetFmtRadarPrice(z.price))}</span><b class="${typeCls(z.type)}">str ${esc(_fleetFmtRadarValue(z.strength, 0))} &middot; ${esc((Array.isArray(z.basis) ? z.basis : []).join(', ') || '--')}</b></div>`).join('');
+        const zonesBlock = zoneRows || `<div class="radar-microstructure__row"><span>Zones</span><b>no notable zones in window</b></div>`;
+        return `<div class="radar-microstructure radar-pressure-zones">
+        <div class="radar-microstructure__title">PRESSURE ZONES · derived proxy — not liquidation data</div>
+        ${zonesBlock}
+        <div class="radar-microstructure__row"><span>Reference price</span><b>${esc(_fleetFmtRadarPrice(pz.referencePrice))}</b></div>
+        <div class="radar-microstructure__row"><span>Candles used</span><b>${esc(_fleetFmtRadarValue(pz.candlesUsed, 0))} &middot; ${esc(pz.source || 'closed-klines')} ${esc(pz.timeframe || '')}</b></div>
+        <div class="radar-microstructure__row radar-pressure-zones__note"><span>Note</span><b>${esc(pz.disclaimer || 'Derived proxy from closed candles; not liquidation data; not order-book data.')}</b></div>
+      </div>`;
+      })()}
       <div class="radar-microstructure">
         <div class="radar-microstructure__title">Provider Status Panel</div>
         <div class="radar-microstructure__row radar-verdict-row"><span>Provider</span><b class="${provState === 'ONLINE' ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(provState)}</b></div>
