@@ -17,6 +17,8 @@ test('RADAR trade-readiness panel renders only when candidate.tradeReadiness exi
 
 test('RADAR trade-readiness panel shows the operator-language sections', () => {
   assert.ok(terminalJs.includes('TRADE READINESS · what to check next'), 'panel title required');
+  assert.match(terminalJs, /Actionable now:/);
+  assert.match(terminalJs, /Context only/);
   assert.match(terminalJs, /Blocked by:/);
   assert.match(terminalJs, /Supporting context:/);
   assert.match(terminalJs, /Missing data:/);

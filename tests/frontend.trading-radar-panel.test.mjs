@@ -394,9 +394,11 @@ test('Phase C.1: readability changes do not loosen Telegram or entry gating (dis
   assert.match(terminalJs, /ENTRY_READY microstructure gates still apply/);
 });
 
-test('Phase C.3: focus detail has a compact Why-blocked/What-next section', () => {
+test('Phase C.3: focus detail has a Detailed blockers section (moved into Advanced; not duplicating Trade Readiness)', () => {
   assert.match(terminalJs, /radar-why-next/);
-  assert.match(terminalJs, /Why blocked \/ what next/);
+  assert.match(terminalJs, /Detailed blockers/);
+  // the old duplicate top-area title is gone (Trade Readiness now covers it)
+  assert.doesNotMatch(terminalJs, /Why blocked \/ what next/);
   assert.match(terminalJs, /<b style="color:var\(--txt3\);">Blocker:<\/b>/);
   assert.match(terminalJs, /<b style="color:var\(--txt3\);">Next:<\/b> \$\{esc\(opNextConcise\)/);
   assert.match(terminalJs, /<b style="color:var\(--txt3\);">Missing:<\/b>/);
@@ -428,15 +430,18 @@ test('Phase C.3: raw diagnostics live INSIDE the Advanced collapsible, after com
   }
 });
 
-test('Phase C.3: compact decision sections render BEFORE the raw Advanced block', () => {
-  const why = terminalJs.indexOf('radar-why-next');
+test('Phase C.3: summary sections render BEFORE the raw Advanced block; detailed blockers/compact live inside it', () => {
+  const readiness = terminalJs.indexOf('radar-trade-readiness');
   const key = terminalJs.indexOf('radar-key-trade');
-  const compact = terminalJs.indexOf('radar-compact-diagnostics');
   const adv = terminalJs.indexOf('radar-advanced-diagnostics');
+  const why = terminalJs.indexOf('radar-why-next');       // now "Detailed blockers"
+  const compact = terminalJs.indexOf('radar-compact-diagnostics');
   const scoreRaw = terminalJs.indexOf('Score Breakdown');
-  assert.ok(why > 0 && key > why && compact > key, 'compact sections in order');
-  assert.ok(adv > compact, 'advanced block comes after compact sections');
-  assert.ok(scoreRaw > adv, 'raw Score Breakdown is not rendered before compact sections');
+  assert.ok(readiness > 0 && key > readiness, 'Trade Readiness summary precedes Key trade info');
+  assert.ok(adv > key, 'advanced block comes after the visible summary sections');
+  assert.ok(why > adv, 'Detailed blockers now lives inside Advanced diagnostics');
+  assert.ok(compact > adv, 'Compact diagnostics now lives inside Advanced diagnostics');
+  assert.ok(scoreRaw > adv, 'raw Score Breakdown stays inside Advanced diagnostics');
 });
 
 test('UI renders heatmap/data before Live Feed so operator sees market context earlier', () => {

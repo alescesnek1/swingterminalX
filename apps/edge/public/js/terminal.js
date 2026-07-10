@@ -8034,12 +8034,13 @@ function _renderTradingRadar(radar, esc) {
         const joinList = (arr) => (Array.isArray(arr) && arr.length) ? arr.map((x) => esc(String(x))).join(' · ') : 'none';
         const readyCls = tr.actionable ? 'radar-micro-yes' : 'radar-micro-no';
         return `<div class="radar-trade-readiness">
-        <div style="${cardLabel}">TRADE READINESS · what to check next</div>
-        <div class="radar-trade-readiness__headline ${readyCls}">${esc(tr.headline)}</div>
+        <div style="${cardLabel}">TRADE READINESS · what to check next <span class="radar-trade-readiness__ctx">Context only</span></div>
+        <div class="radar-trade-readiness__headline ${readyCls}">Actionable now: ${tr.actionable ? 'yes' : 'no'}</div>
         <div class="radar-trade-readiness__row"><b>Blocked by:</b> ${joinList(tr.blockers)}</div>
         <div class="radar-trade-readiness__row"><b>Supporting context:</b> ${joinList(tr.supportive)}</div>
         <div class="radar-trade-readiness__row"><b>Missing data:</b> ${joinList(tr.missing)}</div>
         <div class="radar-trade-readiness__row"><b>Next check:</b> ${esc(tr.nextCheck)}</div>
+        <div class="radar-trade-readiness__sub">${esc(tr.headline)}</div>
       </div>`;
       })()}
       <div class="radar-operator-summary radar-decision-cards" style="display:flex; flex-direction:column; gap:8px; margin-bottom:10px;">
@@ -8070,12 +8071,6 @@ function _renderTradingRadar(radar, esc) {
            panels are moved into the collapsed "Advanced diagnostics" block below
            so the operator reads state in one screen without scrolling debug rows. -->
       <div class="radar-focus-title"><b>${esc(selected.symbol || '--')}</b> <span class="${_fleetRadarBadgeClass(selectedV1Status)}">${actLabel}</span></div>
-      <div class="radar-why-next" style="border:1px solid var(--b2, #1a2540); border-radius:8px; padding:8px 11px; margin:6px 0 8px;">
-        <div style="${cardLabel}">Why blocked / what next</div>
-        <div style="font-size:12px; margin-top:3px;"><b style="color:var(--txt3);">Blocker:</b> ${esc(selectedV1BlockedBy === '--' ? 'none' : selectedV1BlockedBy)}</div>
-        <div style="font-size:12px;"><b style="color:var(--txt3);">Next:</b> ${esc(opNextConcise)}</div>
-        <div style="font-size:12px;"><b style="color:var(--txt3);">Missing:</b> ${esc((selected.missingData || selected.missingSignals || []).slice(0, 5).join(', ') || 'none')}</div>
-      </div>
       <div class="radar-key-trade" style="border:1px solid var(--b2, #1a2540); border-radius:8px; padding:8px 11px; margin-bottom:8px;">
         <div style="${cardLabel}">Key trade info</div>
         <div style="font-size:12px; display:flex; flex-wrap:wrap; gap:4px 14px; margin-top:3px;">
@@ -8086,6 +8081,39 @@ function _renderTradingRadar(radar, esc) {
           <span><b style="color:var(--txt3);">TF</b> ${esc(selected.TIMEFRAME_CONTEXT || '--')}</span>
           <span><b style="color:var(--txt3);">Telegram</b> <b class="${opTelegram === 'YES' ? 'radar-micro-yes' : 'radar-micro-no'}">${opTelegram}</b></span>
         </div>
+      </div>
+      ${(() => {
+        // Context-only Pressure Zones proxy — SUPPORTING context, shown near the
+        // top when available. Display only — derived from closed candles; NOT
+        // liquidation data, NOT order-book data. Never a gate/score.
+        const pz = selected.pressureZones;
+        if (!pz || pz.available !== true) {
+          return `<div class="radar-microstructure radar-pressure-zones radar-pressure-zones--compact">
+        <div class="radar-microstructure__title">PRESSURE ZONES · derived proxy — not liquidation data</div>
+        <div class="radar-microstructure__row"><span>Status</span><b class="radar-micro-no">Pressure Zones unavailable — no fresh closed candle snapshot</b></div>
+      </div>`;
+        }
+        const typeCls = (t) => t === 'support' ? 'radar-micro-yes' : t === 'resistance' ? 'radar-micro-no' : '';
+        const zoneRows = (Array.isArray(pz.zones) ? pz.zones : []).slice(0, 3).map((z) => `
+        <div class="radar-microstructure__row"><span>${esc(String(z.type || 'pivot').toUpperCase())} ${esc(_fleetFmtRadarPrice(z.price))}</span><b class="${typeCls(z.type)}">str ${esc(_fleetFmtRadarValue(z.strength, 0))} &middot; ${esc((Array.isArray(z.basis) ? z.basis : []).join(', ') || '--')}</b></div>`).join('');
+        const zonesBlock = zoneRows || `<div class="radar-microstructure__row"><span>Zones</span><b>no notable zones in window</b></div>`;
+        return `<div class="radar-microstructure radar-pressure-zones">
+        <div class="radar-microstructure__title">PRESSURE ZONES · derived proxy — not liquidation data</div>
+        ${zonesBlock}
+        <div class="radar-microstructure__row"><span>Reference price</span><b>${esc(_fleetFmtRadarPrice(pz.referencePrice))}</b></div>
+        <div class="radar-microstructure__row"><span>Candles used</span><b>${esc(_fleetFmtRadarValue(pz.candlesUsed, 0))} &middot; ${esc(pz.source || 'closed-klines')} ${esc(pz.timeframe || '')}</b></div>
+        <div class="radar-microstructure__row radar-pressure-zones__note"><span>Note</span><b>${esc(pz.disclaimer || 'Derived proxy from closed candles; not liquidation data; not order-book data.')}</b></div>
+      </div>`;
+      })()}
+      <div class="radar-focus-blocked"><span>Reason</span><b>${esc((selected.REASON || selected.reasons || []).join(' | ') || '--')}</b></div>
+      <div class="radar-focus-blocked"><span>Invalidation</span><b>${esc(selected.INVALIDATION || '--')}</b></div>
+      <details class="radar-advanced-diagnostics" style="margin-top:8px;" ${window._fleetAdvancedDiagExpanded && window._fleetAdvancedDiagExpanded[selected.symbol] ? 'open' : ''} ontoggle="window._fleetAdvancedDiagExpanded = window._fleetAdvancedDiagExpanded || {}; window._fleetAdvancedDiagExpanded['${selected.symbol}'] = this.open;">
+        <summary style="cursor:pointer; font-size:11px; letter-spacing:.06em; color:var(--txt2); text-transform:uppercase; padding:5px 0;">Advanced diagnostics (raw &mdash; click to expand)</summary>
+      <div class="radar-why-next" style="border:1px solid var(--b2, #1a2540); border-radius:8px; padding:8px 11px; margin:6px 0 8px;">
+        <div style="${cardLabel}">Detailed blockers</div>
+        <div style="font-size:12px; margin-top:3px;"><b style="color:var(--txt3);">Blocker:</b> ${esc(selectedV1BlockedBy === '--' ? 'none' : selectedV1BlockedBy)}</div>
+        <div style="font-size:12px;"><b style="color:var(--txt3);">Next:</b> ${esc(opNextConcise)}</div>
+        <div style="font-size:12px;"><b style="color:var(--txt3);">Missing:</b> ${esc((selected.missingData || selected.missingSignals || []).slice(0, 5).join(', ') || 'none')}</div>
       </div>
       <div class="radar-compact-diagnostics" style="border:1px solid var(--b2, #1a2540); border-radius:8px; padding:8px 11px; margin-bottom:8px;">
         <div style="${cardLabel}">Compact diagnostics</div>
@@ -8102,10 +8130,6 @@ function _renderTradingRadar(radar, esc) {
         <div style="font-size:12px;"><b style="color:var(--txt3);">Missing source fields:</b> ${esc((rv.missingSourceFields || []).slice(0, 5).join(', ') || 'none')}</div>
         <div style="font-size:12px;"><b style="color:var(--txt3);">Current price vs reclaim zone:</b> ${_fleetFmtRadarPrice(px)} vs zone ${zLow} - ${zHigh}</div>
       </div>
-      <div class="radar-focus-blocked"><span>Reason</span><b>${esc((selected.REASON || selected.reasons || []).join(' | ') || '--')}</b></div>
-      <div class="radar-focus-blocked"><span>Invalidation</span><b>${esc(selected.INVALIDATION || '--')}</b></div>
-      <details class="radar-advanced-diagnostics" style="margin-top:8px;" ${window._fleetAdvancedDiagExpanded && window._fleetAdvancedDiagExpanded[selected.symbol] ? 'open' : ''} ontoggle="window._fleetAdvancedDiagExpanded = window._fleetAdvancedDiagExpanded || {}; window._fleetAdvancedDiagExpanded['${selected.symbol}'] = this.open;">
-        <summary style="cursor:pointer; font-size:11px; letter-spacing:.06em; color:var(--txt2); text-transform:uppercase; padding:5px 0;">Advanced diagnostics (raw &mdash; click to expand)</summary>
       <div class="radar-focus-blocked"><span>Status</span><b>${esc(selectedV1Status)}</b></div>
       <div class="radar-focus-blocked"><span>Action</span><b>${esc(_fleetRadarV1Action(selected))}</b></div>
       <div class="radar-focus-blocked"><span>Blocked by</span><b>${esc(selectedV1BlockedBy === '--' ? 'none' : selectedV1BlockedBy)}</b></div>
@@ -8167,28 +8191,6 @@ function _renderTradingRadar(radar, esc) {
         <div class="radar-microstructure__row"><span>Missing absorption fields</span><div class="radar-chip-row">${chipList(selected.missingAbsorptionFields, 'radar-status-chip radar-status-chip--missing')}</div></div>
         <div class="radar-microstructure__row"><span>Missing reclaim fields</span><div class="radar-chip-row">${chipList(selected.missingReclaimFields, 'radar-status-chip radar-status-chip--missing')}</div></div>
       </div>
-      ${(() => {
-        // Context-only Pressure Zones proxy. Display only — derived from closed
-        // candles; NOT liquidation data, NOT order-book data. Never a gate/score.
-        const pz = selected.pressureZones;
-        if (!pz || pz.available !== true) {
-          return `<div class="radar-microstructure radar-pressure-zones">
-        <div class="radar-microstructure__title">PRESSURE ZONES · derived proxy — not liquidation data</div>
-        <div class="radar-microstructure__row"><span>Status</span><b class="radar-micro-no">Pressure Zones unavailable — no fresh closed candle snapshot</b></div>
-      </div>`;
-        }
-        const typeCls = (t) => t === 'support' ? 'radar-micro-yes' : t === 'resistance' ? 'radar-micro-no' : '';
-        const zoneRows = (Array.isArray(pz.zones) ? pz.zones : []).slice(0, 3).map((z) => `
-        <div class="radar-microstructure__row"><span>${esc(String(z.type || 'pivot').toUpperCase())} ${esc(_fleetFmtRadarPrice(z.price))}</span><b class="${typeCls(z.type)}">str ${esc(_fleetFmtRadarValue(z.strength, 0))} &middot; ${esc((Array.isArray(z.basis) ? z.basis : []).join(', ') || '--')}</b></div>`).join('');
-        const zonesBlock = zoneRows || `<div class="radar-microstructure__row"><span>Zones</span><b>no notable zones in window</b></div>`;
-        return `<div class="radar-microstructure radar-pressure-zones">
-        <div class="radar-microstructure__title">PRESSURE ZONES · derived proxy — not liquidation data</div>
-        ${zonesBlock}
-        <div class="radar-microstructure__row"><span>Reference price</span><b>${esc(_fleetFmtRadarPrice(pz.referencePrice))}</b></div>
-        <div class="radar-microstructure__row"><span>Candles used</span><b>${esc(_fleetFmtRadarValue(pz.candlesUsed, 0))} &middot; ${esc(pz.source || 'closed-klines')} ${esc(pz.timeframe || '')}</b></div>
-        <div class="radar-microstructure__row radar-pressure-zones__note"><span>Note</span><b>${esc(pz.disclaimer || 'Derived proxy from closed candles; not liquidation data; not order-book data.')}</b></div>
-      </div>`;
-      })()}
       <div class="radar-microstructure">
         <div class="radar-microstructure__title">Provider Status Panel</div>
         <div class="radar-microstructure__row radar-verdict-row"><span>Provider</span><b class="${provState === 'ONLINE' ? 'radar-micro-yes' : 'radar-micro-no'}">${esc(provState)}</b></div>
