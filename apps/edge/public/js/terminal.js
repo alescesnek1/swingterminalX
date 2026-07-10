@@ -4450,11 +4450,31 @@ function _cpAlertsStripHtml() {
   const cls = (u) => u === 'P1' ? 'cp-alert--p1' : u === 'P2' ? 'cp-alert--p2' : 'cp-alert--p3';
   return `<div class="cockpit-alerts">${recent.map(a => `<div class="cp-alert ${cls(a.urgency)}"><b>${_esc(a.symbol)}</b> ${_esc(a.type.replace(/_/g,' '))} — ${_esc(a.action)} <span>${_esc(a.reason)}</span></div>`).join('')}</div>`;
 }
-// Focused RADAR candidate (selected on the RADAR tab, else first entry-ready).
+// Focused RADAR candidate for the Cockpit import panel.
+//
+// SAFETY: Cockpit import is offered ONLY for a candidate the operator explicitly
+// clicked on the RADAR tab. It must never fall back to a default/top candidate —
+// importing a coin the operator did not choose is a real trade-setup hazard.
+//
+// The explicit pick is stored on the durable Fleet object (Fleet.radarSelectedSymbol),
+// which survives the poll that replaces Fleet.data wholesale. We resolve that symbol
+// against the CURRENT candidate list every call so tab switches and polls cannot lose it:
+//   • no explicit pick             → null → empty "click a candidate first" state.
+//   • picked symbol still present  → return that candidate.
+//   • picked symbol gone (stale)   → return a { __stale, symbol } sentinel so the
+//                                     UI can say "pick again" instead of silently
+//                                     importing a different coin.
+// (The RADAR detail view keeps its own default/top focus separately — see
+// _renderTradingRadar — this restriction applies only to Cockpit import.)
 function _cpRadarFocus() {
   const radar = window.Fleet && window.Fleet.data ? window.Fleet.data.tradingRadar : null;
   if (!radar) return null;
-  return radar.selected || (Array.isArray(radar.entryReady) && radar.entryReady[0]) || (Array.isArray(radar.candidates) && radar.candidates[0]) || null;
+  const picked = window.Fleet && window.Fleet.radarSelectedSymbol ? window.Fleet.radarSelectedSymbol : null;
+  if (!picked) return null; // no explicit click → never import a default candidate
+  const candidates = Array.isArray(radar.candidates) ? radar.candidates : [];
+  const match = candidates.find((c) => c && c.symbol === picked);
+  if (match) return match;
+  return { __stale: true, symbol: picked };
 }
 // Map a RADAR entry type (STANDARD_ENTRY, RECLAIM_RETEST, AGGRESSIVE_ENTRY, …)
 // onto a cockpit entry-type <select> option (manual/early/standard/aggressive/
@@ -4470,7 +4490,7 @@ function _cpMapRadarEntryType(raw) {
   return 'standard'; // STANDARD_ENTRY / RECLAIM_RETEST / ABSORPTION / RADAR / unknown
 }
 function _cpPrefillFromRadar(c) {
-  if (!c) return null;
+  if (!c || c.__stale) return null;
   const z = c.entryZone || null;
   const mid = z && z.low != null && z.high != null ? (Number(z.low) + Number(z.high)) / 2 : null;
   const tps = (c.TAKE_PROFIT_LEVELS || c.takeProfitCheckpoints || []);
@@ -4506,6 +4526,15 @@ function _cpRadarFocusHtml() {
       <button type="button" id="cockpit-open-radar" class="cockpit-primary-btn">Open Trading RADAR</button>
     </div>`;
   }
+  // Operator picked a symbol that has since dropped out of the current RADAR
+  // candidate list — be honest instead of importing a different coin's levels.
+  if (f.__stale) {
+    return `<div class="cockpit-radar-focus__empty">
+      <div class="cockpit-radar-focus__title">Import from Trading RADAR</div>
+      <div class="cockpit-radar-focus__msg">Previously selected candidate (${_esc(f.symbol)}) is no longer available — pick again.</div>
+      <button type="button" id="cockpit-open-radar" class="cockpit-primary-btn">Open Trading RADAR</button>
+    </div>`;
+  }
   const tps = (f.TAKE_PROFIT_LEVELS || f.takeProfitCheckpoints || []);
   const tpText = tps.map(tp => `${tp.label || 'TP'} ${_cpFmt(tp.level)}`).join(' / ') || '--';
   const zone = (f.entryZone && f.entryZone.low != null && f.entryZone.high != null)
@@ -4514,7 +4543,8 @@ function _cpRadarFocusHtml() {
   const safe = String(f.safetyStatus || 'UNKNOWN').toUpperCase();
   const badgeCls = (typeof _fleetRadarBadgeClass === 'function') ? _fleetRadarBadgeClass(status) : '';
   return `<div class="cockpit-radar-focus__card">
-    <div class="cockpit-radar-focus__title">Import from Trading RADAR</div>
+    <div class="cockpit-radar-focus__title">Ready to import ${_esc(f.symbol)} from Trading RADAR</div>
+    <div class="cockpit-radar-focus__selected">Selected from RADAR: <b>${_esc(f.symbol)}</b> · ${_esc(status)} · Entry zone ${_esc(zone)}</div>
     <div class="cockpit-radar-focus__head"><b>${_esc(f.symbol)}</b>
       <span class="${badgeCls}">${_esc(status)}</span>
       <span class="safety-pill safety-${_esc(safe.toLowerCase())}" title="safety">${_esc(safe)}</span></div>
@@ -6314,7 +6344,7 @@ function stopBotPlaceholder() {
 // /api/bot/start-session, /api/bot/session/:id/:action, /api/bot/config.
 // No Binance secrets ever touch the browser or the swingworker:// URL.
 // ══════════════════════════════════════════════════════════════════════════
-const Fleet = { data: null, selectedId: null, pollTimer: null, configLoaded: false, startError: null, launchNotice: null, retryLaunchUrl: null, botConfirm: null };
+const Fleet = { data: null, selectedId: null, pollTimer: null, configLoaded: false, startError: null, launchNotice: null, retryLaunchUrl: null, botConfirm: null, radarSelectedSymbol: null };
 
 const REGIME_COLORS = {
   RISK_ON: '#00ff80', NEUTRAL: '#8899aa', RISK_OFF: '#ffaa00', CRASH: '#ff4a4a',
@@ -7769,6 +7799,40 @@ function _fleetRadarReclaimDisplayStatus(c) {
   return (c && c.RECLAIM_STATUS) || 'RECLAIM_DATA_UNAVAILABLE';
 }
 
+// Map an internal RADAR signal key (as reported by the server in
+// candidate.tradeReadiness.missing) to operator-readable copy. Display only —
+// this never changes what the server computes, only how a missing-data key is
+// worded so the panel stops leaking raw camelCase field names. Unknown keys are
+// gracefully de-camelCased so nothing raw can ever reach the operator.
+function _radarHumanizeSignal(key) {
+  const LABELS = {
+    orderBookDepthWithinPct: 'orderbook depth',
+    orderBookDepthWithin1Pct: 'orderbook depth',
+    spreadPct: 'spread',
+    openInterestChangePct: 'open interest',
+    fundingRate: 'funding',
+    longLiquidationSpike: 'long liquidation spike',
+    shortLiquidationSpike: 'short liquidation spike',
+    marketSellRatio: 'market sell ratio',
+    bidDepthRebuildPct: 'bid depth rebuild',
+    derivatives: 'derivatives',
+    flow: 'rolling flow',
+    provider: 'provider',
+    safety: 'safety',
+    midPrice: 'mid price',
+  };
+  const raw = String(key == null ? '' : key).trim();
+  if (!raw) return raw;
+  if (LABELS[raw]) return LABELS[raw];
+  if (/\s/.test(raw)) return raw; // already human-worded — leave untouched
+  return raw
+    .replace(/WithinPct$|Pct$/, '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .toLowerCase()
+    .trim();
+}
+
 function _renderTradingRadar(radar, esc) {
   radar = radar || {};
   const allCandidates = Array.isArray(radar.candidates) ? radar.candidates : [];
@@ -7815,7 +7879,14 @@ function _renderTradingRadar(radar, esc) {
     telegramEligible: false,
   }));
 
-  const selected = radar.selected || candidates[0] || null;
+  // Honor the operator's explicit pick (persisted on the durable Fleet object)
+  // so a background poll that rebuilds radar.selected as the top-ranked candidate
+  // does not yank the focus card off the symbol the operator clicked. Resolved
+  // against the full candidate set (allCandidates), since the active filter may
+  // hide the picked row from the visible list. Display-only — never a gate/score.
+  const _pickedSym = (typeof Fleet !== 'undefined' && Fleet && Fleet.radarSelectedSymbol) ? Fleet.radarSelectedSymbol : null;
+  const _picked = _pickedSym ? allCandidates.find((c) => c.symbol === _pickedSym) : null;
+  const selected = _picked || radar.selected || candidates[0] || null;
   const entryReady = Array.isArray(radar.entryReady) ? radar.entryReady : [];
   const telegram = radar.telegramAlertState || {};
   const missing = Array.isArray(radar.missingSignals) ? radar.missingSignals.slice(0, 8) : [];
@@ -8051,7 +8122,7 @@ function _renderTradingRadar(radar, esc) {
         <div class="radar-trade-readiness__headline ${readyCls}">Actionable now: ${tr.actionable ? 'yes' : 'no'}</div>
         <div class="radar-trade-readiness__row"><b>Blocked by:</b> ${joinList(tr.blockers)}</div>
         <div class="radar-trade-readiness__row"><b>Supporting context:</b> ${joinList(tr.supportive)}</div>
-        <div class="radar-trade-readiness__row"><b>Missing data:</b> ${joinList(tr.missing)}</div>
+        <div class="radar-trade-readiness__row"><b>Missing data:</b> ${joinList((Array.isArray(tr.missing) ? tr.missing : []).map(_radarHumanizeSignal))}</div>
         <div class="radar-trade-readiness__row"><b>Next check:</b> ${esc(tr.nextCheck)}</div>
         <div class="radar-trade-readiness__sub">${esc(tr.headline)}</div>
       </div>`;
@@ -8101,10 +8172,10 @@ function _renderTradingRadar(radar, esc) {
         // liquidation data, NOT order-book data. Never a gate/score.
         const pz = selected.pressureZones;
         if (!pz || pz.available !== true) {
-          return `<div class="radar-microstructure radar-pressure-zones radar-pressure-zones--compact">
-        <div class="radar-microstructure__title">PRESSURE ZONES · derived proxy — not liquidation data</div>
-        <div class="radar-microstructure__row"><span>Status</span><b class="radar-micro-no">Pressure Zones unavailable — no fresh closed candle snapshot</b></div>
-      </div>`;
+          // Unavailable is the common case and carries no actionable info, so it
+          // renders as a single muted line (no titled/bordered panel) instead of
+          // taking the same visual weight as an available supporting-context panel.
+          return `<div class="radar-pressure-zones-mini">Pressure Zones unavailable — no fresh closed candle snapshot</div>`;
         }
         const typeCls = (t) => t === 'support' ? 'radar-micro-yes' : t === 'resistance' ? 'radar-micro-no' : '';
         const zoneRows = (Array.isArray(pz.zones) ? pz.zones : []).slice(0, 3).map((z) => `
@@ -8374,7 +8445,14 @@ window._radarSelect = function(sym) {
   const radar = window.Fleet && window.Fleet.data ? window.Fleet.data.tradingRadar : null;
   if (!radar || !radar.candidates) return;
   const c = radar.candidates.find(x => x.symbol === sym);
-  if (c) { radar.selected = c; renderTradingRadarPanel(); }
+  if (c) {
+    radar.selected = c;
+    // Persist the operator's explicit pick on the durable Fleet object (not on
+    // Fleet.data, which is replaced wholesale on every poll — that swap is what
+    // used to silently drop the selection before Cockpit could read it).
+    Fleet.radarSelectedSymbol = c.symbol;
+    renderTradingRadarPanel();
+  }
 };
 
 function renderTradingRadarPanel() {
