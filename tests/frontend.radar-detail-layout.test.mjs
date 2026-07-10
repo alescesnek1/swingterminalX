@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
 const terminalJs = fs.readFileSync(new URL('../apps/edge/public/js/terminal.js', import.meta.url), 'utf8');
+const terminalCss = fs.readFileSync(new URL('../apps/edge/public/css/terminal.css', import.meta.url), 'utf8');
 
 // Anchor helpers scoped to the RADAR focus card render.
 const cardStart = terminalJs.indexOf('focusHtml = `<div class="radar-focus-card">');
@@ -70,6 +71,12 @@ test('copy polish: Actionable now / Context only present; no BUY/SELL/guaranteed
   const readiness = idx('class="radar-trade-readiness"');
   const block = terminalJs.slice(readiness, readiness + 900);
   assert.doesNotMatch(block, /\bBUY\b|\bSELL\b|guaranteed/i);
+});
+
+test('Trade Readiness and Pressure Zones rows are hardened against mobile overflow', () => {
+  assert.match(terminalCss, /\.radar-trade-readiness__row\{[^}]*overflow-wrap:anywhere/);
+  assert.match(terminalCss, /\.radar-pressure-zones \.radar-microstructure__row\{[^}]*flex-wrap:wrap/);
+  assert.match(terminalCss, /\.radar-pressure-zones \.radar-microstructure__row b\{[^}]*overflow-wrap:anywhere/);
 });
 
 test('RADAR focus card visible region adds no fetch and no forbidden wording', () => {

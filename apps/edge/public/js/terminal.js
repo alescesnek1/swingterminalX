@@ -4456,6 +4456,19 @@ function _cpRadarFocus() {
   if (!radar) return null;
   return radar.selected || (Array.isArray(radar.entryReady) && radar.entryReady[0]) || (Array.isArray(radar.candidates) && radar.candidates[0]) || null;
 }
+// Map a RADAR entry type (STANDARD_ENTRY, RECLAIM_RETEST, AGGRESSIVE_ENTRY, …)
+// onto a cockpit entry-type <select> option (manual/early/standard/aggressive/
+// swing). Without this an imported RADAR type has no matching <option> and the
+// select silently reverts to its first option ("manual"), mislabeling the setup.
+function _cpMapRadarEntryType(raw) {
+  const s = String(raw || '').toUpperCase();
+  if (!s) return 'standard';
+  if (s === 'MANUAL') return 'manual';
+  if (s.includes('EARLY')) return 'early';
+  if (s.includes('AGGRESSIVE') || s.includes('CHASE')) return 'aggressive';
+  if (s.includes('EXTENDED') || s.includes('SWING')) return 'swing';
+  return 'standard'; // STANDARD_ENTRY / RECLAIM_RETEST / ABSORPTION / RADAR / unknown
+}
 function _cpPrefillFromRadar(c) {
   if (!c) return null;
   const z = c.entryZone || null;
@@ -4464,7 +4477,7 @@ function _cpPrefillFromRadar(c) {
   const lvl = (i) => (tps[i] && tps[i].level != null ? Number(tps[i].level) : null);
   return {
     symbol: String(c.symbol || '').toUpperCase(),
-    entryType: c.ENTRY_TYPE || c.entryType || 'RADAR',
+    entryType: _cpMapRadarEntryType(c.ENTRY_TYPE || c.entryType),
     entryPrice: mid, stopLoss: _cpNum(c.STOP_LOSS_LEVEL ?? c.suggestedStop),
     hardInvalidation: _cpNum(c.HARD_INVALIDATION ?? c.invalidationLevel),
     tp1: lvl(0), tp2: lvl(1), tp3: lvl(2),

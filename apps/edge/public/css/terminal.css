@@ -1996,9 +1996,12 @@ html,body{overflow-x:hidden;max-width:100vw}
 .radar-pressure-zones__note b{color:var(--txt3);font-weight:normal;font-size:9px;font-style:italic}
 /* Trade Readiness — context-only operator summary (display only; no gate influence) */
 .radar-trade-readiness{border:1px solid var(--b2,#1a2540);border-radius:8px;padding:9px 12px;margin:0 0 10px;background:rgba(61,158,255,.04)}
-.radar-trade-readiness__headline{font-size:13px;font-weight:800;margin-top:3px}
-.radar-trade-readiness__row{font-size:12px;margin-top:3px;color:var(--txt2)}
+.radar-trade-readiness__headline{font-size:13px;font-weight:800;margin-top:3px;overflow-wrap:anywhere}
+.radar-trade-readiness__row{font-size:12px;margin-top:3px;color:var(--txt2);overflow-wrap:anywhere}
 .radar-trade-readiness__row b{color:var(--txt3)}
+/* Keep the supporting Pressure Zones rows readable / non-overflowing on narrow screens */
+.radar-pressure-zones .radar-microstructure__row{flex-wrap:wrap;gap:2px 8px}
+.radar-pressure-zones .radar-microstructure__row b{min-width:0;overflow-wrap:anywhere;text-align:left}
 .radar-trade-readiness__ctx{font-size:8px;font-weight:700;letter-spacing:.06em;color:var(--txt3);border:1px solid var(--b2,#1a2540);border-radius:4px;padding:1px 5px;margin-left:6px;text-transform:uppercase}
 .radar-trade-readiness__sub{font-size:10px;color:var(--txt3);margin-top:5px;font-style:italic}
 .radar-pressure-zones--compact{margin-bottom:8px}

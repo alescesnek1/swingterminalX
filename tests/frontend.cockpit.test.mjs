@@ -128,6 +128,35 @@ test('frontend cockpit does not auto-exit on low-confidence weak health (missing
   assert.match(terminalJs, /else if \(lowConfidence\) \{ status = 'MANUAL_REVIEW'/);
 });
 
+// ── QA: RADAR → Cockpit import correctness ──────────────────────────────────
+
+test('frontend cockpit maps a RADAR entry type to a valid <select> option (no silent fallback to manual)', () => {
+  // the select only accepts these values
+  for (const opt of ['manual', 'early', 'standard', 'aggressive', 'swing']) {
+    assert.match(indexHtml, new RegExp(`<option value="${opt}"`));
+  }
+  // prefill routes ENTRY_TYPE through the mapper, not the raw 'RADAR'/status string
+  assert.match(terminalJs, /function _cpMapRadarEntryType\(/);
+  assert.match(terminalJs, /entryType: _cpMapRadarEntryType\(c\.ENTRY_TYPE \|\| c\.entryType\)/);
+  assert.doesNotMatch(terminalJs, /entryType: c\.ENTRY_TYPE \|\| c\.entryType \|\| 'RADAR'/);
+  // mapper covers the RADAR families and defaults to a real option
+  assert.match(terminalJs, /includes\('EARLY'\)\) return 'early'/);
+  assert.match(terminalJs, /includes\('AGGRESSIVE'\) \|\| s\.includes\('CHASE'\)\) return 'aggressive'/);
+  assert.match(terminalJs, /includes\('EXTENDED'\) \|\| s\.includes\('SWING'\)\) return 'swing'/);
+  assert.match(terminalJs, /return 'standard';/);
+});
+
+test('frontend cockpit import prefills only trade fields — never Pressure Zones / Trade Readiness as entry/stop/TP', () => {
+  const start = terminalJs.indexOf('function _cpPrefillFromRadar(');
+  const block = terminalJs.slice(start, terminalJs.indexOf('function _cpTpBadge('));
+  // preserves the real setup fields
+  for (const f of ['symbol:', 'entryPrice:', 'stopLoss:', 'hardInvalidation:', 'tp1:', 'tp2:', 'tp3:', 'safetyStatus:', 'fromRadar: true']) {
+    assert.ok(block.includes(f), `prefill must preserve ${f}`);
+  }
+  // context-only proxies must NOT leak into the imported trade
+  assert.doesNotMatch(block, /pressureZones|tradeReadiness/);
+});
+
 // ── M1: manual-review checklist + funding context (context-only presentation) ──
 
 test('frontend cockpit renders the 8-card manual review checklist', () => {
