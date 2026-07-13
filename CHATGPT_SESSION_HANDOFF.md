@@ -1,0 +1,359 @@
+# CHATGPT_SESSION_HANDOFF.md
+
+> **Purpose.** This is the single file the owner uploads into a *fresh* ChatGPT
+> conversation to continue work on **Swing Terminal Version X** without pasting
+> an old, frozen chat. Treat it as current project memory: business context,
+> architecture, guardrails, recent decisions, and priorities.
+>
+> **Ground truth wins.** If anything here conflicts with newer code / git log /
+> logs, the repo is right and this file is stale — say so and I'll refresh it.
+>
+> **This project is NOT realitni_bot / Hlídač trhu.** There is **no Stripe, no
+> billing, no subscriptions, no referral codes, no broker Telegram commands, no
+> `/reply` or `/admin_summary` support system** here. If you find yourself
+> reasoning about any of those, you have the wrong project — stop and ask.
+>
+> _Last synced to repo state: branch `feat/chatgpt-session-handoff`, on top of
+> `main` @ `9fd340f` (see §11). Update the commit ref whenever this file is
+> re-synced._
+
+---
+
+## 1. How ChatGPT should behave
+
+- **Speak Czech** with the owner. Keep prompts you write *for coding agents*
+  (Claude / Fable / Sonnet / Opus / Codex) **in English**.
+- Be **direct, practical, not verbose**. Concise but complete — no filler.
+- Act as a **critical CTO / risk partner**, not a cheerleader.
+- **Do not blindly approve** AI agent reports. Require **evidence** from code,
+  git, tests, or logs before you agree something is done.
+- When reviewing a Claude/Fable report, give one of: **APPROVE / BLOCK /
+  FOLLOW-UP PROMPT** (see §15).
+- Clearly **distinguish production facts from assumptions**. If you don't know,
+  say "unknown" — never invent project state.
+- **Never** suggest a push or deploy unless the owner has explicitly approved it.
+- This is a **real-money-adjacent trading codebase**. Bias toward safety: when in
+  doubt about a trading / order / gate change, treat it as high-risk.
+
+## 2. Model routing rules
+
+| Model | Use for |
+| --- | --- |
+| **Sonnet** | Focused bugfix, copy/UI tweak, single test, small self-contained implementation. |
+| **Opus** | Architecture / risk / security review, trading-gate or auth review, "is this safe to ship" calls. |
+| **Fable** | Large multi-module work, migrations, product/system refactors, long autonomous sessions, repo-wide docs/process. |
+
+Defaults:
+- **Repo-wide docs / process / migrations → Fable.**
+- **Small production bugfix → Sonnet.**
+- **Pre-implementation risk/security review → Opus** (or **Fable** if the scope is
+  large). Anything touching **orders / live trading / auth / gates** should get an
+  Opus-style review before merge regardless of who implements it.
+
+## 3. Project identity
+
+- **Product:** *Swing Terminal Version X* (HTML `<title>`; workspace/package name
+  `swing-terminal-workspace`).
+- **What it is:** a browser-based **crypto swing-trading terminal** — a
+  single-page web app plus serverless backends. It scans the market, surfaces
+  actionable setups (**Trading RADAR**), lets the user plan/track trades
+  (**Cockpit**), and can run a **local, gated Binance Spot bot** (testnet by
+  default, live spot hard-locked behind many gates).
+- **Primary user:** the owner / operator (and admin-allowlisted accounts). This is
+  an operator tool, not a mass-market SaaS with a billing funnel.
+- **Delivery surface:** the web terminal + optional **Telegram alerts** for
+  confirmed RADAR `ENTRY_READY` setups and a daily morning briefing.
+- **Production:** deployed on **Netlify** at `https://swingterminalx.netlify.app`.
+  A separate **ingest** service runs on **Fly.io** (`apps/ingest`). Durable state
+  is **Netlify Blobs**. Auth is **Supabase JWT**.
+- **Local repo path (owner machine):**
+  `C:\Users\Ales\Desktop\Bots\terminal crypto\terminal-X`
+- **Current `main` at time of writing:** `9fd340f` (`test(radar): narrow
+  long-short source guard`).
+- **Read-first docs** (see §4).
+
+## 4. Mandatory repo read order for new coding-agent sessions
+
+Paste this to a new Claude/Fable/Codex session before it touches code:
+
+> First read `AGENTS.md` and this repo's `docs/` before touching code. For a
+> trading / worker / order task, read `docs/LIVE-SPOT-RUNBOOK.md`,
+> `docs/worker-launcher.md`, and `docs/bot-fleet.md`. For a RADAR / microstructure
+> task, read `docs/radar-microstructure.md` and
+> `docs/radar-rolling-microstructure-design.md`. Do not rediscover the whole repo
+> from scratch unless these docs are clearly stale. This is a real-money-adjacent
+> trading codebase — additive, fail-closed changes only; never relax a safety gate.
+
+Doc map:
+- `AGENTS.md` — agent workflow + the rule that this handoff must be kept updated.
+- `docs/bot-fleet.md` — Bot Fleet control plane (auth, routes, data model, regime).
+- `docs/LIVE-SPOT-RUNBOOK.md` — live Spot enablement, micro caps, emergency stop.
+- `docs/worker-launcher.md` / `docs/worker-install.md` — the on-demand local worker.
+- `docs/radar-microstructure.md` — provider-backed static microstructure (the
+  fail-closed `MARKET_DATA_PROVIDER=none` default, the "451" story).
+- `docs/radar-rolling-microstructure-design.md` — **design only, not implemented.**
+
+## 5. Git / deploy guardrails
+
+- **No push** without explicit owner approval.
+- **No deploy** (Netlify / Fly.io) without explicit owner approval.
+- **Never `git add .`** — stage only explicitly named files.
+- Branch from current `main`; use a `feat/…` / `fix/…` / `docs/…` name.
+- **Commit only after tests pass** (`npm test`).
+- Merge pattern (only after review + approval):
+  ```powershell
+  git checkout main
+  git merge --no-ff <branch>
+  # push ONLY if the owner approved:
+  git push origin main
+  ```
+- **Netlify** auto-builds from the connected branch on push — so a push to the
+  deploy branch *is* a deploy. Treat push and deploy as the same risk.
+- **Fly.io** (`apps/ingest`) deploys are separate and manual — never trigger
+  without approval.
+- After an approved push, verify: `git log --oneline origin/main -5` matches local
+  and the Netlify deploy went green.
+
+## 6. Current product surface (web terminal tabs)
+
+Tabs rendered in `apps/edge/public/index.html` (function `sv(...)` switches views):
+
+- **SCANNER** — default view; market-wide scan / signals.
+- **TRADING RADAR** — the actionable pipeline; `ENTRY_READY` candidates,
+  positioning/pressure-zone/trade-readiness context panels.
+- **COCKPIT** — manual trade planning/review; imports a selected RADAR candidate
+  (explicit selection required), trader context checklist, market-wide funding
+  context, personal-watch settings.
+- **TOP CHARTS · SECTORS · HEATMAP · MOVERS · CALENDAR** — market data views.
+- **BOT FEED** — the paper/testnet bot control surface (START/STOP BOT, live-spot
+  readiness panel). Labeled "Paper Trading Sandbox".
+- **ALERTS · LIVE FEED · REGIME · GECKO** — alerts, live event feed, market-regime
+  view, and the CoinGecko Highlights panel (GECKO).
+- **MANUAL** — interactive "every signal explained" manual.
+
+There is **no** hidden broker-command system, no chat command palette to a bot,
+no subscription/paywall UI. Access control is per-user via Supabase JWT + an admin
+email allowlist (§9), not a billing tier.
+
+## 7. Trading safety & gates (this project's equivalent of "billing state")
+
+> The safety model — not billing — is the thing you must never casually change.
+
+- **Testnet Spot only by default.** Live trading is **hard-locked** and only opens
+  through many stacked gates (see `docs/LIVE-SPOT-RUNBOOK.md`).
+- **Spot only.** No futures/margin/leverage/borrow/repay, no SAPI/DAPI/FAPI, no
+  withdrawals — none of these execution paths exist anywhere.
+- **Netlify never holds Binance signing secrets and never signs orders.** The
+  **local worker** (`scripts/local-binance-worker.mjs`) is the *only* process that
+  signs Binance orders. Keys live only in a gitignored `.env.worker` on the
+  operator's machine.
+- **Live micro caps** (initial live phase): single symbol `BTCUSDC` **or**
+  `BTCUSDT`; `LIVE_MAX_POSITION_USD` ~$6 (minNotional buffer; prefer $8–$10 for a
+  clean round-trip), `LIVE_MAX_DAILY_LOSS_USD=5`, `LIVE_MAX_DAILY_TRADES=3`,
+  `LIVE_MAX_OPEN_POSITIONS=1`. The worker independently re-checks every cap and the
+  real minNotional at execution (defense in depth).
+- **Config hard-validation** (control plane): `maxTradeUsd ≤ 10` (testnet phase),
+  `maxOpenPositions ∈ [1,5]`, `allowLive` forced `false` unless the full live
+  enable flow runs.
+- **Market regime gate:** `RISK_ON | NEUTRAL | RISK_OFF | CRASH`. **CRASH**
+  hard-blocks entries; RISK_OFF is advisory.
+- **Kill switch:** `BOT_GLOBAL_KILL_SWITCH=true` and the **EMERGENCY STOP ALL LIVE
+  SPOT** admin action block new entries and force-close.
+- **Lifecycle:** STOP = stop entries + close positions + exit worker. PAUSE = stop
+  entries, worker stays alive. A failed close reports `WORKER_CLOSE_FAILED` and the
+  worker never exits while a position is open.
+- **Do not** relax, bypass, or "temporarily disable" any of the above. Changes here
+  must be additive and fail-closed.
+
+## 8. RADAR & alerting current state (this project's equivalent of "delivery gating")
+
+- **RADAR `ENTRY_READY` is single-sourced** from the V1 actionability logic in
+  `scripts/radar/trading-radar.mjs`. Scanner-only rows (no execution
+  microstructure) can **never** become `ENTRY_READY` or Telegram-eligible.
+- **Telegram alerts are locked down.** The legacy relay `/api/telegram`
+  (`netlify/functions/telegram.mjs`) is **disabled → returns HTTP 410**. The
+  **only** place allowed to call the Telegram API is
+  `netlify/functions/cron-alerts.mjs`, and only for a fully confirmed RADAR
+  `ENTRY_READY` (per-symbol 60-min cooldown, 120s staleness cutoff, gated by
+  `RADAR_TELEGRAM_ENABLED === 'true'`, fail-closed).
+- **Morning briefing** (`netlify/functions/morning-briefing.mjs`) is a separate,
+  informational daily Telegram message (own gate `MORNING_BRIEFING_TELEGRAM_ENABLED`,
+  DST-aware hourly cron + once-per-local-day dedup). It is **not** a trade signal.
+- **Static microstructure overlay** (`docs/radar-microstructure.md`): production
+  default `MARKET_DATA_PROVIDER=none` → **zero external calls**, UI shows "provider
+  unavailable" (fail-closed). `binance-public` is a **local-only diagnostic**
+  (Binance public fapi is region-blocked 451 from Netlify/GitHub egress). **There
+  is no production microstructure scheduler/cron** — do not add one.
+- **Rolling microstructure** (`docs/radar-rolling-microstructure-design.md`) is
+  **design only, not implemented.** The gate already reads its field names and
+  fails closed when absent.
+
+## 9. Auth / admin / personal-watch current state (this project's equivalent of "support/admin")
+
+- **Identity:** Supabase JWT (`Authorization: Bearer …`), verified in
+  `netlify/functions/_auth.mjs` (HS256 via `SUPABASE_JWT_SECRET`, or ES256/RS256
+  via project JWKS). `getIdentity()` → `{ ok, verified, userId, email, orgId,
+  authMode, reason }`. Raw tokens are never logged.
+- **Admins:** `BOT_ADMIN_EMAILS` allowlist. Cross-user control (stop/pause/close
+  another user's session) and org-wide visibility **require `verified === true`** —
+  never available in decode-only mode.
+- **`AUTH_DECODE_ONLY=true` is dev-only and NOT production-safe** — must be
+  false/unset in production (any unverifiable token → 401).
+- **Personal watch (new / in progress):** `netlify/functions/
+  cockpit-personal-watch-settings.mjs` + `_personal-watch-store.mjs` let a
+  logged-in user store a **Telegram chat id** (validated digits-only) for personal
+  watch, persisted in Netlify Blobs, memory fallback otherwise. Public responses
+  return only a **masked** chat id, never the raw value. _(These two files are
+  currently untracked/in-progress on `main` — confirm their status before relying
+  on them.)_
+- There is **no** broker support inbox, no `/reply` command, no `/admin_summary`.
+  Don't invent them.
+
+## 10. Data / worker / routing basics
+
+- **Frontend:** static site in `apps/edge/public` (`index.html`, `js/terminal.js`
+  + panel modules).
+- **Deno edge functions** (`apps/edge/netlify/edge-functions`, wired in
+  `netlify.toml`): `/api/markets`, `/api/analyze`, `/api/briefing`,
+  `/api/market-briefing`, `/api/regime`, `/api/news`, `/api/config`,
+  `/api/funding-divergence`, `/api/sniper-detect`, `/api/coingecko-highlights`.
+- **Node Netlify functions** (`netlify/functions`): `bot.mjs` (Bot Fleet control
+  plane — sessions, intents, results, regime, radar candidates/microstructure),
+  `cron-alerts.mjs`, `morning-briefing.mjs`, `radar-microstructure-refresh.mjs`
+  (token-protected, no schedule), `telegram.mjs` (disabled/410), plus `_auth`,
+  `_fleet-store`, `_market-regime`, and the new `_personal-watch-store`.
+- **Ingest service** (`apps/ingest`, Fly.io): Binance feed aggregator + paperbot.
+- **Local worker** (`scripts/local-binance-worker.mjs`): launched on demand via the
+  `swingworker://` URL protocol from the BOT FEED tab; heartbeats, polls its
+  session-scoped intent, executes MARKET BUY/SELL, reports results/positions.
+- **Durable store:** Netlify Blobs (fleet doc + per-user personal-watch);
+  in-memory fallback when Blobs unavailable (fallback is close-only for live).
+- **Do not** casually touch worker/execution/routing/scraping paths — data-source
+  degradation must fail closed and never crash or relax a gate.
+
+## 11. Known completed work / recent milestones
+
+From current git history (most recent first, condensed — see `git log` for full):
+
+- **RADAR positioning context** — long/short positioning context parser + wiring,
+  context-only positioning readiness, source guards (`edba29b`…`9fd340f`).
+- **RADAR ↔ Cockpit import hardening** — explicit RADAR selection required for
+  import, entry-type mapping, panel overflow fixes (`80747d9`, `0d9d9ac`,
+  `2cea482`).
+- **RADAR summary-first detail + context panels** — Trade Readiness summary,
+  Pressure Zones proxy (`68dd1ac`, `1dfb0a1`, `a82ff05`, `b615cdf`).
+- **Cockpit** — market-wide funding context, trader context review checklist,
+  safe manual-trade validation (`a98ab04`, `fcdae41`, `eb77511`).
+- **GECKO** — CoinGecko Highlights panel + edge function + parsing/layout fixes
+  (`8f16c69` and the `fix(gecko): …` series).
+- **RADAR microstructure** — provider abstraction + fail-closed `none` default,
+  rolling absorb pipeline (design), klines snapshot → reclaim pipeline.
+- **Bot Fleet + Live Spot** — multi-user testnet control plane, gated live-spot
+  micro-cap path, on-demand local worker + install/pairing flow.
+- **Frontend safety** — observation-only change digest, gecko degraded/stale
+  handling, AI-format XSS hardening, url-safety.
+
+Keep this as operational memory, not a full changelog.
+
+## 12. Known decisions / rejected ideas
+
+- **No production microstructure scraping cron.** Binance public fapi is 451
+  region-blocked from Netlify/GitHub egress; the team will **not** chase
+  proxies/extra servers/Render to work around it. `MARKET_DATA_PROVIDER=none` is
+  the intended production default.
+- **No futures / margin / leverage / withdrawals** — Spot only, permanently.
+- **No live trading by default** — live is opt-in, admin-only, micro-cap, gated.
+- **STOCKS is a SEPARATE project** (`stock-terminal-X`), *not* a mode/page inside
+  this terminal. Do not add stock features here. _(From project memory; verify if
+  it becomes relevant.)_
+- **No Stripe / billing / referral / broker-command system** — that belongs to the
+  unrelated realitni_bot project, not here.
+
+## 13. Current / likely next priorities
+
+_(Grounded in git + docs; do not over-invent.)_
+
+- Keep this handoff **and** `AGENTS.md` / `docs/` synchronized after behavior
+  changes (§16).
+- Continue RADAR **positioning / pressure-zone / trade-readiness** context work
+  (the active line of commits) — additive, context-only, fail-closed.
+- Finish and **track** the personal-watch settings feature (currently untracked
+  files on `main`).
+- Rolling microstructure remains **design-only** until real measurement can be
+  honestly sourced — do not ship a producer that fabricates fields.
+- Verify production behavior after any approved Netlify deploy.
+
+## 14. Runbook snippets (safe, sanitized — use placeholders)
+
+```powershell
+# Run the full test suite (Node's built-in test runner)
+npm test
+
+# RADAR microstructure producer — LOCAL diagnostic ONLY (public data, no keys).
+# Production default is provider=none (zero external calls); do not schedule this.
+$env:MARKET_DATA_PROVIDER='binance-public'
+node scripts/radar/radar-microstructure-producer.mjs
+
+# Live Spot preflight (operator machine, .env.worker loaded). Never prints secrets.
+npm run bot:worker:live-preflight
+
+# Verify no futures/margin/withdraw execution paths leaked in:
+Select-String -Path .\scripts\local-binance-worker.mjs,.\netlify\functions\bot.mjs,.\apps\edge\public\js\terminal.js `
+  -Pattern "/fapi|/dapi|/sapi|withdraw|borrow|repay|leverage|margin|futures" -CaseSensitive:$false
+
+# Inspect stored RADAR microstructure / provider status (needs worker token):
+#   GET https://swingterminalx.netlify.app/api/bot/radar-microstructure
+#   Header: x-bot-worker-token: <CONTROL_PLANE_WORKER_TOKEN>
+```
+
+Use placeholders like `<session_id>`, `<worker_token>`, `<chat_id>` — never real
+values. Secrets live only in `.env.worker` (gitignored) and Netlify env, never in
+code, URLs, or this file.
+
+## 15. How to process a Claude / Fable report
+
+1. Check the claimed **branch**, **commit hash**, and **files changed** — do they
+   match the task?
+2. Confirm **no push / no deploy** happened without approval (`git log
+   origin/main` unchanged unless approved).
+3. Confirm **tests were actually run** and pass (`npm test`) — don't trust "all
+   green" if the baseline differs; ask for the actual output.
+4. Compare the change against the **acceptance criteria** and the **safety rules**
+   (§5, §7). Any gate relaxation, new external fetch, new scheduler, or new signing
+   path is a red flag → **BLOCK**.
+5. Check for **contradictions** (e.g. "additive only" but a gate/threshold moved;
+   "docs only" but runtime files changed).
+6. **APPROVE** only with evidence. Otherwise **BLOCK** and produce a concrete
+   **follow-up prompt** (English) telling the agent exactly what to fix/prove.
+
+## 16. How future AI agents MUST update this file
+
+**This is a hard rule.** Every future AI task must update
+`CHATGPT_SESSION_HANDOFF.md` if it changes any of:
+
+- product behavior or terminal tabs / UX
+- trading gates, caps, live-spot enablement, or the kill switch
+- RADAR `ENTRY_READY` logic, Telegram alerting, or microstructure provider behavior
+- auth / admin allowlist / personal-watch behavior
+- backend routes, functions, or the worker protocol
+- durable store / data model / state
+- accepted or rejected product decisions
+- current priorities or major known risks
+- model-routing / workflow rules
+
+If a task does **not** touch any of these, the final report must say explicitly:
+
+> `CHATGPT_SESSION_HANDOFF.md` update not needed because …
+
+When you *do* update it, also update the relevant `docs/` (and `AGENTS.md` if the
+workflow changed). **If behavior changed and this handoff was not updated, the task
+is not complete.** Keep this file **concise, current, and uploadable** — it is
+ChatGPT-facing project memory, not a code dump.
+
+## 17. Quick-start message for a new ChatGPT session (copy-paste, Czech)
+
+> Přečti si nahraný `CHATGPT_SESSION_HANDOFF.md` a pokračujeme v práci na Swing
+> Terminal X podle něj. Ber ho jako aktuální projektovou paměť. Když bude něco v
+> rozporu s novějšími logy / kódem / git historií, upozorni mě. Nemusíš znovu
+> vysvětlovat základy. Tohle NENÍ realitní bot — žádné Stripe, billing ani
+> referral kódy tu nejsou.
