@@ -275,6 +275,16 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .cockpit-kicker{font-size:9px;color:var(--acc);letter-spacing:.14em;font-weight:700}.cockpit-title{font-size:15px;color:var(--txt);font-weight:700;letter-spacing:.08em}
 .cockpit-summary{display:grid;grid-template-columns:repeat(6,minmax(90px,1fr));gap:6px;flex:1;max-width:900px}
 .cockpit-summary__item{background:var(--s1);border:1px solid var(--b1);border-radius:var(--rad);padding:5px 7px}.cockpit-summary__item span{display:block;font-size:8px;color:var(--txt3);letter-spacing:.08em}.cockpit-summary__item b{font-size:12px;color:var(--txt)}
+.cockpit-personal-watch{background:var(--s2);border:1px solid var(--b1);border-radius:var(--rad);padding:8px 10px;display:flex;flex-direction:column;gap:6px}
+.cockpit-personal-watch__head{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.cockpit-personal-watch__title{font-size:9px;color:var(--acc);letter-spacing:.14em;font-weight:700}
+.cockpit-personal-watch__status{font-size:10px;color:var(--txt3)}.cockpit-personal-watch__status.cockpit-pw-status--on{color:var(--grn)}
+.cockpit-personal-watch__row{display:flex;gap:6px}
+.cockpit-personal-watch__row input{flex:1;min-width:0;background:var(--s3);border:1px solid var(--b2);border-radius:var(--rad);color:var(--txt);font-family:var(--mono);font-size:11px;padding:7px 9px}
+.cockpit-personal-watch__row button{white-space:nowrap;background:rgba(0,232,200,.1);border:1px solid rgba(0,232,200,.3);color:var(--acc);font-family:var(--mono);font-size:10px;font-weight:700;padding:7px 10px;border-radius:var(--rad);cursor:pointer}
+.cockpit-personal-watch__row button.cockpit-pw-disconnect{background:var(--s2);color:var(--txt2);border-color:var(--b2)}
+.cockpit-personal-watch__error{font-size:10px;color:var(--red);background:rgba(255,51,86,.08);border:1px solid rgba(255,51,86,.3);border-radius:var(--rad);padding:5px 9px}
+.cockpit-personal-watch__note{font-size:9px;color:var(--txt3);line-height:1.4}
 .cockpit-form{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;align-items:end;background:var(--s1);border:1px solid var(--b1);border-radius:var(--rad);padding:8px}
 .cockpit-field--sym{grid-column:span 2}
 .cockpit-form input,.cockpit-form select,.cockpit-toolbar select{min-width:0;background:var(--s3);border:1px solid var(--b2);border-radius:var(--rad);color:var(--txt);font-family:var(--mono);font-size:10px;padding:6px 7px}

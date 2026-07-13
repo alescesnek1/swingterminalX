@@ -333,6 +333,29 @@
           </div>
           <div class="cockpit-summary" id="cockpit-summary"></div>
         </div>
+
+        <!-- PERSONAL ALERTS — Phase 2 UI settings wiring only. Connects a
+             personal Telegram chat ID for a FUTURE personal-alert delivery
+             phase (see docs/personal-watch-design.md). No Telegram message
+             is ever sent from here; this only stores a destination. -->
+        <div class="cockpit-personal-watch" id="cockpit-personal-watch">
+          <div class="cockpit-personal-watch__head">
+            <div class="cockpit-personal-watch__title">PERSONAL ALERTS</div>
+            <div class="cockpit-personal-watch__status" id="cockpit-pw-status">—</div>
+          </div>
+          <div class="cockpit-personal-watch__body">
+            <label class="cockpit-label" for="cockpit-pw-chatid">Telegram chat ID</label>
+            <div class="cockpit-personal-watch__row">
+              <input id="cockpit-pw-chatid" inputmode="numeric" placeholder="e.g. 552398471" autocomplete="off">
+              <button type="button" id="cockpit-pw-connect">CONNECT</button>
+              <button type="button" id="cockpit-pw-disconnect" class="cockpit-pw-disconnect" style="display:none">DISCONNECT</button>
+            </div>
+            <div class="cockpit-personal-watch__error" id="cockpit-pw-error" style="display:none"></div>
+            <div class="cockpit-personal-watch__note">Saved for future personal alerts — alerts are not active yet.</div>
+            <div class="cockpit-personal-watch__note">Personal direct chat IDs only. Group/channel IDs are not supported yet.</div>
+          </div>
+        </div>
+
         <datalist id="cockpit-symbol-list"></datalist>
 
         <!-- ONBOARDING CONTROL CENTER — the empty-state hero. Hidden once a
@@ -877,6 +900,7 @@
   <script type="module" src="/js/url-safety.js?v=6h8"></script>
   <script type="module" src="/js/gecko-layout.js?v=6h8"></script>
   <script type="module" src="/js/change-digest.js?v=6h8"></script>
+  <script type="module" src="/js/personal-watch.js?v=6h8"></script>
   <script src="js/terminal.js?v=6h8"></script>
 </body>
 </html>

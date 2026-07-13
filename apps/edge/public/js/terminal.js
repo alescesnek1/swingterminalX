@@ -3203,7 +3203,7 @@ function sv(v, el) {
     try { refreshFleet(); _startFleetPoll(); renderTradingRadarPanel(); window.__lastRadarContextPush = null; pushScannerContextToRadar(); } catch (e) { console.warn('[Trading RADAR] init failed:', e && e.message); }
   });
   if (activeViewName === 'cockpit') requestAnimationFrame(() => {
-    try { renderCockpit(); } catch (e) { console.warn('[Cockpit] render failed:', e && e.message); }
+    try { renderCockpit(); refreshPersonalWatchSettings(); } catch (e) { console.warn('[Cockpit] render failed:', e && e.message); }
   });
   if (activeViewName === 'gecko') requestAnimationFrame(() => {
     try {
@@ -4607,6 +4607,9 @@ function renderCockpit() {
   const summary = document.getElementById('cockpit-summary');
   if (!list || !summary) return;
   _cpRefreshSymbolList();
+  // Personal Alerts card: paint-only (uses the last-known model, never
+  // fetches here — the network call is triggered lazily by sv() on tab open).
+  renderPersonalWatchPanel();
   // Import-from-RADAR panel: full candidate preview when one is focused,
   // otherwise a clear "go pick one" message + Open Trading RADAR button.
   const focusEl = document.getElementById('cockpit-radar-focus');
@@ -4829,6 +4832,140 @@ function _cpRefreshSymbolList() {
   if (!dl || !Array.isArray(DATA)) return;
   dl.innerHTML = DATA.slice(0, 500).map(d => `<option value="${_esc(String(d.symbol||'').toUpperCase())}USDT"></option>`).join('');
 }
+
+// ─────────────────────────────────────────────────────────────
+// Personal Alerts settings — Cockpit UI wiring only (Phase 2).
+//
+// Talks to the already-live, already-reviewed Phase 1 backend
+// (/api/cockpit-personal-watch-settings) using the shared Supabase auth
+// header. The pure validation + render-model logic lives in
+// personal-watch.js (window.__personalWatch); this is DOM wiring only.
+// This is a SETTINGS FORM ONLY:
+//   • no Telegram message is ever sent from here or anywhere in the
+//     frontend — sending is a separate, later, reviewed phase;
+//   • no watch-list (symbols/conditions) UI exists yet;
+//   • the raw chat id is never kept in JS state, localStorage, or
+//     sessionStorage — only the server's masked value is rendered, and the
+//     input is cleared after a successful save.
+// See docs/personal-watch-design.md.
+// ─────────────────────────────────────────────────────────────
+const PERSONAL_WATCH_ENDPOINT = '/api/cockpit-personal-watch-settings';
+let PersonalWatch = { model: null, busy: false };
+
+function _pwHelpers() { return window.__personalWatch || null; }
+
+function _pwShowError(msg) {
+  const el = document.getElementById('cockpit-pw-error');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.style.display = msg ? 'block' : 'none';
+}
+
+// Paint-only: renders the last-known model. Never fetches, so it is safe to
+// call on every renderCockpit() pass without hitting the network.
+function renderPersonalWatchPanel() {
+  const helpers = _pwHelpers();
+  const statusEl = document.getElementById('cockpit-pw-status');
+  const connectBtn = document.getElementById('cockpit-pw-connect');
+  const disconnectBtn = document.getElementById('cockpit-pw-disconnect');
+  if (!statusEl || !helpers) return;
+  const model = PersonalWatch.model || helpers.errorModel('Loading…');
+  statusEl.textContent = model.statusText;
+  statusEl.classList.toggle('cockpit-pw-status--on', !!model.connected);
+  if (disconnectBtn) disconnectBtn.style.display = model.connected ? '' : 'none';
+  if (connectBtn) connectBtn.textContent = model.connected ? 'UPDATE' : 'CONNECT';
+}
+
+// Fetches current status. Called only when the Cockpit tab is opened (see
+// sv()), not on every data-refresh tick, so it never spams the endpoint.
+async function refreshPersonalWatchSettings() {
+  const helpers = _pwHelpers();
+  if (!helpers) return;
+  try {
+    const authHeaders = await _getAuthHeaders();
+    if (!authHeaders.Authorization) {
+      PersonalWatch.model = helpers.signedOutModel();
+      renderPersonalWatchPanel();
+      return;
+    }
+    const r = await fetch(PERSONAL_WATCH_ENDPOINT, { headers: { 'Accept': 'application/json', ...authHeaders } });
+    if (r.status === 401) { PersonalWatch.model = helpers.signedOutModel(); renderPersonalWatchPanel(); return; }
+    if (!r.ok) { PersonalWatch.model = helpers.errorModel('Could not load personal alert settings.'); renderPersonalWatchPanel(); return; }
+    const body = await r.json();
+    PersonalWatch.model = helpers.toRenderModel(body);
+    renderPersonalWatchPanel();
+  } catch {
+    PersonalWatch.model = helpers.errorModel('Could not load personal alert settings.');
+    renderPersonalWatchPanel();
+  }
+}
+
+async function connectPersonalWatch() {
+  const helpers = _pwHelpers();
+  const input = document.getElementById('cockpit-pw-chatid');
+  if (!helpers || !input || PersonalWatch.busy) return;
+  const valid = helpers.validateChatId(input.value);
+  if (!valid.ok) { _pwShowError(valid.error); return; }
+  _pwShowError('');
+  PersonalWatch.busy = true;
+  try {
+    const authHeaders = await _getAuthHeaders();
+    if (!authHeaders.Authorization) { _pwShowError('Sign in to connect Telegram alerts.'); return; }
+    const r = await fetch(PERSONAL_WATCH_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', ...authHeaders },
+      body: JSON.stringify({ telegramChatId: valid.chatId }),
+    });
+    if (r.status === 401) {
+      PersonalWatch.model = helpers.signedOutModel();
+      renderPersonalWatchPanel();
+      _pwShowError('Session expired — sign in again to save.');
+      return;
+    }
+    if (!r.ok) {
+      const errBody = await r.json().catch(() => ({}));
+      _pwShowError(errBody.error || 'Could not save chat ID.');
+      return;
+    }
+    const body = await r.json();
+    PersonalWatch.model = helpers.toRenderModel(body);
+    renderPersonalWatchPanel();
+    // Clear the raw value from the input ONLY after a confirmed successful
+    // save — it must never linger in the DOM once it has been persisted.
+    input.value = '';
+  } catch {
+    _pwShowError('Could not save chat ID.');
+  } finally {
+    PersonalWatch.busy = false;
+  }
+}
+
+async function disconnectPersonalWatch() {
+  const helpers = _pwHelpers();
+  if (!helpers || PersonalWatch.busy) return;
+  PersonalWatch.busy = true;
+  _pwShowError('');
+  try {
+    const authHeaders = await _getAuthHeaders();
+    if (!authHeaders.Authorization) { _pwShowError('Sign in to manage Telegram alerts.'); return; }
+    const r = await fetch(PERSONAL_WATCH_ENDPOINT, { method: 'DELETE', headers: { 'Accept': 'application/json', ...authHeaders } });
+    if (r.status === 401) {
+      PersonalWatch.model = helpers.signedOutModel();
+      renderPersonalWatchPanel();
+      _pwShowError('Session expired — sign in again.');
+      return;
+    }
+    if (!r.ok) { _pwShowError('Could not disconnect.'); return; }
+    const body = await r.json();
+    PersonalWatch.model = helpers.toRenderModel(body);
+    renderPersonalWatchPanel();
+  } catch {
+    _pwShowError('Could not disconnect.');
+  } finally {
+    PersonalWatch.busy = false;
+  }
+}
+
 function initCockpit() {
   loadCockpitTrades();
   Cockpit.alerts = Cockpit.alerts || [];
@@ -4838,6 +4975,12 @@ function initCockpit() {
   document.getElementById('cockpit-symbol')?.addEventListener('input', () => { _cpShowError(''); _cpUpdatePricePreview(); });
   document.getElementById('cockpit-sort')?.addEventListener('change', (e) => { Cockpit.sort = e.target.value; renderCockpit(); });
   document.getElementById('cockpit-compact-toggle')?.addEventListener('click', () => { Cockpit.compact = !Cockpit.compact; document.getElementById('v-cockpit')?.classList.toggle('cockpit-compact', Cockpit.compact); });
+  // Personal Alerts settings — Phase 2 UI wiring only (no sending; see
+  // docs/personal-watch-design.md). Actual GET happens lazily when the
+  // Cockpit tab opens (see sv()), not here.
+  document.getElementById('cockpit-pw-connect')?.addEventListener('click', connectPersonalWatch);
+  document.getElementById('cockpit-pw-disconnect')?.addEventListener('click', disconnectPersonalWatch);
+  document.getElementById('cockpit-pw-chatid')?.addEventListener('input', () => _pwShowError(''));
   // Import-from-RADAR panel: "Open Trading RADAR" switches tabs; "Import this
   // RADAR setup" prefills the manual form (marked as fallback-free RADAR data)
   // and reveals it so the user can review and save.

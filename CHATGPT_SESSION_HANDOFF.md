@@ -123,7 +123,8 @@ Tabs rendered in `apps/edge/public/index.html` (function `sv(...)` switches view
   positioning/pressure-zone/trade-readiness context panels.
 - **COCKPIT** — manual trade planning/review; imports a selected RADAR candidate
   (explicit selection required), trader context checklist, market-wide funding
-  context, personal-watch settings.
+  context, and a **Personal Alerts settings card** (connect/disconnect a
+  personal Telegram chat id — settings only, no alerts sent yet; see §9).
 - **TOP CHARTS · SECTORS · HEATMAP · MOVERS · CALENDAR** — market data views.
 - **BOT FEED** — the paper/testnet bot control surface (START/STOP BOT, live-spot
   readiness panel). Labeled "Paper Trading Sandbox".
@@ -199,22 +200,34 @@ email allowlist (§9), not a billing tier.
   never available in decode-only mode.
 - **`AUTH_DECODE_ONLY=true` is dev-only and NOT production-safe** — must be
   false/unset in production (any unverifiable token → 401).
-- **Personal watch (backend-only, in progress on branch
-  `feat/cockpit-personal-watch`):** `netlify/functions/
-  cockpit-personal-watch-settings.mjs` + `_personal-watch-store.mjs` expose
-  `/api/cockpit-personal-watch-settings` (OPTIONS/GET/POST/DELETE) so a logged-in
-  user can store/read/remove a **Telegram chat id** (validated digits-only, length
-  5–20). Auth is the shared `getIdentity()`; records are keyed by the **token
-  `userId` only** (body can't hijack ownership); persisted in **Netlify Blobs** with
-  an in-memory fallback. Responses return only a **masked** chat id + connected
-  boolean + timestamp — **never the raw value**. A ~10 KB request-body cap fails
-  closed before JSON parse. Covered by `tests/cockpit-personal-watch-settings.test.mjs`
-  (14 tests: auth, validation, masking, cross-user isolation, memory fallback,
-  source guard). **This branch is backend CRUD + tests only — there is NO frontend
-  consumer wired yet and NO Telegram-sending path** (it only stores a destination;
-  sending still lives solely in `cron-alerts.mjs`). Not merged/pushed. **Follow-up:**
-  no per-endpoint rate limiting yet (no existing Node-function pattern to reuse);
-  wire the Cockpit UI; then update this file + docs.
+- **Personal watch — Phase 1 backend (live, merged to `main`):**
+  `netlify/functions/cockpit-personal-watch-settings.mjs` +
+  `_personal-watch-store.mjs` expose `/api/cockpit-personal-watch-settings`
+  (OPTIONS/GET/POST/DELETE) so a logged-in user can store/read/remove a
+  **Telegram chat id** (validated digits-only, length 5–20). Auth is the
+  shared `getIdentity()`; records are keyed by the **token `userId` only**
+  (body can't hijack ownership); persisted in **Netlify Blobs** with an
+  in-memory fallback. Responses return only a **masked** chat id + connected
+  boolean + timestamp — **never the raw value**. A ~10 KB request-body cap
+  fails closed before JSON parse. Covered by
+  `tests/cockpit-personal-watch-settings.test.mjs` (14 tests).
+- **Personal watch — Phase 2 UI settings wiring (this branch,
+  `feat/cockpit-personal-watch-ui`):** a "Personal Alerts" card in Cockpit
+  (`apps/edge/public/js/personal-watch.js` pure module +
+  `apps/edge/public/js/terminal.js` wiring) lets the user Connect/Disconnect
+  their Telegram chat id against the Phase 1 endpoint above, using the
+  shared `_getAuthHeaders()`. The raw id is **write-only** in the UI — never
+  stored in `localStorage`/`sessionStorage`/durable JS state, cleared from
+  the input only after a confirmed successful save, and only the server's
+  masked value is ever rendered. Covered by `tests/personal-watch-client.test.mjs`
+  (pure-module unit tests) and `tests/frontend.personal-watch.test.mjs`
+  (source guards). **STILL no Telegram-sending path anywhere, and STILL no
+  watch-list (symbol/condition) management** — see
+  `docs/personal-watch-design.md` for the full phase plan (Phase 3 =
+  watch-list, Phase 4 = the only phase allowed to add sending, gated on the
+  same confirmed RADAR `ENTRY_READY` `cron-alerts.mjs` already uses). Not
+  merged/pushed as of this branch. **Follow-up:** no per-endpoint rate
+  limiting yet (carried over from Phase 1).
 - There is **no** broker support inbox, no `/reply` command, no `/admin_summary`.
   Don't invent them.
 
