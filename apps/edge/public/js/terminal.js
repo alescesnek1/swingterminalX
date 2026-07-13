@@ -6345,6 +6345,15 @@ function stopBotPlaceholder() {
 // No Binance secrets ever touch the browser or the swingworker:// URL.
 // ══════════════════════════════════════════════════════════════════════════
 const Fleet = { data: null, selectedId: null, pollTimer: null, configLoaded: false, startError: null, launchNotice: null, retryLaunchUrl: null, botConfirm: null, radarSelectedSymbol: null };
+// Expose the durable Fleet singleton on window. terminal.js loads as a CLASSIC
+// script, where a top-level `const` creates a lexical global binding but is NOT a
+// property of window. Several cross-cutting readers use window.Fleet (the RADAR
+// candidate-select setter and the Cockpit import focus), so without this alias
+// window.Fleet resolved to undefined: _radarSelect bailed before persisting the
+// pick and _cpRadarFocus never saw it — the operator's RADAR click did nothing and
+// Cockpit could never import. Fleet is only ever mutated in place (never
+// reassigned — it's const), so this alias stays a live reference to the same object.
+window.Fleet = Fleet;
 
 const REGIME_COLORS = {
   RISK_ON: '#00ff80', NEUTRAL: '#8899aa', RISK_OFF: '#ffaa00', CRASH: '#ff4a4a',
@@ -7915,7 +7924,7 @@ function _renderTradingRadar(radar, esc) {
     const cl = c.conditionChecklist || {};
     const v1Status = _fleetRadarV1Status(c);
     const v1BlockedBy = _fleetRadarV1BlockedBy(c);
-    return `<tr class="radar-matrix-row ${c.actionability === 'ENTRY_READY' ? 'radar-matrix-row--ready' : ''}" onclick="window._radarSelect('${esc(c.symbol)}')">
+    return `<tr class="radar-matrix-row ${c.actionability === 'ENTRY_READY' ? 'radar-matrix-row--ready' : ''} ${c.symbol === _pickedSym ? 'radar-matrix-row--selected' : ''}" data-radar-symbol="${esc(c.symbol)}" data-radar-select="1" title="Click to select ${esc(c.symbol)} for Cockpit import" onclick="window._radarSelect('${esc(c.symbol)}')">
       <td><b>${esc(c.symbol)}</b></td>
       <td><span class="${_fleetRadarBadgeClass(v1Status)}">${esc(v1Status)}</span></td>
       <td>${(() => { const f = formatSafetyLabel(c.safetyStatus, c.safetyReason, c.safetySource, c.chain, c.contractAddress, c.safetyBasis); return `<span class="safety-pill ${f.cssClass}" title="${esc(f.tooltip)}">${esc(f.labelShort)}</span>`; })()}</td>
@@ -7983,7 +7992,7 @@ function _renderTradingRadar(radar, esc) {
     const v1Status = _fleetRadarV1Status(c);
     const v1Action = _fleetRadarV1Action(c);
     const v1BlockedBy = _fleetRadarV1BlockedBy(c);
-    return `<div class="radar-watch-card" onclick="window._radarSelect('${esc(c.symbol)}')">
+    return `<div class="radar-watch-card ${c.symbol === _pickedSym ? 'radar-watch-card--selected' : ''}" data-radar-symbol="${esc(c.symbol)}" data-radar-select="1" title="Click to select ${esc(c.symbol)} for Cockpit import" onclick="window._radarSelect('${esc(c.symbol)}')">
       <div class="radar-watch-card__head"><b>${esc(c.symbol)}</b> <span class="${_fleetRadarBadgeClass(v1Status)}">${esc(v1Status)}</span></div>
       <div class="radar-watch-card__metrics"><span>dist ${esc(_fleetFmtRadarValue(c.distanceToEntryReadyScore, 0))}</span><span>score ${esc(_fleetFmtRadarValue(c.setupQualityScore, 0))}</span><span>conf ${esc(_fleetFmtRadarValue(c.confidence, 0))}</span></div>
       <div class="radar-watch-card__blocker"><b>Blocked by:</b> ${esc(v1BlockedBy)}</div>

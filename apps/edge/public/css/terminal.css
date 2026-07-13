@@ -665,7 +665,9 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 
 /* What to watch now */
 .radar-watch-list{display:flex;flex-direction:column;gap:8px}
-.radar-watch-card{background:rgba(255,176,32,.08);border:1px solid rgba(255,176,32,.2);border-radius:4px;padding:8px;font-size:11px;color:var(--txt2)}
+.radar-watch-card{background:rgba(255,176,32,.08);border:1px solid rgba(255,176,32,.2);border-radius:4px;padding:8px;font-size:11px;color:var(--txt2);cursor:pointer;transition:background .15s,border-color .15s}
+.radar-watch-card:hover{background:rgba(255,176,32,.14);border-color:rgba(255,176,32,.35)}
+.radar-watch-card--selected{background:rgba(0,232,200,.12);border-color:var(--acc,#00e8c8);box-shadow:inset 2px 0 0 var(--acc,#00e8c8)}
 .radar-watch-card b{color:var(--txt)}
 
 /* Diagnostics */
@@ -1926,6 +1928,10 @@ html,body{overflow-x:hidden;max-width:100vw}
 .radar-matrix-row:nth-child(even) { background: rgba(0,0,0,0.1); }
 .radar-matrix-row--ready { background: rgba(0,255,128,0.04); border-left: 2px solid #00ff80; }
 .radar-matrix-row--ready:hover { background: rgba(0,255,128,0.08); }
+/* Operator's explicit RADAR pick (the coin sent to Cockpit import): a clear,
+   persistent highlight so the click has visible feedback and survives polls. */
+.radar-matrix-row--selected { background: rgba(0,232,200,0.12); box-shadow: inset 2px 0 0 var(--acc, #00e8c8); }
+.radar-matrix-row--selected:hover { background: rgba(0,232,200,0.18); }
 
 .radar-pill { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 4px; font-weight: 900; font-size: 10px; }
 .radar-pill-pass { background: rgba(0,255,128,0.15); color: #00ff80; }
