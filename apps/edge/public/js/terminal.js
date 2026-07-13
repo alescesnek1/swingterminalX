@@ -4844,7 +4844,8 @@ function _cpRefreshSymbolList() {
 // This is a SETTINGS FORM ONLY:
 //   • no Telegram message is ever sent from here or anywhere in the
 //     frontend — sending is a separate, later, reviewed phase;
-//   • no watch-list (symbols/conditions) UI exists yet;
+//   • selected-symbol watch-list management exists, but Telegram sending
+//     and custom conditions are still separate, later, reviewed phases;
 //   • the raw chat id is never kept in JS state, localStorage, or
 //     sessionStorage — only the server's masked value is rendered, and the
 //     input is cleared after a successful save.
