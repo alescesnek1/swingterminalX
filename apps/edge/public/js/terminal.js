@@ -3203,7 +3203,7 @@ function sv(v, el) {
     try { refreshFleet(); _startFleetPoll(); renderTradingRadarPanel(); window.__lastRadarContextPush = null; pushScannerContextToRadar(); } catch (e) { console.warn('[Trading RADAR] init failed:', e && e.message); }
   });
   if (activeViewName === 'cockpit') requestAnimationFrame(() => {
-    try { renderCockpit(); refreshPersonalWatchSettings(); } catch (e) { console.warn('[Cockpit] render failed:', e && e.message); }
+    try { renderCockpit(); refreshPersonalWatchSettings(); refreshPersonalWatchList(); } catch (e) { console.warn('[Cockpit] render failed:', e && e.message); }
   });
   if (activeViewName === 'gecko') requestAnimationFrame(() => {
     try {
@@ -4610,6 +4610,7 @@ function renderCockpit() {
   // Personal Alerts card: paint-only (uses the last-known model, never
   // fetches here — the network call is triggered lazily by sv() on tab open).
   renderPersonalWatchPanel();
+  renderPersonalWatchList();
   // Import-from-RADAR panel: full candidate preview when one is focused,
   // otherwise a clear "go pick one" message + Open Trading RADAR button.
   const focusEl = document.getElementById('cockpit-radar-focus');
@@ -4850,7 +4851,8 @@ function _cpRefreshSymbolList() {
 // See docs/personal-watch-design.md.
 // ─────────────────────────────────────────────────────────────
 const PERSONAL_WATCH_ENDPOINT = '/api/cockpit-personal-watch-settings';
-let PersonalWatch = { model: null, busy: false };
+const PERSONAL_WATCH_LIST_ENDPOINT = '/api/cockpit-personal-watch-list';
+let PersonalWatch = { model: null, busy: false, watchModel: null, watchBusy: false };
 
 function _pwHelpers() { return window.__personalWatch || null; }
 
@@ -4966,6 +4968,111 @@ async function disconnectPersonalWatch() {
   }
 }
 
+// ── Symbol watch-list (Phase 3) — selected symbols only, no sending ──
+// Same discipline as the chat-id panel: GET on tab open, POST/DELETE on user
+// action via the shared auth header. It handles symbols only (never a chat id)
+// and keeps nothing in browser storage. No message is ever sent from here.
+
+function _pwShowWatchError(msg) {
+  const el = document.getElementById('cockpit-pw-watch-error');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.style.display = msg ? 'block' : 'none';
+}
+
+// Paint-only: renders the last-known watch model as removable chips. Never
+// fetches, so renderCockpit() can call it every tick without hitting the network.
+function renderPersonalWatchList() {
+  const listEl = document.getElementById('cockpit-pw-watchlist');
+  const countEl = document.getElementById('cockpit-pw-watchcount');
+  const helpers = _pwHelpers();
+  if (!listEl || !helpers) return;
+  const model = PersonalWatch.watchModel;
+  const watches = model && Array.isArray(model.watches) ? model.watches : [];
+  listEl.innerHTML = watches.map((w) => {
+    const sym = _esc(String(w.symbol || ''));
+    return `<span class="cockpit-pw-chip">${sym}<button type="button" data-pw-remove="${sym}" title="Remove ${sym}">×</button></span>`;
+  }).join('');
+  if (countEl) countEl.textContent = model && model.max != null ? `${watches.length} / ${model.max}` : `${watches.length}`;
+}
+
+async function refreshPersonalWatchList() {
+  const helpers = _pwHelpers();
+  if (!helpers) return;
+  try {
+    const authHeaders = await _getAuthHeaders();
+    if (!authHeaders.Authorization) { PersonalWatch.watchModel = helpers.toWatchListModel({ watches: [] }); renderPersonalWatchList(); return; }
+    const r = await fetch(PERSONAL_WATCH_LIST_ENDPOINT, { headers: { 'Accept': 'application/json', ...authHeaders } });
+    if (!r.ok) { PersonalWatch.watchModel = helpers.toWatchListModel({ watches: [] }); renderPersonalWatchList(); return; }
+    const body = await r.json();
+    PersonalWatch.watchModel = helpers.toWatchListModel(body);
+    renderPersonalWatchList();
+  } catch {
+    PersonalWatch.watchModel = helpers.toWatchListModel({ watches: [] });
+    renderPersonalWatchList();
+  }
+}
+
+async function addPersonalWatchSymbol() {
+  const helpers = _pwHelpers();
+  const input = document.getElementById('cockpit-pw-symbol');
+  if (!helpers || !input || PersonalWatch.watchBusy) return;
+  const valid = helpers.validateWatchSymbol(input.value);
+  if (!valid.ok) { _pwShowWatchError(valid.error); return; }
+  _pwShowWatchError('');
+  PersonalWatch.watchBusy = true;
+  try {
+    const authHeaders = await _getAuthHeaders();
+    if (!authHeaders.Authorization) { _pwShowWatchError('Sign in to manage your watch list.'); return; }
+    const r = await fetch(PERSONAL_WATCH_LIST_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', ...authHeaders },
+      body: JSON.stringify({ symbol: valid.symbol }),
+    });
+    if (r.status === 401) { _pwShowWatchError('Session expired — sign in again.'); return; }
+    if (!r.ok) {
+      const errBody = await r.json().catch(() => ({}));
+      _pwShowWatchError(errBody.error || 'Could not add symbol.');
+      return;
+    }
+    const body = await r.json();
+    PersonalWatch.watchModel = helpers.toWatchListModel(body);
+    renderPersonalWatchList();
+    input.value = '';
+  } catch {
+    _pwShowWatchError('Could not add symbol.');
+  } finally {
+    PersonalWatch.watchBusy = false;
+  }
+}
+
+async function removePersonalWatchSymbol(symbol) {
+  const helpers = _pwHelpers();
+  if (!helpers || PersonalWatch.watchBusy) return;
+  const valid = helpers.validateWatchSymbol(symbol);
+  if (!valid.ok) return;
+  PersonalWatch.watchBusy = true;
+  _pwShowWatchError('');
+  try {
+    const authHeaders = await _getAuthHeaders();
+    if (!authHeaders.Authorization) { _pwShowWatchError('Sign in to manage your watch list.'); return; }
+    const r = await fetch(PERSONAL_WATCH_LIST_ENDPOINT, {
+      method: 'DELETE',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', ...authHeaders },
+      body: JSON.stringify({ symbol: valid.symbol }),
+    });
+    if (r.status === 401) { _pwShowWatchError('Session expired — sign in again.'); return; }
+    if (!r.ok) { _pwShowWatchError('Could not remove symbol.'); return; }
+    const body = await r.json();
+    PersonalWatch.watchModel = helpers.toWatchListModel(body);
+    renderPersonalWatchList();
+  } catch {
+    _pwShowWatchError('Could not remove symbol.');
+  } finally {
+    PersonalWatch.watchBusy = false;
+  }
+}
+
 function initCockpit() {
   loadCockpitTrades();
   Cockpit.alerts = Cockpit.alerts || [];
@@ -4981,6 +5088,14 @@ function initCockpit() {
   document.getElementById('cockpit-pw-connect')?.addEventListener('click', connectPersonalWatch);
   document.getElementById('cockpit-pw-disconnect')?.addEventListener('click', disconnectPersonalWatch);
   document.getElementById('cockpit-pw-chatid')?.addEventListener('input', () => _pwShowError(''));
+  // Watch-list (Phase 3): add on click/Enter, remove via chip delegation.
+  document.getElementById('cockpit-pw-watch-add')?.addEventListener('click', addPersonalWatchSymbol);
+  document.getElementById('cockpit-pw-symbol')?.addEventListener('input', () => _pwShowWatchError(''));
+  document.getElementById('cockpit-pw-symbol')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addPersonalWatchSymbol(); } });
+  document.getElementById('cockpit-pw-watchlist')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-pw-remove]');
+    if (btn) removePersonalWatchSymbol(btn.getAttribute('data-pw-remove'));
+  });
   // Import-from-RADAR panel: "Open Trading RADAR" switches tabs; "Import this
   // RADAR setup" prefills the manual form (marked as fallback-free RADAR data)
   // and reveals it so the user can review and save.

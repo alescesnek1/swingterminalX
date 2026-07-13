@@ -123,8 +123,9 @@ Tabs rendered in `apps/edge/public/index.html` (function `sv(...)` switches view
   positioning/pressure-zone/trade-readiness context panels.
 - **COCKPIT** — manual trade planning/review; imports a selected RADAR candidate
   (explicit selection required), trader context checklist, market-wide funding
-  context, and a **Personal Alerts settings card** (connect/disconnect a
-  personal Telegram chat id — settings only, no alerts sent yet; see §9).
+  context, and a **Personal Alerts settings card** (connect/disconnect a personal
+  Telegram chat id **and** manage a selected-symbol watch-list — settings only, no
+  alerts sent yet; see §9).
 - **TOP CHARTS · SECTORS · HEATMAP · MOVERS · CALENDAR** — market data views.
 - **BOT FEED** — the paper/testnet bot control surface (START/STOP BOT, live-spot
   readiness panel). Labeled "Paper Trading Sandbox".
@@ -221,13 +222,25 @@ email allowlist (§9), not a billing tier.
   the input only after a confirmed successful save, and only the server's
   masked value is ever rendered. Covered by `tests/personal-watch-client.test.mjs`
   (pure-module unit tests) and `tests/frontend.personal-watch.test.mjs`
-  (source guards). **STILL no Telegram-sending path anywhere, and STILL no
-  watch-list (symbol/condition) management** — see
-  `docs/personal-watch-design.md` for the full phase plan (Phase 3 =
-  watch-list, Phase 4 = the only phase allowed to add sending, gated on the
-  same confirmed RADAR `ENTRY_READY` `cron-alerts.mjs` already uses). Not
-  merged/pushed as of this branch. **Follow-up:** no per-endpoint rate
-  limiting yet (carried over from Phase 1).
+  (source guards).
+- **Personal watch — Phase 3 symbol watch-list (this branch,
+  `feat/cockpit-personal-watch-list`):** a sibling endpoint
+  `/api/cockpit-personal-watch-list` (`netlify/functions/
+  cockpit-personal-watch-list.mjs`, OPTIONS/GET/POST/DELETE) + store helpers on
+  the same per-user record let a user manage a **selected-symbol watch-list**
+  ("notify me when this symbol reaches a confirmed RADAR entry setup" — delivery
+  is a future phase). Symbols validated `^[A-Z0-9]{2,20}$` (trim+uppercase),
+  deduped, **server-assigned `addedAt`**, capped at `MAX_WATCHES_PER_USER = 25`;
+  token-`userId` ownership; responses carry **symbols only, never a chat id**;
+  adding/removing a watch never touches the chat id. Cockpit card gains a watch
+  sub-section (input + removable chips) wired via `_getAuthHeaders()`. Covered by
+  `tests/personal-watch-list.test.mjs`, extended `tests/personal-watch-client.test.mjs`,
+  and `tests/frontend.personal-watch-list.test.mjs`. **STILL no Telegram-sending
+  path anywhere, STILL no custom conditions, and STILL no "watch all" mode** —
+  see `docs/personal-watch-design.md` (Phase 4 = the only phase allowed to add
+  sending, gated on the same confirmed RADAR `ENTRY_READY` `cron-alerts.mjs`
+  already uses). Not merged/pushed as of this branch. **Follow-up:** no
+  per-endpoint rate limiting yet (carried over from Phase 1).
 - There is **no** broker support inbox, no `/reply` command, no `/admin_summary`.
   Don't invent them.
 

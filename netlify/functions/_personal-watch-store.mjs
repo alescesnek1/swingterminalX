@@ -144,6 +144,96 @@ export async function removeTelegramChatId(identity) {
   });
 }
 
+// ─────────────────────────────────────────────────────────────
+// Symbol watch-list (Phase 3) — selected-symbols only.
+//
+// A "watch" is a user's per-symbol subscription (notify me when this symbol
+// reaches a confirmed RADAR entry setup) — delivery is a FUTURE phase; nothing
+// here sends. Stored on the SAME per-user record as the Telegram chat id, so
+// adding/removing a watch never touches telegramChatId. Watch responses carry
+// symbols only — never the raw chat id. See docs/personal-watch-design.md.
+// ─────────────────────────────────────────────────────────────
+
+export const MAX_WATCHES_PER_USER = 25;
+
+// Strict: 2-20 chars, uppercase letters/digits only. Trims + uppercases first.
+// Rejects empty, spaces, punctuation, slashes, and injection-like strings.
+export function validateWatchSymbol(value) {
+  const symbol = String(value ?? '').trim().toUpperCase();
+  if (!symbol) return { ok: false, error: 'Symbol is required.' };
+  if (!/^[A-Z0-9]{2,20}$/.test(symbol)) {
+    return { ok: false, error: 'Symbol must be 2-20 letters/digits only (no spaces or punctuation).' };
+  }
+  return { ok: true, symbol };
+}
+
+// Coerce a stored watches array into clean, deduped { symbol, addedAt } records,
+// dropping anything malformed. Read-side normalization keeps legacy/partial data
+// honest without a migration.
+function normalizeWatches(watches) {
+  if (!Array.isArray(watches)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const w of watches) {
+    if (!w || typeof w !== 'object') continue;
+    const symbol = String(w.symbol ?? '').trim().toUpperCase();
+    if (!/^[A-Z0-9]{2,20}$/.test(symbol) || seen.has(symbol)) continue;
+    seen.add(symbol);
+    out.push({ symbol, addedAt: typeof w.addedAt === 'string' && w.addedAt ? w.addedAt : null });
+  }
+  return out;
+}
+
+// Persist watches on the user's record while preserving the chat id verbatim.
+async function saveWatches(identity, current, watches) {
+  return await savePersonalWatchSettings(identity, {
+    ...current,
+    userId: identity.userId,
+    email: String(identity.email || current.email || '').toLowerCase(),
+    telegramChatId: current.telegramChatId,
+    telegramChatIdUpdatedAt: current.telegramChatIdUpdatedAt,
+    watches,
+  });
+}
+
+export async function listPersonalWatches(identity) {
+  const current = await loadPersonalWatchSettings(identity);
+  return normalizeWatches(current.watches);
+}
+
+export async function addPersonalWatch(identity, symbol, nowIso = new Date().toISOString()) {
+  const valid = validateWatchSymbol(symbol);
+  if (!valid.ok) return { ok: false, error: valid.error };
+  const current = await loadPersonalWatchSettings(identity);
+  const watches = normalizeWatches(current.watches);
+  // Idempotent: re-adding an existing symbol is a no-op success (never a dup).
+  if (watches.some((w) => w.symbol === valid.symbol)) {
+    return { ok: true, watches };
+  }
+  if (watches.length >= MAX_WATCHES_PER_USER) {
+    return { ok: false, error: `Watch list is full (max ${MAX_WATCHES_PER_USER}).` };
+  }
+  const next = [...watches, { symbol: valid.symbol, addedAt: nowIso }];
+  const record = await saveWatches(identity, current, next);
+  return { ok: true, watches: normalizeWatches(record.watches) };
+}
+
+export async function removePersonalWatch(identity, symbol) {
+  const valid = validateWatchSymbol(symbol);
+  if (!valid.ok) return { ok: false, error: valid.error };
+  const current = await loadPersonalWatchSettings(identity);
+  // Idempotent: removing a symbol that isn't present just returns the list.
+  const next = normalizeWatches(current.watches).filter((w) => w.symbol !== valid.symbol);
+  const record = await saveWatches(identity, current, next);
+  return { ok: true, watches: normalizeWatches(record.watches) };
+}
+
+// Public shape for watch-list responses — symbols only, never the chat id.
+export function publicPersonalWatchList(watches) {
+  const list = normalizeWatches(watches);
+  return { ok: true, watches: list, count: list.length, max: MAX_WATCHES_PER_USER };
+}
+
 export function personalWatchStoreInfo() {
   const durable = _backendName === 'blobs';
   return { storeMode: durable ? 'durable_blobs' : 'memory_fallback', durable, storeError: durable ? null : _storeError };
