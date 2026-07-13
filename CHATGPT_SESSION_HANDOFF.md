@@ -199,13 +199,22 @@ email allowlist (§9), not a billing tier.
   never available in decode-only mode.
 - **`AUTH_DECODE_ONLY=true` is dev-only and NOT production-safe** — must be
   false/unset in production (any unverifiable token → 401).
-- **Personal watch (new / in progress):** `netlify/functions/
-  cockpit-personal-watch-settings.mjs` + `_personal-watch-store.mjs` let a
-  logged-in user store a **Telegram chat id** (validated digits-only) for personal
-  watch, persisted in Netlify Blobs, memory fallback otherwise. Public responses
-  return only a **masked** chat id, never the raw value. _(These two files are
-  currently untracked/in-progress on `main` — confirm their status before relying
-  on them.)_
+- **Personal watch (backend-only, in progress on branch
+  `feat/cockpit-personal-watch`):** `netlify/functions/
+  cockpit-personal-watch-settings.mjs` + `_personal-watch-store.mjs` expose
+  `/api/cockpit-personal-watch-settings` (OPTIONS/GET/POST/DELETE) so a logged-in
+  user can store/read/remove a **Telegram chat id** (validated digits-only, length
+  5–20). Auth is the shared `getIdentity()`; records are keyed by the **token
+  `userId` only** (body can't hijack ownership); persisted in **Netlify Blobs** with
+  an in-memory fallback. Responses return only a **masked** chat id + connected
+  boolean + timestamp — **never the raw value**. A ~10 KB request-body cap fails
+  closed before JSON parse. Covered by `tests/cockpit-personal-watch-settings.test.mjs`
+  (14 tests: auth, validation, masking, cross-user isolation, memory fallback,
+  source guard). **This branch is backend CRUD + tests only — there is NO frontend
+  consumer wired yet and NO Telegram-sending path** (it only stores a destination;
+  sending still lives solely in `cron-alerts.mjs`). Not merged/pushed. **Follow-up:**
+  no per-endpoint rate limiting yet (no existing Node-function pattern to reuse);
+  wire the Cockpit UI; then update this file + docs.
 - There is **no** broker support inbox, no `/reply` command, no `/admin_summary`.
   Don't invent them.
 
