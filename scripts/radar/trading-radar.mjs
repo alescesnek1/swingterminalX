@@ -12,6 +12,7 @@ import { matchCoinGeckoTrendingToMarketSymbol } from '../market/coingecko-highli
 import { computeStructuralReclaimLevels } from './structural-reclaim.mjs';
 import { getFreshClosedKlinesForSymbol } from './klines-snapshot.mjs';
 import { computePressureZones } from './pressure-zones.mjs';
+import { buildPositioningContext } from './positioning-context.mjs';
 import { getFreshRollingMicrostructureForSymbol, normalizeRollingMicrostructureSnapshot } from './rolling-microstructure-snapshot.mjs';
 const WEIRD_BASE_RE = /(UP|DOWN|BULL|BEAR)$|\d+(L|S)$/;
 const QUOTES = new Set(['USDC', 'USDT']);
@@ -2267,11 +2268,23 @@ export function buildTradeReadinessSummary(input = {}) {
     supportive.push(`funding extreme (${funding}%)`);
   }
   if (s.structurePresent === true) supportive.push('structure present (reclaim level computed)');
+  // Positioning (context-only OI / long-short read-model). Supporting or
+  // missing ONLY — a positioning read can never block, gate, or alert.
+  const pc = s.positioningContext;
+  if (pc && typeof pc === 'object' && pc.contextOnly === true) {
+    if (pc.available === true) {
+      const oiTrend = pc.openInterest && pc.openInterest.trend;
+      if (oiTrend === 'rising' || oiTrend === 'falling') supportive.push(String(pc.openInterest.label || `OI ${oiTrend}`));
+      const interp = pc.longShort && pc.longShort.interpretation;
+      if (interp === 'crowded long' || interp === 'crowded short') supportive.push(`caution: ${interp} positioning`);
+    }
+  }
 
   // ── Missing data (as reported by the candidate; never fabricated).
   const missSet = new Set();
   for (const x of Array.isArray(s.missingData) ? s.missingData : []) if (x) missSet.add(String(x));
   if (s.hasRollingMicrostructure !== true) missSet.add('rolling flow');
+  if (pc && typeof pc === 'object' && pc.contextOnly === true && pc.available !== true) missSet.add('positioning');
   const missing = Array.from(missSet).slice(0, 8);
 
   const headline = actionable
@@ -2518,6 +2531,16 @@ export function evaluateTradingRadar({
       // and never fed back into it. Neither is read by any gate/Absorb/Reclaim/
       // ENTRY_READY/Telegram path.
       const pressureZones = computeRadarPressureZones(m, klinesSnapshot, now);
+      // Context-only OI/positioning read-model over fields the row already
+      // carries (rolling microstructure OI delta). Long/short ratios stay null
+      // (honest "unavailable") until an approved producer supplies them.
+      const positioningContext = buildPositioningContext({
+        symbol: m.symbol,
+        openInterestChangePct: m.openInterestChangePct,
+        priceChangePct: m.change1hPct,
+        updatedAtMs: m.rollingMicrostructureUpdatedAtMs,
+        nowMs: now,
+      });
       const tradeReadiness = buildTradeReadinessSummary({
         actionability: effectiveActionability,
         blockedBy: v1.BLOCKED_BY,
@@ -2528,6 +2551,7 @@ export function evaluateTradingRadar({
         reclaimBlockedReason: microDiag.reclaimBlockedReason,
         missingData: missingForMarket(m),
         pressureZones,
+        positioningContext,
         fundingRate: m.fundingRate,
         structurePresent: m.computedReclaimLevel != null || m.computedStructuralConfidence != null,
       });
@@ -2548,6 +2572,9 @@ export function evaluateTradingRadar({
         // Context-only Pressure Zones proxy (additive display block; no raw
         // candles; never read by any gate/score/Absorb/Reclaim/ENTRY_READY/Telegram).
         pressureZones,
+        // Context-only OI/positioning block (additive display data; derived
+        // proxy over real OI samples; never read by any gate/score/Telegram path).
+        positioningContext,
         // Context-only operator readiness SUMMARY (additive display block; mirrors
         // existing status, introduces no new gate; never read by any gate path).
         tradeReadiness,

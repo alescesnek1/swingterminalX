@@ -86,6 +86,51 @@ test('missing data is reported as-is (never fabricated)', () => {
   assert.deepEqual(empty.missing, []);
 });
 
+test('positioning context is SUPPORTING context only, never a blocker', () => {
+  const r = buildTradeReadinessSummary({
+    actionability: 'NEEDS_CONFIRMATION', safetyStatus: 'SAFE', hasRollingMicrostructure: true,
+    positioningContext: {
+      contextOnly: true, available: true,
+      openInterest: { trend: 'rising', changePct: 4.2, windowMinutes: null, label: 'OI rising with price up' },
+      longShort: { globalAccountRatio: null, topTraderPositionRatio: 0.3, interpretation: 'crowded short' },
+    },
+  });
+  const sup = r.supportive.join(' | ');
+  assert.match(sup, /OI rising with price up/);
+  assert.match(sup, /caution: crowded short positioning/);
+  assert.equal(r.blockers.join(' ').toLowerCase().includes('positioning'), false);
+  assert.equal(r.blockers.join(' ').toLowerCase().includes('oi'), false);
+});
+
+test('unavailable positioning context is reported as missing data, not invented', () => {
+  const r = buildTradeReadinessSummary({
+    actionability: 'ENTRY_READY', safetyStatus: 'SAFE', hasRollingMicrostructure: true,
+    positioningContext: {
+      contextOnly: true, available: false,
+      openInterest: { trend: 'unknown', changePct: null, windowMinutes: null, label: 'OI unavailable' },
+      longShort: { globalAccountRatio: null, topTraderPositionRatio: null, interpretation: 'unavailable' },
+    },
+  });
+  assert.ok(r.missing.includes('positioning'));
+  assert.equal(r.supportive.join(' ').toLowerCase().includes('oi'), false);
+  // absent positioning context adds nothing (backward compatible)
+  const none = buildTradeReadinessSummary({ actionability: 'ENTRY_READY', safetyStatus: 'SAFE', hasRollingMicrostructure: true });
+  assert.equal(none.missing.includes('positioning'), false);
+});
+
+test('flat OI / balanced positioning is not surfaced as supporting', () => {
+  const r = buildTradeReadinessSummary({
+    actionability: 'NEEDS_CONFIRMATION', safetyStatus: 'SAFE', hasRollingMicrostructure: true,
+    positioningContext: {
+      contextOnly: true, available: true,
+      openInterest: { trend: 'flat', changePct: 0.2, windowMinutes: null, label: 'OI flat' },
+      longShort: { globalAccountRatio: 1.1, topTraderPositionRatio: null, interpretation: 'balanced' },
+    },
+  });
+  assert.equal(r.supportive.join(' ').toLowerCase().includes('oi'), false);
+  assert.equal(r.supportive.join(' ').toLowerCase().includes('positioning'), false);
+});
+
 test('summary carries no ENTRY_READY/BUY/SELL/signal/telegram/score/execution field or word', () => {
   const r = buildTradeReadinessSummary({
     actionability: 'ENTRY_READY', safetyStatus: 'SAFE', hasRollingMicrostructure: true,
