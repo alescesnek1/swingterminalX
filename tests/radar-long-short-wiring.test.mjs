@@ -91,11 +91,9 @@ test('missing or stale long/short snapshot stays unavailable/missing and does no
 
 test('RADAR source guard: long/short wiring has no fetch, order, execution, or Telegram dependency', () => {
   const source = readFileSync(new URL('../scripts/radar/trading-radar.mjs', import.meta.url), 'utf8');
-  const start = source.indexOf('function longShortContextForMarket');
-  const end = source.indexOf('export function computeRadarPressureZones', start);
-  assert.ok(start > 0);
-  assert.ok(end > start);
-  const helper = source.slice(start, end);
+  const helperMatch = source.match(/function longShortContextForMarket\(market, longShortSnapshot, nowMs = Date\.now\(\)\) \{[\s\S]*?\r?\n\}/);
+  assert.ok(helperMatch, 'longShortContextForMarket helper exists');
+  const helper = helperMatch[0];
   assert.doesNotMatch(helper, /fetch\s*\(|\/order|\/sapi|\/dapi|signature|apiKey|apiSecret/i);
   assert.doesNotMatch(helper, /telegram|execution-intent|executionIntents/i);
   assert.doesNotMatch(helper, /Coinee|liquidation heatmap|CVD|whale orders|confirmed liquidation|guaranteed absorption|retail sentiment truth/i);
