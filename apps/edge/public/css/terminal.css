@@ -285,6 +285,15 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .cockpit-personal-watch__row button.cockpit-pw-disconnect{background:var(--s2);color:var(--txt2);border-color:var(--b2)}
 .cockpit-personal-watch__error{font-size:10px;color:var(--red);background:rgba(255,51,86,.08);border:1px solid rgba(255,51,86,.3);border-radius:var(--rad);padding:5px 9px}
 .cockpit-personal-watch__note{font-size:9px;color:var(--txt3);line-height:1.4}
+.cockpit-personal-watch__watchlist{display:flex;flex-direction:column;gap:6px;margin-top:4px;padding-top:8px;border-top:1px solid var(--b1)}
+.cockpit-personal-watch__watchhead{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.cockpit-personal-watch__watchcount{font-size:9px;color:var(--txt3)}
+.cockpit-personal-watch__watcherror{font-size:10px;color:var(--red);background:rgba(255,51,86,.08);border:1px solid rgba(255,51,86,.3);border-radius:var(--rad);padding:5px 9px}
+.cockpit-personal-watch__chips{display:flex;flex-wrap:wrap;gap:5px}
+.cockpit-personal-watch__chips:empty::after{content:"No symbols watched yet.";font-size:9px;color:var(--txt3)}
+.cockpit-pw-chip{display:inline-flex;align-items:center;gap:5px;background:var(--s1);border:1px solid var(--b2);border-radius:var(--rad);padding:3px 4px 3px 8px;font-size:10px;color:var(--txt)}
+.cockpit-pw-chip button{background:none;border:none;color:var(--txt3);cursor:pointer;font-family:var(--mono);font-size:12px;line-height:1;padding:0 3px}
+.cockpit-pw-chip button:hover{color:var(--red)}
 .cockpit-form{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;align-items:end;background:var(--s1);border:1px solid var(--b1);border-radius:var(--rad);padding:8px}
 .cockpit-field--sym{grid-column:span 2}
 .cockpit-form input,.cockpit-form select,.cockpit-toolbar select{min-width:0;background:var(--s3);border:1px solid var(--b2);border-radius:var(--rad);color:var(--txt);font-family:var(--mono);font-size:10px;padding:6px 7px}

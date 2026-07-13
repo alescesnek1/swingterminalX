@@ -11,6 +11,9 @@ import {
   personalWatchRenderModel,
   personalWatchSignedOutModel,
   personalWatchErrorModel,
+  validateWatchSymbolClient,
+  normalizeWatchSymbol,
+  personalWatchListRenderModel,
 } from '../apps/edge/public/js/personal-watch.js';
 
 test('validatePersonalWatchChatId accepts a plausible digits-only id (mirrors backend 5-20)', () => {
@@ -110,4 +113,81 @@ test('personalWatchErrorModel is a safe, non-connected state and never contains 
   assert.equal(model.maskedChatId, null);
   assert.equal(model.error, true);
   assert.equal(model.statusText, 'network down');
+});
+
+// ── Symbol watch-list (Phase 3) ──
+
+test('validateWatchSymbolClient mirrors the backend (2-20 uppercase alnum)', () => {
+  assert.equal(validateWatchSymbolClient('BTCUSDT').ok, true);
+  assert.equal(validateWatchSymbolClient('BTCUSDT').symbol, 'BTCUSDT');
+  assert.equal(validateWatchSymbolClient('AB').ok, true); // 2 chars boundary
+  assert.equal(validateWatchSymbolClient('ABCDEFGHIJKLMNOPQRST').ok, true); // 20 chars boundary
+});
+
+test('validateWatchSymbolClient normalizes lowercase to uppercase', () => {
+  const res = validateWatchSymbolClient('  btcusdt  ');
+  assert.equal(res.ok, true);
+  assert.equal(res.symbol, 'BTCUSDT');
+});
+
+test('validateWatchSymbolClient rejects the same bad shapes the backend rejects', () => {
+  const invalid = {
+    empty: '',
+    onlyWhitespace: '   ',
+    spaces: 'BTC USDT',
+    slash: 'BTC/USDT',
+    punctuation: 'BTC-USDT',
+    injection: "BTC';DROP",
+    tooLong: 'ABCDEFGHIJKLMNOPQRSTU', // 21
+    tooShort: 'B', // 1
+  };
+  for (const [label, value] of Object.entries(invalid)) {
+    assert.equal(validateWatchSymbolClient(value).ok, false, `${label} should be invalid`);
+  }
+});
+
+test('normalizeWatchSymbol trims and uppercases', () => {
+  assert.equal(normalizeWatchSymbol(' ethusdt '), 'ETHUSDT');
+  assert.equal(normalizeWatchSymbol(null), '');
+});
+
+test('personalWatchListRenderModel returns symbols only and drops malformed rows', () => {
+  const model = personalWatchListRenderModel({
+    ok: true,
+    watches: [
+      { symbol: 'BTCUSDT', addedAt: '2026-07-13T10:00:00.000Z' },
+      { symbol: 'ethusdt', addedAt: '2026-07-13T10:01:00.000Z' }, // normalized
+      { symbol: 'BAD/SYM', addedAt: 'x' }, // dropped (invalid)
+      { nope: true }, // dropped (no symbol)
+    ],
+    count: 2,
+    max: 25,
+  });
+  assert.deepEqual(model.watches.map((w) => w.symbol), ['BTCUSDT', 'ETHUSDT']);
+  assert.equal(model.count, 2);
+  assert.equal(model.max, 25);
+  assert.equal(model.full, false);
+});
+
+test('personalWatchListRenderModel flags a full list and handles empty/malformed input', () => {
+  const full = personalWatchListRenderModel({ watches: [{ symbol: 'AAA' }, { symbol: 'BBB' }], max: 2 });
+  assert.equal(full.full, true);
+  for (const bad of [null, undefined, {}, 'x', 42]) {
+    const m = personalWatchListRenderModel(bad);
+    assert.deepEqual(m.watches, []);
+    assert.equal(m.count, 0);
+  }
+});
+
+test('personalWatchListRenderModel never carries a chat id, even if present in the payload', () => {
+  const model = personalWatchListRenderModel({
+    watches: [{ symbol: 'BTCUSDT', addedAt: '2026-07-13T10:00:00.000Z' }],
+    telegramChatId: '552398471', // must be ignored
+    telegramChatIdMasked: '5523••••71',
+    max: 25,
+  });
+  const serialized = JSON.stringify(model);
+  assert.ok(!serialized.includes('552398471'), 'no raw chat id');
+  assert.ok(!serialized.includes('5523••••71'), 'no masked chat id in watch model');
+  assert.equal('telegramChatId' in model, false);
 });

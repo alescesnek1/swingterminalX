@@ -65,11 +65,56 @@ export function personalWatchErrorModel(message) {
   };
 }
 
+// ── Symbol watch-list (Phase 3) — selected symbols only, no sending ──
+
+// Trim + uppercase, mirroring the backend normalizeWatches step.
+export function normalizeWatchSymbol(value) {
+  return String(value ?? '').trim().toUpperCase();
+}
+
+// Mirrors the backend validateWatchSymbol (netlify/functions/
+// _personal-watch-store.mjs): 2-20 uppercase letters/digits, no spaces or
+// punctuation. Client-side only for UX; the backend re-validates every request.
+export function validateWatchSymbolClient(value) {
+  const symbol = normalizeWatchSymbol(value);
+  if (!symbol) return { ok: false, error: 'Enter a symbol.' };
+  if (!/^[A-Z0-9]{2,20}$/.test(symbol)) {
+    return { ok: false, error: 'Symbol must be 2-20 letters/digits (no spaces or punctuation).' };
+  }
+  return { ok: true, symbol };
+}
+
+// Shapes the watch-list endpoint response into a render model. Reads only the
+// symbol/addedAt/count/max fields — it never reads or forwards a chat id, so no
+// chat id can reach the DOM through here.
+export function personalWatchListRenderModel(apiResponse) {
+  const r = apiResponse && typeof apiResponse === 'object' ? apiResponse : {};
+  const rawList = Array.isArray(r.watches) ? r.watches : [];
+  const watches = rawList
+    .filter((w) => w && typeof w === 'object' && typeof w.symbol === 'string')
+    .map((w) => ({
+      symbol: normalizeWatchSymbol(w.symbol),
+      addedAt: typeof w.addedAt === 'string' ? w.addedAt : null,
+    }))
+    .filter((w) => /^[A-Z0-9]{2,20}$/.test(w.symbol));
+  const max = Number.isFinite(r.max) ? r.max : null;
+  return {
+    watches,
+    count: watches.length,
+    max,
+    full: max != null ? watches.length >= max : false,
+    error: false,
+  };
+}
+
 if (typeof window !== 'undefined') {
   window.__personalWatch = {
     validateChatId: validatePersonalWatchChatId,
     toRenderModel: personalWatchRenderModel,
     signedOutModel: personalWatchSignedOutModel,
     errorModel: personalWatchErrorModel,
+    validateWatchSymbol: validateWatchSymbolClient,
+    normalizeWatchSymbol,
+    toWatchListModel: personalWatchListRenderModel,
   };
 }

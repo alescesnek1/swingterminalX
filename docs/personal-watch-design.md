@@ -61,10 +61,50 @@ endpoint above. **No backend behavior changed.**
   `morning-briefing.mjs`, trading gates, or any Binance/order/execution/worker
   path.
 
-## Phase 3 (future, separate review) — Watch-list management
+## Phase 3 — Symbol watch-list management (done, this doc's branch)
 
-Backend + UI for a user-chosen symbol/condition list (the `watches: []`
-field already reserved in the store's record shape). Still **no sending**.
+**Scope: selected-symbol watch-list CRUD only, still no sending.** Uses the
+`watches: []` array already reserved on each per-user record.
+
+- **Store** (`netlify/functions/_personal-watch-store.mjs`): `validateWatchSymbol`
+  (2–20 uppercase letters/digits, trims+uppercases, rejects spaces/punctuation/
+  slashes/injection), `listPersonalWatches`, `addPersonalWatch`,
+  `removePersonalWatch`, `publicPersonalWatchList`, and `MAX_WATCHES_PER_USER = 25`.
+  Watch shape `{ symbol, addedAt }` with a **server-assigned** `addedAt`; symbols
+  are deduped; adding beyond the cap is a validation error; removing a missing
+  symbol is idempotent. Adding/removing a watch **never** touches `telegramChatId`.
+- **Endpoint** (`netlify/functions/cockpit-personal-watch-list.mjs`):
+  `/api/cockpit-personal-watch-list` — OPTIONS→204, GET (list), POST `{ symbol }`
+  (add), DELETE `{ symbol }` (remove). Shared `getIdentity()`; ownership is the
+  **token `userId` only** (body can't hijack). Invalid JSON / invalid symbol /
+  cap-exceeded → 400. Response `{ ok, watches:[{symbol,addedAt}], count, max }` —
+  **no chat id, masked or raw.** No outbound `fetch`.
+- **Frontend**: the Cockpit "Personal Alerts" card gains a watch sub-section
+  (symbol input reusing the `cockpit-symbol-list` datalist, Add, removable chips).
+  GET on Cockpit tab open; POST/DELETE on user action via `_getAuthHeaders()`;
+  paint-only on refresh ticks (no network spam); nothing kept in browser storage.
+  Pure helpers in `personal-watch.js` (`validateWatchSymbolClient`,
+  `normalizeWatchSymbol`, `personalWatchListRenderModel`).
+- **Tests**: `tests/personal-watch-list.test.mjs` (backend),
+  `tests/personal-watch-client.test.mjs` (pure client, extended),
+  `tests/frontend.personal-watch-list.test.mjs` (source guards).
+
+### Explicit non-goals of Phase 3
+
+- **No Telegram sending** (no send path anywhere).
+- **No custom conditions / thresholds** — a watch is symbol-only; the "condition"
+  is the frozen confirmed-entry gate applied later.
+- **No "watch all ENTRY_READY" mode.**
+- No group/channel chat IDs.
+- No changes to `cron-alerts.mjs`, `morning-briefing.mjs`, the RADAR gate,
+  scoring, thresholds, or any Binance/order/execution/worker path.
+
+### Phase-4 forward-compat note
+
+Phase 3 keeps only per-user records. The eventual sender must be able to
+enumerate watchers per symbol — either a full per-user blob scan or a reverse
+index (`symbol → [userId]`) added later without a data migration. The add/remove
+shape here does not preclude either.
 
 ## Phase 4 (future, separate review) — Personal alert sending
 
