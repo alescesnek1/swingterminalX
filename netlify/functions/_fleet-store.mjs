@@ -80,6 +80,7 @@ function emptyFleet() {
     radarMicrostructureSnapshot: null, // latest sanitized static microstructure (depth/spread/funding) posted by the read-only producer; no secrets, no orders. MUST be declared here or normalize() drops it on every load.
     radarRollingMicrostructureSnapshot: null, // latest cached rolling microstructure fields for strict Absorb diagnostics; no secrets, no orders. MUST be declared here or normalize() drops it on every load.
     radarKlinesSnapshot: null, // latest cached kline snapshot for read-only RADAR analysis; no secrets, no orders. MUST be declared here or normalize() drops it on every load.
+    radarLongShortSnapshot: null, // latest compact long/short positioning context from local worker; no secrets, no orders. MUST be declared here or normalize() drops it on every load.
     radarContext: { scannerCandidates: [], receivedAt: null }, // context pushed by the browser
     tradingRadar: emptyTradingRadar(), // read-only advisory panel state; no orders, no intents, no gates
     lastRegime: null,     // { regime, entriesAllowed, reason[], metrics, updatedAt }
@@ -150,6 +151,14 @@ function normalize(data) {
     const hasSymbolsMap = snap && typeof snap.symbols === 'object' && snap.symbols !== null && !Array.isArray(snap.symbols);
     if (typeof snap !== 'object' || Array.isArray(snap) || (!hasDataMap && !hasSymbolsMap)) {
       base.radarKlinesSnapshot = null;
+    }
+  }
+  // radarLongShortSnapshot is either null or an object carrying compact per-symbol context.
+  if (base.radarLongShortSnapshot !== null) {
+    const snap = base.radarLongShortSnapshot;
+    const hasSymbolsMap = snap && typeof snap.symbols === 'object' && snap.symbols !== null && !Array.isArray(snap.symbols);
+    if (typeof snap !== 'object' || Array.isArray(snap) || !hasSymbolsMap) {
+      base.radarLongShortSnapshot = null;
     }
   }
   return base;

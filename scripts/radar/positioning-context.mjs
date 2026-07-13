@@ -27,6 +27,7 @@ export const POSITIONING_STALE_TTL_MS = 15 * 60 * 1000;
 const OI_TRENDS = new Set(['rising', 'falling', 'flat']);
 
 function num(value) {
+  if (value == null) return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
@@ -72,6 +73,7 @@ export function buildPositioningContext(input = {}) {
   const priceChangePct = num(s.priceChangePct);
   const globalAccountRatio = num(s.globalAccountRatio);
   const topTraderPositionRatio = num(s.topTraderPositionRatio);
+  const takerBuySellRatio = num(s.takerBuySellRatio);
 
   const stale = updatedAtMs != null && nowMs - updatedAtMs > POSITIONING_STALE_TTL_MS;
   const missing = [];
@@ -95,7 +97,7 @@ export function buildPositioningContext(input = {}) {
       ...base,
       available: false,
       openInterest: { trend: 'unknown', changePct: null, windowMinutes: null, label: 'OI unavailable' },
-      longShort: { globalAccountRatio: null, topTraderPositionRatio: null, interpretation: 'unavailable' },
+      longShort: { globalAccountRatio: null, topTraderPositionRatio: null, takerBuySellRatio: null, interpretation: 'unavailable' },
       warnings: stale ? ['positioning snapshot stale'] : [],
     };
   }
@@ -118,6 +120,7 @@ export function buildPositioningContext(input = {}) {
     longShort: {
       globalAccountRatio,
       topTraderPositionRatio,
+      takerBuySellRatio,
       interpretation,
     },
     warnings,

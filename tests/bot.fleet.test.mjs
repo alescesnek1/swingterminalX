@@ -144,6 +144,49 @@ test('invalid radarKlinesSnapshot is normalized to null', async () => {
   }
 });
 
+test('emptyFleet declares radarLongShortSnapshot', () => {
+  assert.ok(
+    Object.prototype.hasOwnProperty.call(fleetStore.emptyFleet(), 'radarLongShortSnapshot'),
+    'radarLongShortSnapshot must be declared in emptyFleet() or it vanishes on reload',
+  );
+  assert.equal(fleetStore.emptyFleet().radarLongShortSnapshot, null);
+});
+
+test('valid radarLongShortSnapshot survives normalized reload', async () => {
+  const fleet = fleetStore.emptyFleet();
+  fleet.radarLongShortSnapshot = {
+    source: 'binance-futures-data',
+    contextOnly: true,
+    updatedAt: new Date().toISOString(),
+    period: '5m',
+    topN: 20,
+    symbols: {
+      BTCUSDT: {
+        contextOnly: true, source: 'binance-futures-data', symbol: 'BTCUSDT', period: '5m',
+        updatedAt: new Date().toISOString(), stale: false, available: true,
+        topTraderPositionRatio: 1.8, globalAccountRatio: 1.2, takerBuySellRatio: 0.9,
+        interpretation: 'balanced', warnings: [], missing: [],
+      },
+    },
+  };
+  await fleetStore.saveFleet(fleet);
+
+  const reloaded = await fleetStore.loadFleet();
+  assert.ok(reloaded.radarLongShortSnapshot, 'long/short snapshot survived normalize');
+  assert.equal(reloaded.radarLongShortSnapshot.symbols.BTCUSDT.globalAccountRatio, 1.2);
+});
+
+test('invalid radarLongShortSnapshot is normalized to null', async () => {
+  const invalidValues = ['snapshot', 123, [], true, { updatedAt: new Date().toISOString() }, { symbols: [] }];
+  for (const value of invalidValues) {
+    const fleet = fleetStore.emptyFleet();
+    fleet.radarLongShortSnapshot = value;
+    await fleetStore.saveFleet(fleet);
+    const reloaded = await fleetStore.loadFleet();
+    assert.equal(reloaded.radarLongShortSnapshot, null, `invalid value normalized to null: ${JSON.stringify(value)}`);
+  }
+});
+
 // Report an OPEN position for sessionId via the worker position-result route. With
 // no pre-existing session this recovers an (unowned) visible session holding it.
 async function openPosition(sessionId, orderId = 'ord-1') {

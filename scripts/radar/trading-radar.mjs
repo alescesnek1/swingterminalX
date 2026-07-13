@@ -14,6 +14,7 @@ import { getFreshClosedKlinesForSymbol } from './klines-snapshot.mjs';
 import { computePressureZones } from './pressure-zones.mjs';
 import { buildPositioningContext } from './positioning-context.mjs';
 import { getFreshRollingMicrostructureForSymbol, normalizeRollingMicrostructureSnapshot } from './rolling-microstructure-snapshot.mjs';
+import { normalizeLongShortSnapshot } from './long-short-snapshot.mjs';
 const WEIRD_BASE_RE = /(UP|DOWN|BULL|BEAR)$|\d+(L|S)$/;
 const QUOTES = new Set(['USDC', 'USDT']);
 
@@ -2190,13 +2191,19 @@ function withComputedStructuralReclaim(market, klinesSnapshot, nowMs = Date.now(
   return { ...market, ...computed, computedStructuralKlinesSymbol: symbol };
 }
 
+// Compact long/short snapshot lookup for the display-only positioning block.
+// It never feeds gates, scores, Absorb/Reclaim, ENTRY_READY, or Telegram.
+function longShortContextForMarket(market, longShortSnapshot, nowMs = Date.now()) {
+  const symbol = safeKlinesSymbolFromCandidate(market);
+  if (!symbol || !longShortSnapshot) return null;
+  const normalized = normalizeLongShortSnapshot(longShortSnapshot, { nowMs });
+  if (!normalized || !normalized.symbols) return null;
+  return normalized.symbols[symbol] || null;
+}
 // Context-only PROXY for the browser: derive a compact Pressure Zones block from
 // the SAME fresh closed klines the structural-reclaim step already reads. This is
-// ADDITIVE DISPLAY DATA computed at output-shaping time only — it is never merged
-// onto the market object used by the universe/scoring pipeline, and is never read
-// by any gate, score, stage, Absorb/Reclaim, ENTRY_READY, Telegram, or Cockpit
-// path. It exposes NO raw candles. It never throws and never fabricates: absent /
-// stale / insufficient klines yield an explicit unavailable marker.
+// ADDITIVE DISPLAY DATA computed at output-shaping time only. It exposes NO raw
+// candles and never feeds gates, scores, Absorb/Reclaim, ENTRY_READY, or Telegram.
 export function computeRadarPressureZones(market, klinesSnapshot, nowMs = Date.now()) {
   const symbol = safeKlinesSymbolFromCandidate(market);
   if (!symbol) return { available: false, proxy: true, reason: 'NO_CLOSED_KLINES' };
@@ -2285,6 +2292,7 @@ export function buildTradeReadinessSummary(input = {}) {
   for (const x of Array.isArray(s.missingData) ? s.missingData : []) if (x) missSet.add(String(x));
   if (s.hasRollingMicrostructure !== true) missSet.add('rolling flow');
   if (pc && typeof pc === 'object' && pc.contextOnly === true && pc.available !== true) missSet.add('positioning');
+  if (pc && typeof pc === 'object' && pc.contextOnly === true && Array.isArray(pc.missing) && pc.missing.includes('longShortRatio')) missSet.add('positioning');
   const missing = Array.from(missSet).slice(0, 8);
 
   const headline = actionable
@@ -2321,6 +2329,7 @@ export function evaluateTradingRadar({
   scannerContext = {},
   klinesSnapshot = null,
   rollingMicrostructureSnapshot = null,
+  longShortSnapshot = null,
 } = {}) {
   const nowIso = new Date(now).toISOString();
   const state = defaultTradingRadarState(nowIso);
@@ -2531,15 +2540,19 @@ export function evaluateTradingRadar({
       // and never fed back into it. Neither is read by any gate/Absorb/Reclaim/
       // ENTRY_READY/Telegram path.
       const pressureZones = computeRadarPressureZones(m, klinesSnapshot, now);
-      // Context-only OI/positioning read-model over fields the row already
-      // carries (rolling microstructure OI delta). Long/short ratios stay null
-      // (honest "unavailable") until an approved producer supplies them.
+      // Context-only OI/positioning read-model over real rolling OI delta plus
+      // optional compact long/short ratios from the operator-local producer.
+      const longShortContext = longShortContextForMarket(m, longShortSnapshot, now);
       const positioningContext = buildPositioningContext({
         symbol: m.symbol,
         openInterestChangePct: m.openInterestChangePct,
         priceChangePct: m.change1hPct,
         updatedAtMs: m.rollingMicrostructureUpdatedAtMs,
         nowMs: now,
+        globalAccountRatio: longShortContext && longShortContext.available === true ? longShortContext.globalAccountRatio : null,
+        topTraderPositionRatio: longShortContext && longShortContext.available === true ? longShortContext.topTraderPositionRatio : null,
+        takerBuySellRatio: longShortContext && longShortContext.available === true ? longShortContext.takerBuySellRatio : null,
+        source: longShortContext && longShortContext.available === true ? 'rolling-microstructure+binance-futures-data' : 'rolling-microstructure',
       });
       const tradeReadiness = buildTradeReadinessSummary({
         actionability: effectiveActionability,

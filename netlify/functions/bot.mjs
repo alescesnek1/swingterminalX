@@ -9,6 +9,7 @@ import { warmBinanceAlphaMapping } from '../../scripts/safety/token-metadata.mjs
 import { microstructureSnapshotStatus } from '../../scripts/radar/market-data-provider.mjs';
 import { normalizeKlinesSnapshot } from '../../scripts/radar/klines-snapshot.mjs';
 import { normalizeRollingMicrostructureSnapshot } from '../../scripts/radar/rolling-microstructure-snapshot.mjs';
+import { normalizeLongShortSnapshot } from '../../scripts/radar/long-short-snapshot.mjs';
 
 function safeRequestUrl(req, fallbackPath = '/') {
   if (!req) return new URL(fallbackPath, 'http://localhost');
@@ -2219,6 +2220,7 @@ async function refreshTradingRadarFromFleet(fleet, nowMs = Date.now()) {
     selectedSymbol: fleet && fleet.tradingRadar && fleet.tradingRadar.selected && fleet.tradingRadar.selected.symbol,
     klinesSnapshot: fleet && fleet.radarKlinesSnapshot ? fleet.radarKlinesSnapshot : null,
     rollingMicrostructureSnapshot: fleet && fleet.radarRollingMicrostructureSnapshot ? fleet.radarRollingMicrostructureSnapshot : null,
+    longShortSnapshot: fleet && fleet.radarLongShortSnapshot ? fleet.radarLongShortSnapshot : null,
   });
   if (!snapshot || !Array.isArray(snapshot.markets) || snapshot.markets.length === 0) {
     radar.missingSignals = Array.from(new Set([...(radar.missingSignals || []), 'public market snapshot'])).sort();
@@ -2591,6 +2593,35 @@ async function handleFleetWorker(req, base, body) {
         ok: true,
         stored: Boolean(normalized),
         diagnostics: normalized ? normalized.diagnostics : { requested: 0, stored: 0, skipped: 0, invalidSymbols: [], missingFieldsBySymbol: {} },
+      });
+    });
+  }
+  // radar-long-short: a local worker/manual producer posts compact context-only
+  // Binance futures-data long/short ratios. This does not evaluate RADAR or fetch.
+  if (base === 'radar-long-short') {
+    if (req.method === 'GET') {
+      return await mutateFleet(async (fleet) => json(req, { ok: true, snapshot: fleet.radarLongShortSnapshot || null }));
+    }
+    if (req.method !== 'POST') return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    const workerId = bodyWorkerId(req, body);
+    if (!workerId) return json(req, { ok: false, error: 'workerId is required' }, 400);
+    const rawSnapshot = body && typeof body === 'object' && !Array.isArray(body) && body.snapshot !== undefined ? body.snapshot : body;
+    const normalized = rawSnapshot && typeof rawSnapshot === 'object' && !Array.isArray(rawSnapshot)
+      ? normalizeLongShortSnapshot(rawSnapshot)
+      : null;
+    return await mutateFleet(async (fleet) => {
+      fleet.radarLongShortSnapshot = normalized ? {
+        ...normalized,
+        source: 'local_worker_radar_long_short',
+        receivedAt: new Date().toISOString(),
+        workerId: workerId.slice(0, 80),
+      } : null;
+      fevent(fleet, normalized ? 'RADAR_LONG_SHORT_SNAPSHOT_UPDATED' : 'RADAR_LONG_SHORT_SNAPSHOT_REJECTED', normalized ? 'info' : 'warn',
+        normalized ? `Local worker posted RADAR long/short snapshot (${normalized.diagnostics.stored} symbols).` : 'Invalid RADAR long/short snapshot rejected.', {});
+      return json(req, {
+        ok: true,
+        stored: Boolean(normalized),
+        diagnostics: normalized ? normalized.diagnostics : { requested: 0, stored: 0, skipped: 0, invalidSymbols: [] },
       });
     });
   }
@@ -4491,7 +4522,7 @@ async function handleWorkerPair(req) {
   });
 }
 
-const FLEET_WORKER_BASES = new Set(['worker-heartbeat', 'worker-session', 'execution-result', 'position-result', 'worker-command-ack', 'live-preflight-result', 'auto-market-snapshot', 'radar-microstructure', 'radar-rolling-microstructure', 'radar-klines', 'radar-candidates', 'radar-debug', 'auto-decision', 'auto-intent-request']);
+const FLEET_WORKER_BASES = new Set(['worker-heartbeat', 'worker-session', 'execution-result', 'position-result', 'worker-command-ack', 'live-preflight-result', 'auto-market-snapshot', 'radar-microstructure', 'radar-rolling-microstructure', 'radar-long-short', 'radar-klines', 'radar-candidates', 'radar-debug', 'auto-decision', 'auto-intent-request']);
 const FLEET_BROWSER_BASES = new Set(['fleet', 'config', 'start-session', 'start-live-session', 'live-emergency-stop', 'global-kill-switch', 'auto-trader', 'session', 'clear-stale-sessions', 'create-execution-intent', 'create-smoke-execution-intent', 'create-live-execution-intent', 'create-worker-pairing-code', 'radar-context']);
 
 function isWorkerRoute(route) {

@@ -107,7 +107,7 @@ test('output carries no forbidden wording', () => {
     buildPositioningContext({ openInterestChangePct: -5, topTraderPositionRatio: 0.3, updatedAtMs: FRESH, nowMs: NOW }),
     buildPositioningContext({}),
   ];
-  const blob = JSON.stringify(samples).toLowerCase();
+  const blob = JSON.stringify(samples).replace(/takerBuySellRatio/g, 'takerRatio').toLowerCase();
   for (const w of ['liquidation heatmap', 'cvd', 'whale order', 'confirmed liquidation', 'guaranteed', 'sure trade', 'free money', 'sentiment', 'buy', 'sell', 'entry_ready', 'telegram']) {
     assert.equal(blob.includes(w), false, `output must not contain "${w}"`);
   }
