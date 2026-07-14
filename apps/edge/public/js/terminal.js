@@ -4835,17 +4835,17 @@ function _cpRefreshSymbolList() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Personal Alerts settings — Cockpit UI wiring only (Phase 2).
+// Personal Alerts settings and watch-list — Cockpit management wiring.
 //
 // Talks to the already-live, already-reviewed Phase 1 backend
 // (/api/cockpit-personal-watch-settings) using the shared Supabase auth
 // header. The pure validation + render-model logic lives in
 // personal-watch.js (window.__personalWatch); this is DOM wiring only.
 // This is a SETTINGS FORM ONLY:
-//   • no Telegram message is ever sent from here or anywhere in the
-//     frontend — sending is a separate, later, reviewed phase;
-//   • selected-symbol watch-list management exists, but Telegram sending
-//     and custom conditions are still separate, later, reviewed phases;
+//   • no Telegram message is ever sent from the frontend; the dedicated
+//     backend sender remains controlled by server-side safety settings;
+//   • selected-symbol watch-list management exists, but custom conditions
+//     remain out of scope;
 //   • the raw chat id is never kept in JS state, localStorage, or
 //     sessionStorage — only the server's masked value is rendered, and the
 //     input is cleared after a successful save.
@@ -4969,7 +4969,7 @@ async function disconnectPersonalWatch() {
   }
 }
 
-// ── Symbol watch-list (Phase 3) — selected symbols only, no sending ──
+// ── Symbol watch-list — selected symbols only, no frontend sending ──
 // Same discipline as the chat-id panel: GET on tab open, POST/DELETE on user
 // action via the shared auth header. It handles symbols only (never a chat id)
 // and keeps nothing in browser storage. No message is ever sent from here.
@@ -5083,7 +5083,7 @@ function initCockpit() {
   document.getElementById('cockpit-symbol')?.addEventListener('input', () => { _cpShowError(''); _cpUpdatePricePreview(); });
   document.getElementById('cockpit-sort')?.addEventListener('change', (e) => { Cockpit.sort = e.target.value; renderCockpit(); });
   document.getElementById('cockpit-compact-toggle')?.addEventListener('click', () => { Cockpit.compact = !Cockpit.compact; document.getElementById('v-cockpit')?.classList.toggle('cockpit-compact', Cockpit.compact); });
-  // Personal Alerts settings — Phase 2 UI wiring only (no sending; see
+  // Personal Alerts management UI only (no frontend sending; see
   // docs/personal-watch-design.md). Actual GET happens lazily when the
   // Cockpit tab opens (see sv()), not here.
   document.getElementById('cockpit-pw-connect')?.addEventListener('click', connectPersonalWatch);

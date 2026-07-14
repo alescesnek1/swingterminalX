@@ -13,8 +13,8 @@
 > `/reply` or `/admin_summary` support system** here. If you find yourself
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
-> _Last synced to repo state: branch `feat/chatgpt-session-handoff`, on top of
-> `main` @ `9fd340f` (see §11). Update the commit ref whenever this file is
+> _Last synced to repo state: branch `feat/personal-watch-alert-sender`, on top of
+> `main` @ `e99ca25` (see §11). Update the commit ref whenever this file is
 > re-synced._
 
 ---
@@ -68,8 +68,8 @@ Defaults:
   is **Netlify Blobs**. Auth is **Supabase JWT**.
 - **Local repo path (owner machine):**
   `C:\Users\Ales\Desktop\Bots\terminal crypto\terminal-X`
-- **Current `main` at time of writing:** `9fd340f` (`test(radar): narrow
-  long-short source guard`).
+- **Current `main` at time of writing:** `e99ca25` (`Merge branch
+  'feat/cockpit-personal-watch-list'`).
 - **Read-first docs** (see §4).
 
 ## 4. Mandatory repo read order for new coding-agent sessions
@@ -123,9 +123,9 @@ Tabs rendered in `apps/edge/public/index.html` (function `sv(...)` switches view
   positioning/pressure-zone/trade-readiness context panels.
 - **COCKPIT** — manual trade planning/review; imports a selected RADAR candidate
   (explicit selection required), trader context checklist, market-wide funding
-  context, and a **Personal Alerts settings card** (connect/disconnect a personal
-  Telegram chat id **and** manage a selected-symbol watch-list — settings only, no
-  alerts sent yet; see §9).
+  context, and a **Personal Alerts card** (connect/disconnect a personal Telegram
+  chat id and manage selected-symbol watches; backend delivery is prepared but
+  disabled by default behind system safety settings; see §9).
 - **TOP CHARTS · SECTORS · HEATMAP · MOVERS · CALENDAR** — market data views.
 - **BOT FEED** — the paper/testnet bot control surface (START/STOP BOT, live-spot
   readiness panel). Labeled "Paper Trading Sandbox".
@@ -173,11 +173,13 @@ email allowlist (§9), not a billing tier.
   `scripts/radar/trading-radar.mjs`. Scanner-only rows (no execution
   microstructure) can **never** become `ENTRY_READY` or Telegram-eligible.
 - **Telegram alerts are locked down.** The legacy relay `/api/telegram`
-  (`netlify/functions/telegram.mjs`) is **disabled → returns HTTP 410**. The
-  **only** place allowed to call the Telegram API is
-  `netlify/functions/cron-alerts.mjs`, and only for a fully confirmed RADAR
-  `ENTRY_READY` (per-symbol 60-min cooldown, 120s staleness cutoff, gated by
-  `RADAR_TELEGRAM_ENABLED === 'true'`, fail-closed).
+  (`netlify/functions/telegram.mjs`) is **disabled → returns HTTP 410**.
+  `cron-alerts.mjs` may send the global alert only for a fully confirmed RADAR
+  `ENTRY_READY` (60-min cooldown, 120s staleness cutoff, gated by
+  `RADAR_TELEGRAM_ENABLED === 'true'`). `personal-alerts.mjs` is the only
+  personal sender; it imports that same confirmed selector and remains off unless
+  `PERSONAL_ALERTS_ENABLED === 'true'`, with durable per-user watch/dedup state.
+  Both paths fail closed. No other function may send a trade alert.
 - **Morning briefing** (`netlify/functions/morning-briefing.mjs`) is a separate,
   informational daily Telegram message (own gate `MORNING_BRIEFING_TELEGRAM_ENABLED`,
   DST-aware hourly cron + once-per-local-day dedup). It is **not** a trade signal.
@@ -212,8 +214,8 @@ email allowlist (§9), not a billing tier.
   boolean + timestamp — **never the raw value**. A ~10 KB request-body cap
   fails closed before JSON parse. Covered by
   `tests/cockpit-personal-watch-settings.test.mjs` (14 tests).
-- **Personal watch — Phase 2 UI settings wiring (this branch,
-  `feat/cockpit-personal-watch-ui`):** a "Personal Alerts" card in Cockpit
+- **Personal watch — Phase 2 UI settings wiring (merged/live):** a "Personal
+  Alerts" card in Cockpit
   (`apps/edge/public/js/personal-watch.js` pure module +
   `apps/edge/public/js/terminal.js` wiring) lets the user Connect/Disconnect
   their Telegram chat id against the Phase 1 endpoint above, using the
@@ -223,24 +225,36 @@ email allowlist (§9), not a billing tier.
   masked value is ever rendered. Covered by `tests/personal-watch-client.test.mjs`
   (pure-module unit tests) and `tests/frontend.personal-watch.test.mjs`
   (source guards).
-- **Personal watch — Phase 3 symbol watch-list (this branch,
-  `feat/cockpit-personal-watch-list`):** a sibling endpoint
+- **Personal watch — Phase 3 symbol watch-list (merged/live):** a sibling
+  endpoint
   `/api/cockpit-personal-watch-list` (`netlify/functions/
   cockpit-personal-watch-list.mjs`, OPTIONS/GET/POST/DELETE) + store helpers on
   the same per-user record let a user manage a **selected-symbol watch-list**
-  ("notify me when this symbol reaches a confirmed RADAR entry setup" — delivery
-  is a future phase). Symbols validated `^[A-Z0-9]{2,20}$` (trim+uppercase),
+  ("notify me when this symbol reaches a confirmed RADAR entry setup"). Symbols
+  validated `^[A-Z0-9]{2,20}$` (trim+uppercase),
   deduped, **server-assigned `addedAt`**, capped at `MAX_WATCHES_PER_USER = 25`;
   token-`userId` ownership; responses carry **symbols only, never a chat id**;
   adding/removing a watch never touches the chat id. Cockpit card gains a watch
   sub-section (input + removable chips) wired via `_getAuthHeaders()`. Covered by
   `tests/personal-watch-list.test.mjs`, extended `tests/personal-watch-client.test.mjs`,
-  and `tests/frontend.personal-watch-list.test.mjs`. **STILL no Telegram-sending
-  path anywhere, STILL no custom conditions, and STILL no "watch all" mode** —
-  see `docs/personal-watch-design.md` (Phase 4 = the only phase allowed to add
-  sending, gated on the same confirmed RADAR `ENTRY_READY` `cron-alerts.mjs`
-  already uses). Not merged/pushed as of this branch. **Follow-up:** no
-  per-endpoint rate limiting yet (carried over from Phase 1).
+  and `tests/frontend.personal-watch-list.test.mjs`. There are still no custom
+  conditions or "watch all" mode. **Follow-up:** no per-endpoint rate limiting.
+- **Personal watch — Phase 4 sender (local branch,
+  `feat/personal-watch-alert-sender`):** `netlify/functions/personal-alerts.mjs`
+  is a scheduled, disabled-by-default fan-out of the same confirmed/fresh
+  `ENTRY_READY` selection exported by `cron-alerts.mjs`. It sends only when
+  `PERSONAL_ALERTS_ENABLED === 'true'`, the internal scheduler secret/header
+  authenticates, a Telegram token exists, Netlify Blobs can durably enumerate
+  recipients and persist dedup state, and the user has a
+  saved personal chat id plus a matching selected-symbol watch. Per-user/symbol
+  60-minute cooldown + setup-hash dedup, an ETag-conditional per-symbol
+  reservation against overlapping runs, caps of 5/user and 100/run,
+  aggregate-only logs/responses, and mark-after-success behavior are covered by
+  `tests/personal-alerts.test.mjs`. `next_run` is metadata only; public HTTP
+  requests without the scheduler secret/header cannot trigger fan-out. Memory
+  fallback, missing state/token, missing scheduler auth, and Telegram failures
+  send nothing or fail closed. Production remains OFF; this branch is local
+  only and requires security review before push/deploy/enable.
 - There is **no** broker support inbox, no `/reply` command, no `/admin_summary`.
   Don't invent them.
 
@@ -254,9 +268,10 @@ email allowlist (§9), not a billing tier.
   `/api/funding-divergence`, `/api/sniper-detect`, `/api/coingecko-highlights`.
 - **Node Netlify functions** (`netlify/functions`): `bot.mjs` (Bot Fleet control
   plane — sessions, intents, results, regime, radar candidates/microstructure),
-  `cron-alerts.mjs`, `morning-briefing.mjs`, `radar-microstructure-refresh.mjs`
-  (token-protected, no schedule), `telegram.mjs` (disabled/410), plus `_auth`,
-  `_fleet-store`, `_market-regime`, and the new `_personal-watch-store`.
+  `cron-alerts.mjs`, disabled-by-default `personal-alerts.mjs`,
+  `morning-briefing.mjs`, `radar-microstructure-refresh.mjs` (token-protected,
+  no schedule), `telegram.mjs` (disabled/410), plus `_auth`, `_fleet-store`,
+  `_market-regime`, and `_personal-watch-store`.
 - **Ingest service** (`apps/ingest`, Fly.io): Binance feed aggregator + paperbot.
 - **Local worker** (`scripts/local-binance-worker.mjs`): launched on demand via the
   `swingworker://` URL protocol from the BOT FEED tab; heartbeats, polls its
@@ -312,8 +327,8 @@ _(Grounded in git + docs; do not over-invent.)_
   changes (§16).
 - Continue RADAR **positioning / pressure-zone / trade-readiness** context work
   (the active line of commits) — additive, context-only, fail-closed.
-- Finish and **track** the personal-watch settings feature (currently untracked
-  files on `main`).
+- Security-review Personal Watch Phase 4 before any push/deploy, and keep
+  `PERSONAL_ALERTS_ENABLED` unset/false until a separate enablement approval.
 - Rolling microstructure remains **design-only** until real measurement can be
   honestly sourced — do not ship a producer that fabricates fields.
 - Verify production behavior after any approved Netlify deploy.

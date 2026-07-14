@@ -29,8 +29,15 @@ Do not rediscover the whole repo from scratch unless these are clearly stale.
 - **No new external fetch and no new scheduler/cron** without an explicit,
   reviewed reason (see the microstructure "451" story). Production microstructure
   default is `MARKET_DATA_PROVIDER=none`.
-- **Telegram** may only be sent from `netlify/functions/cron-alerts.mjs` (confirmed
-  RADAR `ENTRY_READY`) and `morning-briefing.mjs`. Nowhere else.
+- **Telegram** may only be sent from `netlify/functions/cron-alerts.mjs`
+  (global confirmed RADAR `ENTRY_READY`), `morning-briefing.mjs`, and
+  `netlify/functions/personal-alerts.mjs` (personal confirmed RADAR
+  `ENTRY_READY` fan-out). The personal sender must remain disabled by default
+  behind `PERSONAL_ALERTS_ENABLED === 'true'`, must reuse the confirmed gate
+  exported by `cron-alerts.mjs`, require the configured scheduler secret/header
+  for invocation, and must never log or return raw chat ids. Request bodies,
+  including `next_run`, are metadata only and never authentication.
+  No new sender may bypass that gate.
 - **No secrets / keys / tokens / customer PII** in code, docs, URLs, or commits.
 
 ## Git / deploy

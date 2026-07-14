@@ -6,7 +6,7 @@
 //   • clears the raw chat id input only after a confirmed successful save;
 //   • never persists a raw chat id to localStorage/sessionStorage;
 //   • never introduces a Telegram-send, bot-token, or Binance/execution path;
-//   • is explicit in its own copy that alerts are not active yet;
+//   • is explicit that delivery is controlled by system safety settings;
 //   • renders only the server's masked value, never a raw id.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -98,8 +98,9 @@ test('source guard: no Telegram-send, bot-token, or Binance/execution paths anyw
   }
 });
 
-test('UI copy is explicit that alerts are not active yet and only personal IDs are supported', () => {
-  assert.match(indexHtml, /alerts are not active yet/i);
+test('UI copy is explicit that delivery is system-controlled and only personal IDs are supported', () => {
+  assert.match(indexHtml, /Personal alerts are prepared/i);
+  assert.match(indexHtml, /controlled by system safety settings/i);
   assert.match(indexHtml, /Personal direct chat IDs only/i);
   assert.match(indexHtml, /Group\/channel IDs are not supported yet/i);
 });

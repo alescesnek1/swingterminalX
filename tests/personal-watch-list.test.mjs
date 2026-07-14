@@ -15,6 +15,11 @@ import { runPersonalWatchList } from '../netlify/functions/cockpit-personal-watc
 import {
   MAX_WATCHES_PER_USER,
   saveTelegramChatId,
+  markPersonalAlertSent,
+  listPersonalWatchRecipients,
+  recordPersonalAlertError,
+  reservePersonalAlert,
+  removeTelegramChatId,
   loadPersonalWatchSettings,
   maskChatId,
   __setPersonalWatchBlobStoreForTest,
@@ -29,14 +34,30 @@ const ANON = { ok: false, reason: 'No bearer token' };
 
 function makeFakeBlobStore() {
   const m = new Map();
+  const etags = new Map();
+  let revision = 0;
   return {
     async get(key, opts) {
       const v = m.get(key);
       if (v === undefined) return null;
       return opts && opts.type === 'json' ? JSON.parse(v) : v;
     },
-    async setJSON(key, val) { m.set(key, JSON.stringify(val)); },
+    async getWithMetadata(key, opts) {
+      const data = await this.get(key, opts);
+      return data == null ? null : { data, etag: etags.get(key), metadata: {} };
+    },
+    async setJSON(key, val, opts = {}) {
+      if (opts.onlyIfMatch && opts.onlyIfMatch !== etags.get(key)) return { modified: false };
+      revision += 1;
+      const etag = `etag-${revision}`;
+      m.set(key, JSON.stringify(val));
+      etags.set(key, etag);
+      return { modified: true, etag };
+    },
     _map: m,
+    async *list() {
+      yield { blobs: [...m.keys()].map((key) => ({ key, etag: etags.get(key) })), directories: [] };
+    },
   };
 }
 
@@ -200,6 +221,76 @@ test('adding/removing watches does NOT clear the existing telegramChatId', async
 
   const record = await loadPersonalWatchSettings(USER_A);
   assert.equal(record.telegramChatId, CHAT_A, 'chat id preserved through watch mutations');
+});
+
+test('personal alert state preserves chat id and watches across management changes', async () => {
+  await saveTelegramChatId(USER_A, CHAT_A);
+  await call('POST', { identity: USER_A, body: { symbol: 'BTCUSDT' } });
+  await markPersonalAlertSent(USER_A.userId, 'BTCUSDT', {
+    lastSentAt: '2026-07-13T10:00:00.000Z',
+    hash: 'test-setup-hash',
+  });
+  await call('POST', { identity: USER_A, body: { symbol: 'ETHUSDT' } });
+  await call('DELETE', { identity: USER_A, body: { symbol: 'ETHUSDT' } });
+
+  const record = await loadPersonalWatchSettings(USER_A);
+  assert.equal(record.telegramChatId, CHAT_A);
+  assert.deepEqual(record.watches.map((watch) => watch.symbol), ['BTCUSDT']);
+  assert.equal(record.personalAlertState.sent.BTCUSDT.hash, 'test-setup-hash');
+});
+
+test('durable recipient enumeration reads the existing per-user records', async () => {
+  await saveTelegramChatId(USER_A, CHAT_A);
+  await call('POST', { identity: USER_A, body: { symbol: 'BTCUSDT' } });
+  await call('POST', { identity: USER_B, body: { symbol: 'ETHUSDT' } });
+
+  const result = await listPersonalWatchRecipients();
+  assert.equal(result.durable, true);
+  assert.equal(result.recipients.length, 2);
+  const userA = result.recipients.find((item) => item.userId === USER_A.userId);
+  assert.equal(userA.telegramChatId, CHAT_A);
+  assert.deepEqual(userA.watches.map((watch) => watch.symbol), ['BTCUSDT']);
+});
+
+test('durable reservation prevents overlap and converts to sent only after success', async () => {
+  await saveTelegramChatId(USER_A, CHAT_A);
+  await call('POST', { identity: USER_A, body: { symbol: 'BTCUSDT' } });
+  const payload = {
+    hash: 'reservation-hash',
+    nowIso: '2026-07-14T08:00:00.000Z',
+    cooldownMs: 60 * 60 * 1000,
+    reservationMs: 60 * 60 * 1000,
+  };
+
+  const first = await reservePersonalAlert(USER_A.userId, 'BTCUSDT', payload);
+  const overlap = await reservePersonalAlert(USER_A.userId, 'BTCUSDT', payload);
+  assert.equal(first.acquired, true);
+  assert.equal(overlap.acquired, false);
+  assert.equal(overlap.reason, 'inFlight');
+
+  await recordPersonalAlertError(USER_A.userId, 'TELEGRAM_API_ERROR', payload.nowIso, 'BTCUSDT', payload.hash);
+  const retry = await reservePersonalAlert(USER_A.userId, 'BTCUSDT', payload);
+  assert.equal(retry.acquired, true);
+
+  await markPersonalAlertSent(USER_A.userId, 'BTCUSDT', { lastSentAt: payload.nowIso, hash: payload.hash });
+  const duplicate = await reservePersonalAlert(USER_A.userId, 'BTCUSDT', payload);
+  assert.equal(duplicate.acquired, false);
+  assert.equal(duplicate.reason, 'duplicate');
+});
+
+test('removing chat id preserves watches and personal alert state', async () => {
+  await saveTelegramChatId(USER_A, CHAT_A);
+  await call('POST', { identity: USER_A, body: { symbol: 'BTCUSDT' } });
+  await markPersonalAlertSent(USER_A.userId, 'BTCUSDT', {
+    lastSentAt: '2026-07-13T10:00:00.000Z',
+    hash: 'test-setup-hash',
+  });
+  await removeTelegramChatId(USER_A);
+
+  const record = await loadPersonalWatchSettings(USER_A);
+  assert.equal(record.telegramChatId, null);
+  assert.deepEqual(record.watches.map((watch) => watch.symbol), ['BTCUSDT']);
+  assert.equal(record.personalAlertState.sent.BTCUSDT.hash, 'test-setup-hash');
 });
 
 test('watch responses NEVER include a raw chat id', async () => {

@@ -21,7 +21,7 @@ deliberately deferred.
   negative group/channel-style ids are rejected).
 - Covered by `tests/cockpit-personal-watch-settings.test.mjs`.
 
-## Phase 2 — Cockpit UI settings wiring (done, this doc's branch)
+## Phase 2 — Cockpit UI settings wiring (done, merged, live)
 
 **Scope: UI settings wiring only.** Adds a "Personal Alerts" settings card to
 Cockpit (`#view-cockpit` / `.cockpit-shell`) that talks to the Phase 1
@@ -41,7 +41,7 @@ endpoint above. **No backend behavior changed.**
   cleared **only after a confirmed successful save**. Every render of the
   card uses the server's masked value only.
 - UI copy is explicit and unambiguous:
-  - *"Saved for future personal alerts — alerts are not active yet."*
+  - *"Personal alerts are prepared. Delivery is controlled by system safety settings."*
   - *"Personal direct chat IDs only. Group/channel IDs are not supported yet."*
 - **This phase adds no Telegram-send path.** Nothing in the frontend calls
   the Telegram API, references a bot token, or reaches
@@ -61,7 +61,7 @@ endpoint above. **No backend behavior changed.**
   `morning-briefing.mjs`, trading gates, or any Binance/order/execution/worker
   path.
 
-## Phase 3 — Symbol watch-list management (done, this doc's branch)
+## Phase 3 — Symbol watch-list management (done, merged, live)
 
 **Scope: selected-symbol watch-list CRUD only, still no sending.** Uses the
 `watches: []` array already reserved on each per-user record.
@@ -99,30 +99,55 @@ endpoint above. **No backend behavior changed.**
 - No changes to `cron-alerts.mjs`, `morning-briefing.mjs`, the RADAR gate,
   scoring, thresholds, or any Binance/order/execution/worker path.
 
-### Phase-4 forward-compat note
+## Phase 4 — Disabled-by-default personal alert sender (implemented locally)
 
-Phase 3 keeps only per-user records. The eventual sender must be able to
-enumerate watchers per symbol — either a full per-user blob scan or a reverse
-index (`symbol → [userId]`) added later without a data migration. The add/remove
-shape here does not preclude either.
+Phase 4 adds `netlify/functions/personal-alerts.mjs`, a scheduled per-user
+fan-out. It does **not** create or score signals. The function imports
+`selectRadarEntryAlerts`, `setupHash`, and `RADAR_TELEGRAM_COOLDOWN_MS` from
+`cron-alerts.mjs`; that selector owns the shared `RADAR_STALE_MS` check. Only the existing fully
+confirmed, fresh RADAR `ENTRY_READY` selection can reach fan-out. The global
+RADAR sender and morning briefing behavior are unchanged.
 
-## Phase 4 (future, separate review) — Personal alert sending
+Safety and delivery contract:
 
-The only phase allowed to introduce a Telegram-send path. Requirements
-carried forward from Phase 1/2, non-negotiable:
+- Delivery is **off by default**. Sending is possible only when
+  `PERSONAL_ALERTS_ENABLED=true` exactly, the configured scheduler secret is
+  presented in `x-terminal-scheduler-secret`, and the existing `TG_BOT_TOKEN`
+  is available. No production environment value is changed by this phase.
+- `PERSONAL_ALERTS_SCHEDULER_SECRET` plus the matching internal scheduler
+  header is required before fan-out. Public HTTP requests are rejected even
+  when they include a forged `next_run`; `next_run` is schedule metadata only,
+  never authentication.
+- A recipient must have a valid saved personal chat id and an explicit matching
+  symbol in `watches`. There is no watch-all mode and no custom condition path.
+- Scheduled delivery enumerates the existing per-user records from Netlify
+  Blobs. Memory fallback remains available to management endpoints, but the
+  sender refuses to send unless enumeration and per-user state are durable.
+- Dedup state stays on the same record under
+  `personalAlertState.sent[SYMBOL] = { lastSentAt, hash }`. Before sending, an
+  ETag-conditional write acquires `personalAlertState.pending[SYMBOL]`; an
+  overlapping run skips that user/symbol. Telegram success converts the
+  reservation to `sent`; failure clears it and records only a bounded error
+  code. A crashed reservation expires after the shared 60-minute cooldown. The sender never marks
+  an alert sent before Telegram reports success.
+- Cooldown is the shared 60-minute constant per user + symbol. An unchanged
+  setup hash is not re-sent. Fan-out is capped at 5 sends per user and 100 total
+  sends per run; failures are isolated per user.
+- Responses and aggregate logs contain counts and safe codes only, never raw
+  chat ids, user ids, tokens, or Telegram response bodies. Manual HTTP requests
+  cannot provide a symbol/chat id to trigger delivery and are rejected while
+  sending is enabled unless they have the scheduled invocation shape.
+- The Cockpit copy says delivery is prepared but controlled by system safety
+  settings. The settings and watch-list public response contracts are unchanged;
+  alert state is backend-only.
 
-- The trigger must be the **same confirmed RADAR `ENTRY_READY` gate**
-  `cron-alerts.mjs` already uses (`isConfirmedRadarEntryReady`) — personal
-  alerts are a **per-user fan-out of an already-confirmed event**, never a
-  new scoring/evaluation path and never a way to bypass the gate.
-- Sending must live in a **new, dedicated, reviewed backend function** (or an
-  explicit extension of `cron-alerts.mjs`), added to the "only these
-  functions may call Telegram" allowlist in `AGENTS.md`. It must never live
-  in the settings function or the frontend.
-- Reuse the existing per-symbol 60-minute cooldown and 120s staleness
-  guards, plus a new per-user×per-symbol dedup key and a per-user rate cap,
-  fail-closed if the dedup store is unavailable.
-- Re-verify cross-user isolation end-to-end once a real send path exists.
+Safe enablement later requires a separate reviewed production change: verify
+Netlify Blobs durability, configure the scheduler to send the matching secret
+header without exposing it to public callers, verify the Telegram token, then
+set `PERSONAL_ALERTS_ENABLED=true`. Do not place real secrets or chat ids in
+code, docs, URLs, tests, or logs. Turning the gate off, leaving the scheduler
+secret unset, or omitting the header sends zero.
+
 
 ## Non-blocking open decision
 

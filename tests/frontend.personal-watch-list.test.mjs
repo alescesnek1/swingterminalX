@@ -4,7 +4,7 @@
 //     wiring GET/POST/DELETE;
 //   • has a symbol input, an add control, a rendered list, and a per-chip
 //     remove path;
-//   • keeps the "alerts are not active yet" framing and offers no watch-all
+//   • keeps system-controlled delivery framing and offers no watch-all
 //     toggle and no custom-condition UI;
 //   • never persists watches or chat ids to localStorage/sessionStorage;
 //   • introduces no Telegram-send / bot-token / Binance / execution path.
@@ -74,8 +74,9 @@ test('index.html has the watch input, add button, list container, and count', ()
   assert.match(indexHtml, /id="cockpit-pw-symbol"[^>]*list="cockpit-symbol-list"/);
 });
 
-test('UI copy stays explicit: not active yet, selected-only, no watch-all, no custom conditions', () => {
-  assert.match(indexHtml, /alerts are not active yet/i);
+test('UI copy stays explicit: system-controlled, selected-only, no watch-all, no custom conditions', () => {
+  assert.match(indexHtml, /Personal alerts are prepared/i);
+  assert.match(indexHtml, /controlled by system safety settings/i);
   assert.match(indexHtml, /Selected symbols only/i);
   assert.match(indexHtml, /no "watch all"/i);
   assert.match(indexHtml, /no custom conditions/i);

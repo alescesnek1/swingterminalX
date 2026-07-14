@@ -44,10 +44,22 @@ function userKey(userId) {
   return `user-${Buffer.from(String(userId), 'utf8').toString('base64url')}`;
 }
 
+export function normalizePersonalAlertState(input = {}) {
+  const state = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  const sent = state.sent && typeof state.sent === 'object' && !Array.isArray(state.sent) ? state.sent : {};
+  const pending = state.pending && typeof state.pending === 'object' && !Array.isArray(state.pending) ? state.pending : {};
+  return {
+    sent,
+    lastErrorAt: typeof state.lastErrorAt === 'string' ? state.lastErrorAt : null,
+    pending,
+    lastErrorCode: typeof state.lastErrorCode === 'string' ? state.lastErrorCode.slice(0, 80) : null,
+  };
+}
+
 function normalizeRecord(data, identity) {
   const userId = String(identity && identity.userId ? identity.userId : '');
   const email = String(identity && identity.email ? identity.email : '').toLowerCase();
-  const base = { userId, email, telegramChatId: null, telegramChatIdUpdatedAt: null, watches: [] };
+  const base = { userId, email, telegramChatId: null, telegramChatIdUpdatedAt: null, watches: [], personalAlertState: normalizePersonalAlertState() };
   if (!data || typeof data !== 'object' || Array.isArray(data)) return base;
   const own = data.userId === userId ? data : { ...data, userId };
   return {
@@ -56,6 +68,7 @@ function normalizeRecord(data, identity) {
     telegramChatId: typeof own.telegramChatId === 'string' && own.telegramChatId ? own.telegramChatId : null,
     telegramChatIdUpdatedAt: typeof own.telegramChatIdUpdatedAt === 'string' && own.telegramChatIdUpdatedAt ? own.telegramChatIdUpdatedAt : null,
     watches: Array.isArray(own.watches) ? own.watches : [],
+    personalAlertState: normalizePersonalAlertState(own.personalAlertState),
   };
 }
 
@@ -148,8 +161,9 @@ export async function removeTelegramChatId(identity) {
 // Symbol watch-list (Phase 3) — selected-symbols only.
 //
 // A "watch" is a user's per-symbol subscription (notify me when this symbol
-// reaches a confirmed RADAR entry setup) — delivery is a FUTURE phase; nothing
-// here sends. Stored on the SAME per-user record as the Telegram chat id, so
+// reaches a confirmed RADAR entry setup). Delivery lives only in the dedicated,
+// default-off personal-alerts function; nothing in this store sends. Stored on
+// the SAME per-user record as the Telegram chat id, so
 // adding/removing a watch never touches telegramChatId. Watch responses carry
 // symbols only — never the raw chat id. See docs/personal-watch-design.md.
 // ─────────────────────────────────────────────────────────────
@@ -239,6 +253,158 @@ export function personalWatchStoreInfo() {
   return { storeMode: durable ? 'durable_blobs' : 'memory_fallback', durable, storeError: durable ? null : _storeError };
 }
 
+// Phase 4 sender-only helpers. Management endpoints retain their existing
+// memory fallback, but scheduled delivery must use durable Blobs only.
+function storeUnavailable(code = 'PERSONAL_WATCH_STORE_UNAVAILABLE') {
+  const err = new Error(code);
+  err.code = code;
+  return err;
+}
+
+async function requireDurableStore() {
+  await resolveBackend();
+  if (!_blobStore || _backendName !== 'blobs') throw storeUnavailable();
+  return _blobStore;
+}
+
+export async function listPersonalWatchRecipients() {
+  const store = await requireDurableStore();
+  try {
+    const recipients = [];
+    for await (const page of store.list({ prefix: 'user-', paginate: true })) {
+      for (const blob of page.blobs || []) {
+        const data = await store.get(blob.key, { type: 'json' });
+        if (!data || typeof data !== 'object' || !data.userId) continue;
+        recipients.push(normalizeRecord(data, { userId: data.userId, email: data.email || '' }));
+      }
+    }
+    return { ok: true, durable: true, recipients };
+  } catch {
+    throw storeUnavailable();
+  }
+}
+
+export async function getPersonalAlertState(userId) {
+  const store = await requireDurableStore();
+  try {
+    const data = await store.get(userKey(userId), { type: 'json' });
+    if (!data || data.userId !== String(userId)) throw storeUnavailable('PERSONAL_ALERT_STATE_UNAVAILABLE');
+    return normalizePersonalAlertState(data.personalAlertState);
+  } catch (err) {
+    if (err && err.code) throw err;
+    throw storeUnavailable('PERSONAL_ALERT_STATE_UNAVAILABLE');
+  }
+}
+
+export async function updatePersonalAlertState(userId, update, maxAttempts = 3) {
+  const store = await requireDurableStore();
+  const key = userKey(userId);
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      const current = await store.getWithMetadata(key, { type: 'json' });
+      if (!current || !current.data || !current.etag || current.data.userId !== String(userId)) {
+        throw storeUnavailable('PERSONAL_ALERT_STATE_UNAVAILABLE');
+      }
+      const record = normalizeRecord(current.data, { userId, email: current.data.email || '' });
+      const nextState = normalizePersonalAlertState(await update(normalizePersonalAlertState(record.personalAlertState)));
+      const result = await store.setJSON(key, { ...record, personalAlertState: nextState }, { onlyIfMatch: current.etag });
+      if (result && result.modified) return nextState;
+    } catch (err) {
+      if (err && err.code) throw err;
+      if (attempt === maxAttempts - 1) throw storeUnavailable('PERSONAL_ALERT_STATE_UNAVAILABLE');
+    }
+  }
+  throw storeUnavailable('PERSONAL_ALERT_STATE_CONFLICT');
+}
+
+// Prove the dedup record is durably writable before Telegram is called.
+export async function verifyPersonalAlertStateWritable(userId) {
+  return await updatePersonalAlertState(userId, (state) => state);
+}
+
+export async function reservePersonalAlert(userId, symbol, payload = {}) {
+  const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+  const hash = String(payload.hash || '').slice(0, 300);
+  const nowIso = String(payload.nowIso || new Date().toISOString());
+  const nowMs = Date.parse(nowIso);
+  const cooldownMs = Number(payload.cooldownMs);
+  const reservationMs = Number(payload.reservationMs);
+  if (!/^[A-Z0-9]{2,20}$/.test(normalizedSymbol) || !hash || !Number.isFinite(nowMs)) {
+    throw storeUnavailable('PERSONAL_ALERT_STATE_INVALID_RESERVATION');
+  }
+
+  let outcome = { acquired: false, reason: 'stateUnavailable' };
+  const state = await updatePersonalAlertState(userId, (current) => {
+    const previous = current.sent[normalizedSymbol];
+    if (previous && previous.hash === hash) {
+      outcome = { acquired: false, reason: 'duplicate' };
+      return current;
+    }
+    const lastSentMs = previous && previous.lastSentAt ? Date.parse(previous.lastSentAt) : NaN;
+    if (Number.isFinite(lastSentMs) && Number.isFinite(cooldownMs) && nowMs - lastSentMs < cooldownMs) {
+      outcome = { acquired: false, reason: 'cooldown' };
+      return current;
+    }
+
+    const pending = current.pending[normalizedSymbol];
+    if (pending) {
+      const reservedAtMs = pending.reservedAt ? Date.parse(pending.reservedAt) : NaN;
+      const fresh = !Number.isFinite(reservedAtMs)
+        || !Number.isFinite(reservationMs)
+        || nowMs - reservedAtMs < reservationMs;
+      if (fresh) {
+        outcome = { acquired: false, reason: 'inFlight' };
+        return current;
+      }
+    }
+
+    outcome = { acquired: true, reason: null };
+    return {
+      ...current,
+      pending: {
+        ...current.pending,
+        [normalizedSymbol]: { hash, reservedAt: nowIso },
+      },
+    };
+  });
+  return { ...outcome, state };
+}
+
+export async function markPersonalAlertSent(userId, symbol, payload = {}) {
+  const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+  if (!/^[A-Z0-9]{2,20}$/.test(normalizedSymbol)) throw storeUnavailable('PERSONAL_ALERT_STATE_INVALID_SYMBOL');
+  return await updatePersonalAlertState(userId, (state) => {
+    const pending = { ...state.pending };
+    delete pending[normalizedSymbol];
+    return {
+      ...state,
+      pending,
+      sent: {
+        ...state.sent,
+        [normalizedSymbol]: {
+          lastSentAt: String(payload.lastSentAt || new Date().toISOString()),
+          hash: String(payload.hash || '').slice(0, 300),
+        },
+      },
+      lastErrorAt: null,
+      lastErrorCode: null,
+    };
+  });
+}
+
+export async function recordPersonalAlertError(userId, errorCode, nowIso = new Date().toISOString(), symbol = null, hash = null) {
+  return await updatePersonalAlertState(userId, (state) => {
+    const pending = { ...state.pending };
+    const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+    if (pending[normalizedSymbol] && (!hash || pending[normalizedSymbol].hash === hash)) delete pending[normalizedSymbol];
+    return {
+      ...state,
+      pending,
+      lastErrorAt: nowIso,
+      lastErrorCode: String(errorCode || 'PERSONAL_ALERT_ERROR').slice(0, 80),
+    };
+  });
+}
 export function __setPersonalWatchBlobStoreForTest(store) {
   _blobStore = store;
   _backendName = store ? 'blobs' : 'memory';
