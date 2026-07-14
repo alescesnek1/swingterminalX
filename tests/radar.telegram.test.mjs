@@ -272,7 +272,7 @@ test('Env hard-kill disables Telegram fail-closed', () => {
   assert.equal(isTelegramHardDisabled({ RADAR_TELEGRAM_ENABLED: 'true', CRON_ALERTS_ENABLED: 'false' }), true);
 });
 
-test('Repo guard: api.telegram.org usage limited to the two authorized senders (cron-alerts RADAR + morning-briefing)', () => {
+test('Repo guard: api.telegram.org usage limited to the three authorized senders', () => {
   const root = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
   const hits = [];
   const scan = (dir) => {
@@ -296,6 +296,15 @@ test('Repo guard: api.telegram.org usage limited to the two authorized senders (
     // independent of the RADAR ENTRY_READY path). It is allowed to call the
     // Telegram API from its own dedicated function.
     if (normalized.endsWith('netlify/functions/morning-briefing.mjs')) continue;
+    // Personal Watch is an explicitly-authorized trade-alert fan-out. It must
+    // stay default-off and import the existing confirmed RADAR selector.
+    if (normalized.endsWith('netlify/functions/personal-alerts.mjs')) {
+      const source = fs.readFileSync(hit, 'utf8');
+      assert.match(source, /PERSONAL_ALERTS_ENABLED\s*!==\s*['"]true['"]/);
+      assert.match(source, /selectRadarEntryAlerts/);
+      assert.doesNotMatch(source, /function\s+(evaluateConfirmedRadarEntryReady|isConfirmedRadarEntryReady)/);
+      continue;
+    }
     assert.fail(`Found illegal telegram api usage: ${hit}`);
   }
 });
