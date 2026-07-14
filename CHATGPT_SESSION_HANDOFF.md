@@ -243,15 +243,18 @@ email allowlist (§9), not a billing tier.
   `feat/personal-watch-alert-sender`):** `netlify/functions/personal-alerts.mjs`
   is a scheduled, disabled-by-default fan-out of the same confirmed/fresh
   `ENTRY_READY` selection exported by `cron-alerts.mjs`. It sends only when
-  `PERSONAL_ALERTS_ENABLED === 'true'`, a Telegram token exists, Netlify Blobs
-  can durably enumerate recipients and persist dedup state, and the user has a
+  `PERSONAL_ALERTS_ENABLED === 'true'`, the internal scheduler secret/header
+  authenticates, a Telegram token exists, Netlify Blobs can durably enumerate
+  recipients and persist dedup state, and the user has a
   saved personal chat id plus a matching selected-symbol watch. Per-user/symbol
   60-minute cooldown + setup-hash dedup, an ETag-conditional per-symbol
   reservation against overlapping runs, caps of 5/user and 100/run,
   aggregate-only logs/responses, and mark-after-success behavior are covered by
-  `tests/personal-alerts.test.mjs`. Memory fallback, missing state/token, and
-  Telegram failures send nothing or fail closed. Production remains OFF; this
-  branch is local only and requires security review before push/deploy/enable.
+  `tests/personal-alerts.test.mjs`. `next_run` is metadata only; public HTTP
+  requests without the scheduler secret/header cannot trigger fan-out. Memory
+  fallback, missing state/token, missing scheduler auth, and Telegram failures
+  send nothing or fail closed. Production remains OFF; this branch is local
+  only and requires security review before push/deploy/enable.
 - There is **no** broker support inbox, no `/reply` command, no `/admin_summary`.
   Don't invent them.
 

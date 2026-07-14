@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
 import handler, {
+  isSchedulerAuthenticated,
   buildPersonalAlertMessage,
   personalAlertDecision,
   sendPersonalTelegram,
@@ -371,6 +372,63 @@ test('manual body cannot trigger an arbitrary send', async () => {
     if (savedToken === undefined) delete process.env.TG_BOT_TOKEN;
     else process.env.TG_BOT_TOKEN = savedToken;
   }
+});
+
+test('forged next_run body cannot authenticate a sender', async () => {
+  const savedEnabled = process.env.PERSONAL_ALERTS_ENABLED;
+  const savedToken = process.env.TG_BOT_TOKEN;
+  const savedSecret = process.env.PERSONAL_ALERTS_SCHEDULER_SECRET;
+  const originalFetch = globalThis.fetch;
+  let sends = 0;
+  process.env.PERSONAL_ALERTS_ENABLED = 'true';
+  process.env.TG_BOT_TOKEN = 'test-token';
+  process.env.PERSONAL_ALERTS_SCHEDULER_SECRET = 'test-scheduler-secret';
+  globalThis.fetch = async () => { sends += 1; return new Response('{}', { status: 200 }); };
+  try {
+    const req = new Request('https://example.test/.netlify/functions/personal-alerts', {
+      method: 'POST',
+      body: JSON.stringify({ next_run: '2026-07-13T10:00:00.000Z', symbol: 'BTCUSDT' }),
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const response = await handler(req);
+    assert.equal(response.status, 401);
+    assert.equal(sends, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (savedEnabled === undefined) delete process.env.PERSONAL_ALERTS_ENABLED;
+    else process.env.PERSONAL_ALERTS_ENABLED = savedEnabled;
+    if (savedToken === undefined) delete process.env.TG_BOT_TOKEN;
+    else process.env.TG_BOT_TOKEN = savedToken;
+    if (savedSecret === undefined) delete process.env.PERSONAL_ALERTS_SCHEDULER_SECRET;
+    else process.env.PERSONAL_ALERTS_SCHEDULER_SECRET = savedSecret;
+  }
+});
+
+test('missing or wrong scheduler secret rejects enabled invocation', () => {
+  const env = { PERSONAL_ALERTS_ENABLED: 'true', PERSONAL_ALERTS_SCHEDULER_SECRET: 'expected-secret' };
+  const missing = new Request('https://example.test/personal-alerts', { method: 'POST', body: '{}' });
+  const wrong = new Request('https://example.test/personal-alerts', {
+    method: 'POST',
+    headers: { 'x-terminal-scheduler-secret': 'wrong-secret' },
+    body: JSON.stringify({ next_run: 'forged' }),
+  });
+  assert.equal(isSchedulerAuthenticated(missing, env), false);
+  assert.equal(isSchedulerAuthenticated(wrong, env), false);
+  assert.equal(isSchedulerAuthenticated(missing, { PERSONAL_ALERTS_ENABLED: 'true' }), false);
+});
+
+test('valid scheduler secret authenticates without trusting request body fields', async () => {
+  const env = { ...ENV_ENABLED, PERSONAL_ALERTS_SCHEDULER_SECRET: 'test-scheduler-secret' };
+  const req = new Request('https://example.test/personal-alerts', {
+    method: 'POST',
+    headers: { 'x-terminal-scheduler-secret': 'test-scheduler-secret' },
+    body: JSON.stringify({ next_run: 'metadata-only' }),
+  });
+  assert.equal(isSchedulerAuthenticated(req, env), true);
+  let sends = 0;
+  const { result } = await run({ env, sendMessage: async () => { sends += 1; return { ok: true }; } });
+  assert.equal(result.sent, 1);
+  assert.equal(sends, 1);
 });
 
 test('source guard: sender reuses cron gate and has no trading or browser-storage paths', () => {

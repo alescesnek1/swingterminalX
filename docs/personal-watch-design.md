@@ -111,8 +111,13 @@ RADAR sender and morning briefing behavior are unchanged.
 Safety and delivery contract:
 
 - Delivery is **off by default**. Sending is possible only when
-  `PERSONAL_ALERTS_ENABLED=true` exactly and the existing `TG_BOT_TOKEN` is
-  available. No production environment value is changed by this phase.
+  `PERSONAL_ALERTS_ENABLED=true` exactly, the configured scheduler secret is
+  presented in `x-terminal-scheduler-secret`, and the existing `TG_BOT_TOKEN`
+  is available. No production environment value is changed by this phase.
+- `PERSONAL_ALERTS_SCHEDULER_SECRET` plus the matching internal scheduler
+  header is required before fan-out. Public HTTP requests are rejected even
+  when they include a forged `next_run`; `next_run` is schedule metadata only,
+  never authentication.
 - A recipient must have a valid saved personal chat id and an explicit matching
   symbol in `watches`. There is no watch-all mode and no custom condition path.
 - Scheduled delivery enumerates the existing per-user records from Netlify
@@ -137,9 +142,11 @@ Safety and delivery contract:
   alert state is backend-only.
 
 Safe enablement later requires a separate reviewed production change: verify
-Netlify Blobs durability and the Telegram token, then set only
-`PERSONAL_ALERTS_ENABLED=true`. Do not place real secrets or chat ids in code,
-docs, URLs, tests, or logs. Turning the gate off or leaving it unset sends zero.
+Netlify Blobs durability, configure the scheduler to send the matching secret
+header without exposing it to public callers, verify the Telegram token, then
+set `PERSONAL_ALERTS_ENABLED=true`. Do not place real secrets or chat ids in
+code, docs, URLs, tests, or logs. Turning the gate off, leaving the scheduler
+secret unset, or omitting the header sends zero.
 
 
 ## Non-blocking open decision

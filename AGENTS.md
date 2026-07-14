@@ -34,7 +34,9 @@ Do not rediscover the whole repo from scratch unless these are clearly stale.
   `netlify/functions/personal-alerts.mjs` (personal confirmed RADAR
   `ENTRY_READY` fan-out). The personal sender must remain disabled by default
   behind `PERSONAL_ALERTS_ENABLED === 'true'`, must reuse the confirmed gate
-  exported by `cron-alerts.mjs`, and must never log or return raw chat ids.
+  exported by `cron-alerts.mjs`, require the configured scheduler secret/header
+  for invocation, and must never log or return raw chat ids. Request bodies,
+  including `next_run`, are metadata only and never authentication.
   No new sender may bypass that gate.
 - **No secrets / keys / tokens / customer PII** in code, docs, URLs, or commits.
 

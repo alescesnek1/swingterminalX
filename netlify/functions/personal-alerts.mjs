@@ -5,6 +5,7 @@
 // users with a matching selected-symbol watch and a saved personal chat id.
 // Delivery is disabled unless PERSONAL_ALERTS_ENABLED is exactly "true".
 
+import { timingSafeEqual } from 'node:crypto';
 import { loadFleet } from './_fleet-store.mjs';
 import {
   RADAR_TELEGRAM_COOLDOWN_MS,
@@ -24,6 +25,7 @@ import {
 export const PERSONAL_ALERTS_PER_USER_CAP = 5;
 export const PERSONAL_ALERTS_GLOBAL_CAP = 100;
 export const PERSONAL_ALERT_RESERVATION_MS = RADAR_TELEGRAM_COOLDOWN_MS;
+export const PERSONAL_ALERTS_SCHEDULER_HEADER = 'x-terminal-scheduler-secret';
 
 const DEFAULT_STORE = {
   getPersonalAlertState,
@@ -284,18 +286,20 @@ export async function runPersonalAlerts(deps = {}) {
   return summary;
 }
 
-async function isScheduledInvocation(req) {
-  if (!req || typeof req.clone !== 'function') return true;
-  try {
-    const body = await req.clone().json();
-    return !!(body && typeof body.next_run === 'string' && body.next_run);
-  } catch {
-    return false;
-  }
+export function isSchedulerAuthenticated(req, env = process.env) {
+  const expected = String(env.PERSONAL_ALERTS_SCHEDULER_SECRET || '').trim();
+  const provided = req && req.headers && typeof req.headers.get === 'function'
+    ? String(req.headers.get(PERSONAL_ALERTS_SCHEDULER_HEADER) || '').trim()
+    : '';
+  if (!expected || !provided) return false;
+  const expectedBytes = Buffer.from(expected, 'utf8');
+  const providedBytes = Buffer.from(provided, 'utf8');
+  return expectedBytes.length === providedBytes.length
+    && timingSafeEqual(expectedBytes, providedBytes);
 }
 
 export default async function handler(req) {
-  if (process.env.PERSONAL_ALERTS_ENABLED === 'true' && !(await isScheduledInvocation(req))) {
+  if (process.env.PERSONAL_ALERTS_ENABLED === 'true' && !isSchedulerAuthenticated(req)) {
     return new Response(JSON.stringify({ ok: false, sent: 0, error: 'SCHEDULED_INVOCATION_REQUIRED' }), {
       status: 401,
       headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
