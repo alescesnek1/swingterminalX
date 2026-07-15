@@ -255,6 +255,27 @@ email allowlist (§9), not a billing tier.
   fallback, missing state/token, missing scheduler auth, and Telegram failures
   send nothing or fail closed. Production remains OFF; this branch is local
   only and requires security review before push/deploy/enable.
+- **Personal watch — Phase 5 external scheduler (local branch,
+  `feat/personal-alerts-external-scheduler`):** `personal-alerts.mjs` no
+  longer declares a native Netlify `config.schedule` — Netlify's native
+  scheduled trigger cannot attach the `x-terminal-scheduler-secret` header
+  the function requires, so leaving it in place would have made real sending
+  permanently unreachable (every native invocation would 401). The approved
+  scheduler is now `.github/workflows/personal-alerts.yml`, a GitHub Actions
+  `workflow_dispatch` + 5-minute `schedule` job that `POST`s the function URL
+  with `x-terminal-scheduler-secret` sourced from the GitHub secret
+  `PERSONAL_ALERTS_SCHEDULER_SECRET`; it no-ops (`exit 0`) if that secret
+  isn't configured and never echoes it. The handler also now requires the
+  request method to be `POST` (in addition to the header) before reaching
+  fan-out when enabled — a direct `GET` is rejected even with a correct
+  header. `next_run` is still never trusted as auth. This is scheduler
+  plumbing only: `PERSONAL_ALERTS_ENABLED` remains absent/unset in
+  production, no env values changed, and first real send still requires a
+  separate enablement runbook + owner approval. Covered by
+  `tests/personal-alerts.test.mjs` (new gate tests) and
+  `tests/personal-alerts-scheduler-workflow.test.mjs` (workflow source
+  guards). Production remains OFF; this branch is local only and requires
+  review before push/deploy.
 - There is **no** broker support inbox, no `/reply` command, no `/admin_summary`.
   Don't invent them.
 

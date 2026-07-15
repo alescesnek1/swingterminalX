@@ -1,0 +1,71 @@
+name: Personal Alerts Scheduler
+
+# External authenticated scheduler for netlify/functions/personal-alerts.mjs.
+#
+# WHY THIS EXISTS: Netlify's native scheduled-function trigger cannot attach a
+# custom request header. personal-alerts.mjs requires the
+# x-terminal-scheduler-secret header before it will run any fan-out, and
+# deliberately never trusts the `next_run` body Netlify's native scheduler
+# sends instead (a public, unauthenticated signal must never be able to
+# trigger a Telegram send). This workflow is the approved external caller that
+# CAN attach that header. See docs/personal-watch-design.md (Phase 5).
+#
+# This workflow does NOT enable sending by itself. Production sending stays
+# off until the PERSONAL_ALERTS_ENABLED flag is intentionally turned on,
+# separately, in Netlify env (a separate, owner-approved enablement step).
+# While that flag is off, every invocation below returns a clean disabled
+# JSON response (`sent:0`) and never calls Telegram.
+#
+# If the PERSONAL_ALERTS_SCHEDULER_SECRET GitHub secret is not configured,
+# this workflow no-ops safely (exits 0 without calling the endpoint).
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "*/5 * * * *"
+
+concurrency:
+  group: personal-alerts-scheduler
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  personal-alerts:
+    name: Invoke personal alerts
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Call personal-alerts with scheduler secret
+        env:
+          PERSONAL_ALERTS_SCHEDULER_SECRET: ${{ secrets.PERSONAL_ALERTS_SCHEDULER_SECRET }}
+          PERSONAL_ALERTS_URL: https://swingterminalx.netlify.app/.netlify/functions/personal-alerts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${PERSONAL_ALERTS_SCHEDULER_SECRET:-}" ]; then
+            echo "personal-alerts: scheduler secret not configured; skipping (no-op)."
+            exit 0
+          fi
+
+          tmp="$(mktemp)"
+          status="$(
+            curl -sS -o "$tmp" -w "%{http_code}" \
+              -X POST "$PERSONAL_ALERTS_URL" \
+              -H "content-type: application/json" \
+              -H "x-terminal-scheduler-secret: ${PERSONAL_ALERTS_SCHEDULER_SECRET}" \
+              --data '{}'
+          )"
+
+          # Status + response body only. The response body is a safe aggregate
+          # (counts and codes only — see personal-alerts.mjs); the secret
+          # itself is never echoed or printed anywhere in this step.
+          echo "personal-alerts status=${status}"
+          cat "$tmp"
+
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+            echo "personal-alerts: non-2xx response" >&2
+            exit 1
+          fi

@@ -1,4 +1,11 @@
-// Scheduled per-user Personal Watch Telegram fan-out.
+// Per-user Personal Watch Telegram fan-out, invoked by an external
+// authenticated scheduler (see .github/workflows/personal-alerts.yml).
+//
+// This is NOT a native Netlify scheduled function. Netlify's native scheduled
+// trigger cannot attach a custom request header, and this endpoint requires
+// the x-terminal-scheduler-secret header to authenticate — it deliberately
+// never trusts the `next_run` body Netlify's native scheduler sends instead.
+// See docs/personal-watch-design.md (Phase 5) for the full rationale.
 //
 // This function never creates a signal. It reuses cron-alerts.mjs selection for
 // fully confirmed, fresh RADAR ENTRY_READY candidates, then delivers only to
@@ -299,11 +306,19 @@ export function isSchedulerAuthenticated(req, env = process.env) {
 }
 
 export default async function handler(req) {
-  if (process.env.PERSONAL_ALERTS_ENABLED === 'true' && !isSchedulerAuthenticated(req)) {
-    return new Response(JSON.stringify({ ok: false, sent: 0, error: 'SCHEDULED_INVOCATION_REQUIRED' }), {
-      status: 401,
-      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
-    });
+  const enabled = process.env.PERSONAL_ALERTS_ENABLED === 'true';
+  if (enabled) {
+    // Only a POST carrying the valid scheduler secret may reach the fan-out
+    // pipeline. A GET (or any other method) is rejected even with a correct
+    // header — the external scheduler always POSTs, so this is defense in
+    // depth against a direct browser/curl GET ever running fan-out.
+    const method = req && typeof req.method === 'string' ? req.method.toUpperCase() : '';
+    if (method !== 'POST' || !isSchedulerAuthenticated(req)) {
+      return new Response(JSON.stringify({ ok: false, sent: 0, error: 'SCHEDULED_INVOCATION_REQUIRED' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+      });
+    }
   }
   const result = await runPersonalAlerts();
   console.log(`[personal-alerts] enabled=${result.enabled === true} ok=${result.ok === true} alerts=${result.alertsChecked} recipients=${result.recipientsChecked} sent=${result.sent} failed=${result.skipped.failed}`);
@@ -313,6 +328,5 @@ export default async function handler(req) {
   });
 }
 
-export const config = {
-  schedule: '*/5 * * * *',
-};
+// No `config.schedule` here — see the file header. This function is invoked by
+// the external GitHub Actions scheduler, never by Netlify's native cron.
