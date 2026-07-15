@@ -301,6 +301,15 @@ email allowlist (§9), not a billing tier.
   production env changed; `PERSONAL_ALERTS_ENABLED` and the new diagnostic
   flag both remain unset. Production remains OFF; this branch is local
   only and requires review before push/deploy.
+- **Personal watch diagnostic target helper (this branch):** the authenticated
+  Cockpit endpoint `/api/cockpit-personal-watch-diagnostic-target` returns the
+  current user's exact backend `identity.userId` as a copy-only value plus
+  aggregate `hasChat` / `watchCount` / `exactlyOneWatch` status. It reads only
+  that user's single record and never returns chat IDs, secrets, or records.
+  The Personal Alerts UI copies the value through the browser clipboard without
+  rendering it. The diagnostic target is never a Telegram chat ID, email, name,
+  JWT token, storage key, or masked ID; keep diagnostic sending disabled while
+  configuring it, enable it for one attended workflow run only, then disable it.
 - There is **no** broker support inbox, no `/reply` command, no `/admin_summary`.
   Don't invent them.
 

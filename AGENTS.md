@@ -71,6 +71,7 @@ Do not rediscover the whole repo from scratch unless these are clearly stale.
   - It must load exactly one target record via a single-key lookup, never
     an enumeration of all recipients, and must never log or return a raw
     chat id or raw user id.
+- **Diagnostic target setup:** `PERSONAL_ALERTS_DIAGNOSTIC_TARGET_USER_ID` must be the raw backend `identity.userId`, never a Telegram chat ID, email, name, JWT token, storage key, or masked ID. Use the authenticated Cockpit helper to copy the exact current-user value directly into Netlify; never paste it into chat, logs, or issues. Keep diagnostic sending disabled while configuring it, enable it only for one attended workflow run, then disable it again.
 - **No secrets / keys / tokens / customer PII** in code, docs, URLs, or commits.
 
 ## Git / deploy

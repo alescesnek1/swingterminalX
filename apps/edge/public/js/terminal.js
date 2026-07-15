@@ -4853,6 +4853,7 @@ function _cpRefreshSymbolList() {
 // ─────────────────────────────────────────────────────────────
 const PERSONAL_WATCH_ENDPOINT = '/api/cockpit-personal-watch-settings';
 const PERSONAL_WATCH_LIST_ENDPOINT = '/api/cockpit-personal-watch-list';
+const PERSONAL_WATCH_DIAGNOSTIC_ENDPOINT = '/api/cockpit-personal-watch-diagnostic-target';
 let PersonalWatch = { model: null, busy: false, watchModel: null, watchBusy: false };
 
 function _pwHelpers() { return window.__personalWatch || null; }
@@ -4969,6 +4970,40 @@ async function disconnectPersonalWatch() {
   }
 }
 
+function _pwShowDiagnosticStatus(msg) {
+  const el = document.getElementById('cockpit-pw-diagnostic-status');
+  if (el) el.textContent = msg || '';
+}
+
+async function copyPersonalWatchDiagnosticTarget() {
+  const button = document.getElementById('cockpit-pw-diagnostic-target');
+  if (!button || button.disabled) return;
+  button.disabled = true;
+  _pwShowDiagnosticStatus('Loading diagnostic target status…');
+  try {
+    const authHeaders = await _getAuthHeaders();
+    if (!authHeaders.Authorization) { _pwShowDiagnosticStatus('Sign in to copy the diagnostic target ID.'); return; }
+    const r = await fetch(PERSONAL_WATCH_DIAGNOSTIC_ENDPOINT, { headers: { 'Accept': 'application/json', ...authHeaders } });
+    if (r.status === 401) { _pwShowDiagnosticStatus('Session expired — sign in again.'); return; }
+    if (!r.ok) { _pwShowDiagnosticStatus('Could not load diagnostic target status.'); return; }
+    const body = await r.json();
+    if (!body || body.ok !== true || typeof body.diagnosticTargetUserId !== 'string' || !body.diagnosticTargetUserId) {
+      _pwShowDiagnosticStatus('Diagnostic target ID unavailable.');
+      return;
+    }
+    if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
+      _pwShowDiagnosticStatus('Copy failed — clipboard access is unavailable.');
+      return;
+    }
+    await navigator.clipboard.writeText(body.diagnosticTargetUserId);
+    const count = Number.isInteger(body.watchCount) ? body.watchCount : 0;
+    _pwShowDiagnosticStatus('Copied. hasChat: ' + (body.hasChat === true) + '; watchCount: ' + count + '; exactlyOneWatch: ' + (body.exactlyOneWatch === true));
+  } catch {
+    _pwShowDiagnosticStatus('Copy failed.');
+  } finally {
+    button.disabled = false;
+  }
+}
 // ── Symbol watch-list — selected symbols only, no frontend sending ──
 // Same discipline as the chat-id panel: GET on tab open, POST/DELETE on user
 // action via the shared auth header. It handles symbols only (never a chat id)
@@ -5088,6 +5123,7 @@ function initCockpit() {
   // Cockpit tab opens (see sv()), not here.
   document.getElementById('cockpit-pw-connect')?.addEventListener('click', connectPersonalWatch);
   document.getElementById('cockpit-pw-disconnect')?.addEventListener('click', disconnectPersonalWatch);
+  document.getElementById('cockpit-pw-diagnostic-target')?.addEventListener('click', copyPersonalWatchDiagnosticTarget);
   document.getElementById('cockpit-pw-chatid')?.addEventListener('input', () => _pwShowError(''));
   // Watch-list (Phase 3): add on click/Enter, remove via chip delegation.
   document.getElementById('cockpit-pw-watch-add')?.addEventListener('click', addPersonalWatchSymbol);
