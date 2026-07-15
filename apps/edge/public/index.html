@@ -353,6 +353,13 @@
             <div class="cockpit-personal-watch__error" id="cockpit-pw-error" style="display:none"></div>
             <div class="cockpit-personal-watch__note">Personal alerts are prepared. Delivery is controlled by system safety settings and may be disabled.</div>
             <div class="cockpit-personal-watch__note">Personal direct chat IDs only. Group/channel IDs are not supported yet.</div>
+            <div class="cockpit-personal-watch__diagnostic">
+              <label class="cockpit-label" for="cockpit-pw-diagnostic-target">Diagnostic target ID</label>
+              <div class="cockpit-personal-watch__row">
+                <button type="button" id="cockpit-pw-diagnostic-target">Copy my diagnostic target ID</button>
+              </div>
+              <div class="cockpit-personal-watch__note" id="cockpit-pw-diagnostic-status" aria-live="polite"></div>
+            </div>
 
             <!-- WATCH-LIST — Phase 3. Selected symbols only; saved for a future
                  alerting phase. No Telegram message is sent from here. -->

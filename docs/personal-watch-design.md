@@ -224,7 +224,16 @@ alert.
   `x-terminal-diagnostic-secret` request header.
 - `PERSONAL_ALERTS_DIAGNOSTIC_TARGET_USER_ID` — the one target user id,
   server-side only; never printed, never returned, never accepted from a
-  request body.
+  request body. It must be the raw backend `identity.userId`, not a Telegram
+  chat ID, email, name, JWT token, storage key, or masked ID.
+- The authenticated Cockpit helper
+  (`/api/cockpit-personal-watch-diagnostic-target`) returns only the current
+  user ID for copy-only configuration and safe aggregate watch status. Copy
+  the exact value directly into Netlify; never paste it into chat, logs, or
+  issues.
+- Keep diagnostic sending disabled while configuring the target. Enable
+  `PERSONAL_ALERTS_DIAGNOSTIC_SEND_ENABLED` only for one attended workflow
+  run, then disable it again.
 - The existing `TG_BOT_TOKEN` (shared with the real sender).
 
 **Approved trigger:** `.github/workflows/personal-alerts-diagnostic.yml`,
