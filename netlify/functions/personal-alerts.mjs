@@ -307,7 +307,10 @@ export default async function handler(req) {
   }
   const result = await runPersonalAlerts();
   console.log(`[personal-alerts] enabled=${result.enabled === true} ok=${result.ok === true} alerts=${result.alertsChecked} recipients=${result.recipientsChecked} sent=${result.sent} failed=${result.skipped.failed}`);
-  return result;
+  return new Response(JSON.stringify(result), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+  });
 }
 
 export const config = {

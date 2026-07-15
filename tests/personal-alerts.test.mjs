@@ -404,6 +404,99 @@ test('forged next_run body cannot authenticate a sender', async () => {
   }
 });
 
+test('direct public GET with disabled env returns a clean Response, not an unsupported value', async () => {
+  const savedEnabled = process.env.PERSONAL_ALERTS_ENABLED;
+  const savedToken = process.env.TG_BOT_TOKEN;
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  delete process.env.PERSONAL_ALERTS_ENABLED;
+  delete process.env.TG_BOT_TOKEN;
+  globalThis.fetch = async () => { fetchCalls += 1; return new Response('{}', { status: 200 }); };
+  try {
+    const req = new Request('https://example.test/.netlify/functions/personal-alerts', { method: 'GET' });
+    const response = await handler(req);
+    assert.ok(response instanceof Response);
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.disabled, true);
+    assert.equal(body.sent, 0);
+    assert.equal(fetchCalls, 0);
+    const raw = JSON.stringify(body);
+    assert.doesNotMatch(raw, /NetlifyUserError|at file:|secret|token|12345/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (savedEnabled === undefined) delete process.env.PERSONAL_ALERTS_ENABLED;
+    else process.env.PERSONAL_ALERTS_ENABLED = savedEnabled;
+    if (savedToken === undefined) delete process.env.TG_BOT_TOKEN;
+    else process.env.TG_BOT_TOKEN = savedToken;
+  }
+});
+
+test('direct public GET with enabled env and no scheduler header returns a clean 401 and sends zero', async () => {
+  const savedEnabled = process.env.PERSONAL_ALERTS_ENABLED;
+  const savedToken = process.env.TG_BOT_TOKEN;
+  const savedSecret = process.env.PERSONAL_ALERTS_SCHEDULER_SECRET;
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  process.env.PERSONAL_ALERTS_ENABLED = 'true';
+  process.env.TG_BOT_TOKEN = 'test-token';
+  process.env.PERSONAL_ALERTS_SCHEDULER_SECRET = 'test-scheduler-secret';
+  globalThis.fetch = async () => { fetchCalls += 1; return new Response('{}', { status: 200 }); };
+  try {
+    const req = new Request('https://example.test/.netlify/functions/personal-alerts', { method: 'GET' });
+    const response = await handler(req);
+    assert.ok(response instanceof Response);
+    assert.equal(response.status, 401);
+    const body = await response.json();
+    assert.equal(body.sent, 0);
+    assert.equal(fetchCalls, 0);
+    const raw = JSON.stringify(body);
+    assert.doesNotMatch(raw, /test-scheduler-secret|test-token/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (savedEnabled === undefined) delete process.env.PERSONAL_ALERTS_ENABLED;
+    else process.env.PERSONAL_ALERTS_ENABLED = savedEnabled;
+    if (savedToken === undefined) delete process.env.TG_BOT_TOKEN;
+    else process.env.TG_BOT_TOKEN = savedToken;
+    if (savedSecret === undefined) delete process.env.PERSONAL_ALERTS_SCHEDULER_SECRET;
+    else process.env.PERSONAL_ALERTS_SCHEDULER_SECRET = savedSecret;
+  }
+});
+
+test('wrong scheduler header on direct call returns a clean rejection and sends zero', async () => {
+  const savedEnabled = process.env.PERSONAL_ALERTS_ENABLED;
+  const savedToken = process.env.TG_BOT_TOKEN;
+  const savedSecret = process.env.PERSONAL_ALERTS_SCHEDULER_SECRET;
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  process.env.PERSONAL_ALERTS_ENABLED = 'true';
+  process.env.TG_BOT_TOKEN = 'test-token';
+  process.env.PERSONAL_ALERTS_SCHEDULER_SECRET = 'test-scheduler-secret';
+  globalThis.fetch = async () => { fetchCalls += 1; return new Response('{}', { status: 200 }); };
+  try {
+    const req = new Request('https://example.test/.netlify/functions/personal-alerts', {
+      method: 'POST',
+      headers: { 'x-terminal-scheduler-secret': 'wrong-secret' },
+      body: JSON.stringify({ next_run: 'forged' }),
+    });
+    const response = await handler(req);
+    assert.ok(response instanceof Response);
+    assert.equal(response.status, 401);
+    assert.equal(fetchCalls, 0);
+    const body = await response.json();
+    const raw = JSON.stringify(body);
+    assert.doesNotMatch(raw, /wrong-secret|test-scheduler-secret|test-token/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (savedEnabled === undefined) delete process.env.PERSONAL_ALERTS_ENABLED;
+    else process.env.PERSONAL_ALERTS_ENABLED = savedEnabled;
+    if (savedToken === undefined) delete process.env.TG_BOT_TOKEN;
+    else process.env.TG_BOT_TOKEN = savedToken;
+    if (savedSecret === undefined) delete process.env.PERSONAL_ALERTS_SCHEDULER_SECRET;
+    else process.env.PERSONAL_ALERTS_SCHEDULER_SECRET = savedSecret;
+  }
+});
+
 test('missing or wrong scheduler secret rejects enabled invocation', () => {
   const env = { PERSONAL_ALERTS_ENABLED: 'true', PERSONAL_ALERTS_SCHEDULER_SECRET: 'expected-secret' };
   const missing = new Request('https://example.test/personal-alerts', { method: 'POST', body: '{}' });
