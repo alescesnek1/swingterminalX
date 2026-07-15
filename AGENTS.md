@@ -30,14 +30,16 @@ Do not rediscover the whole repo from scratch unless these are clearly stale.
   reviewed reason (see the microstructure "451" story). Production microstructure
   default is `MARKET_DATA_PROVIDER=none`.
 - **Telegram** may only be sent from `netlify/functions/cron-alerts.mjs`
-  (global confirmed RADAR `ENTRY_READY`), `morning-briefing.mjs`, and
+  (global confirmed RADAR `ENTRY_READY`), `morning-briefing.mjs`,
   `netlify/functions/personal-alerts.mjs` (personal confirmed RADAR
-  `ENTRY_READY` fan-out). The personal sender must remain disabled by default
-  behind `PERSONAL_ALERTS_ENABLED === 'true'`, must reuse the confirmed gate
-  exported by `cron-alerts.mjs`, require the configured scheduler secret/header
-  for invocation, and must never log or return raw chat ids. Request bodies,
-  including `next_run`, are metadata only and never authentication.
-  No new sender may bypass that gate.
+  `ENTRY_READY` fan-out), and `netlify/functions/personal-alerts-diagnostic.mjs`
+  (manual, single-recipient delivery test only — see below). The personal
+  sender must remain disabled by default behind `PERSONAL_ALERTS_ENABLED
+  === 'true'`, must reuse the confirmed gate exported by `cron-alerts.mjs`,
+  require the configured scheduler secret/header for invocation, and must
+  never log or return raw chat ids. Request bodies, including `next_run`,
+  are metadata only and never authentication. No new sender may bypass
+  that gate.
 - **`personal-alerts.mjs` must not use Netlify's native scheduled-function
   trigger** (`export const config = { schedule: ... }`) unless the platform
   can attach an unforgeable auth signal to that trigger — it currently cannot
@@ -48,6 +50,27 @@ Do not rediscover the whole repo from scratch unless these are clearly stale.
   `x-terminal-scheduler-secret` header from a GitHub/CI secret on every
   invocation. **No sender may ever trust request body fields (including
   `next_run`) as authentication.**
+- **`personal-alerts-diagnostic.mjs` is a manual delivery-test path, not a
+  second alert engine.** Rules specific to it:
+  - **Do not use diagnostic send as a substitute for real alert
+    eligibility.** It must never read/write the RADAR fleet, never import
+    or call the RADAR confirmed-entry selector, and never touch the real
+    sender's dedup/cooldown/sent state.
+  - **Do not add a `schedule` to its workflow**
+    (`.github/workflows/personal-alerts-diagnostic.yml` must stay
+    `workflow_dispatch`-only, forever).
+  - **Do not allow a request body to pick the target user or a chat id.**
+    The diagnostic target must come from server-side env only
+    (`PERSONAL_ALERTS_DIAGNOSTIC_TARGET_USER_ID`), never from the request.
+  - It must use its own enable flag
+    (`PERSONAL_ALERTS_DIAGNOSTIC_SEND_ENABLED`) and its own secret/header
+    (`PERSONAL_ALERTS_DIAGNOSTIC_SECRET` /
+    `x-terminal-diagnostic-secret`) — never the real sender's
+    `PERSONAL_ALERTS_ENABLED`, `PERSONAL_ALERTS_SCHEDULER_SECRET`, or
+    `x-terminal-scheduler-secret`.
+  - It must load exactly one target record via a single-key lookup, never
+    an enumeration of all recipients, and must never log or return a raw
+    chat id or raw user id.
 - **No secrets / keys / tokens / customer PII** in code, docs, URLs, or commits.
 
 ## Git / deploy

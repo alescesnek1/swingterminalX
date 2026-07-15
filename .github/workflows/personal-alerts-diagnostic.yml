@@ -1,0 +1,62 @@
+name: Personal Alerts Diagnostic
+
+# Manual-only diagnostic Telegram delivery test for
+# netlify/functions/personal-alerts-diagnostic.mjs.
+#
+# WHY THIS EXISTS: lets the owner confirm Personal Watch Telegram delivery
+# works for a single connected test account, without waiting for (or
+# forcing) a real RADAR confirmed-entry alert. This is completely separate
+# from the real alert sender and its scheduler workflow
+# (personal-alerts.yml): different endpoint, different enable flag,
+# different secret, different header. It must never be scheduled and must
+# never be able to deliver a market alert.
+#
+# This workflow does NOT enable real alert sending and does NOT enable the
+# diagnostic send by itself — both remain owner-controlled Netlify env
+# flags, set separately. If the GitHub secret below is not configured, this
+# workflow no-ops safely (exits 0 without calling the endpoint).
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    name: Invoke personal alerts diagnostic
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Call personal-alerts-diagnostic with diagnostic secret
+        env:
+          PERSONAL_ALERTS_DIAGNOSTIC_SECRET: ${{ secrets.PERSONAL_ALERTS_DIAGNOSTIC_SECRET }}
+          PERSONAL_ALERTS_DIAGNOSTIC_URL: https://swingterminalx.netlify.app/.netlify/functions/personal-alerts-diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${PERSONAL_ALERTS_DIAGNOSTIC_SECRET:-}" ]; then
+            echo "personal-alerts-diagnostic: diagnostic secret not configured; skipping (no-op)."
+            exit 0
+          fi
+
+          tmp="$(mktemp)"
+          status="$(
+            curl -sS -o "$tmp" -w "%{http_code}" \
+              -X POST "$PERSONAL_ALERTS_DIAGNOSTIC_URL" \
+              -H "content-type: application/json" \
+              -H "x-terminal-diagnostic-secret: ${PERSONAL_ALERTS_DIAGNOSTIC_SECRET}" \
+              --data '{}'
+          )"
+
+          # Status + response body only. The response body is a safe aggregate
+          # (booleans/counts/reason codes only — see personal-alerts-diagnostic.mjs);
+          # the secret itself is never echoed or printed anywhere in this step.
+          echo "personal-alerts-diagnostic status=${status}"
+          cat "$tmp"
+
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+            echo "personal-alerts-diagnostic: non-2xx response" >&2
+            exit 1
+          fi

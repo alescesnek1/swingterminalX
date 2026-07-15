@@ -276,6 +276,31 @@ email allowlist (§9), not a billing tier.
   `tests/personal-alerts-scheduler-workflow.test.mjs` (workflow source
   guards). Production remains OFF; this branch is local only and requires
   review before push/deploy.
+- **Personal watch — Phase 5F diagnostic test-send (local branch,
+  `feat/personal-alerts-diagnostic-send`):** a second, fully separate
+  function `netlify/functions/personal-alerts-diagnostic.mjs` lets the owner
+  send one manual Telegram delivery test to a single already-connected
+  test account, without waiting for (or forcing) a real RADAR
+  confirmed-entry alert. It shares nothing with the real sender: its own
+  enable flag `PERSONAL_ALERTS_DIAGNOSTIC_SEND_ENABLED` (must be exactly
+  `'true'`), its own secret `PERSONAL_ALERTS_DIAGNOSTIC_SECRET` /
+  header `x-terminal-diagnostic-secret`, and its own server-only target,
+  `PERSONAL_ALERTS_DIAGNOSTIC_TARGET_USER_ID` (never printed, never
+  returned, never accepted from a request body). It reads exactly one
+  target user's record via a new single-key durable lookup
+  (`getPersonalWatchRecordForDiagnostic` in `_personal-watch-store.mjs`,
+  additive-only, no existing export changed) — never an enumeration of all
+  recipients — and requires that target to have a saved chat id and
+  **exactly one** watched symbol before sending. It never imports/calls the
+  RADAR selector, never reads/writes the RADAR fleet, and never touches the
+  real sender's dedup/cooldown/sent state. The manual trigger is
+  `.github/workflows/personal-alerts-diagnostic.yml`, `workflow_dispatch`
+  only — no schedule — which no-ops if its GitHub secret is unset. Covered
+  by `tests/personal-alerts-diagnostic.test.mjs` (28 tests) and
+  `tests/personal-alerts-diagnostic-workflow.test.mjs` (13 tests). No
+  production env changed; `PERSONAL_ALERTS_ENABLED` and the new diagnostic
+  flag both remain unset. Production remains OFF; this branch is local
+  only and requires review before push/deploy.
 - There is **no** broker support inbox, no `/reply` command, no `/admin_summary`.
   Don't invent them.
 
