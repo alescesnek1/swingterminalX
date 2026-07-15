@@ -195,6 +195,68 @@ change RADAR thresholds/gates to force a signal. The first real send still
 requires a separate, dedicated enablement runbook and explicit owner
 approval — this phase is scheduler plumbing only, not an enablement.
 
+## Phase 5F — Diagnostic test-send (implemented locally)
+
+A second, completely separate function,
+`netlify/functions/personal-alerts-diagnostic.mjs`, lets the owner send a
+single manual Telegram delivery test to one already-connected Personal
+Watch account, without waiting for (or forcing) a real RADAR confirmed-entry
+alert.
+
+**This is not the real alert sender and shares nothing with it:**
+- It does not import or call the RADAR confirmed-entry selector, does not
+  read or write the RADAR fleet, and cannot fan out to more than one user —
+  it reads exactly one server-configured target user's record via a
+  single-key durable lookup (`getPersonalWatchRecordForDiagnostic` in
+  `_personal-watch-store.mjs`), never an enumeration of all recipients.
+- It does not touch the real sender's dedup/cooldown/sent state
+  (`personalAlertState`) at all.
+- It uses its own enable flag, its own secret, and its own header — entirely
+  distinct from the real sender's enable flag and scheduler secret/header.
+- The request body is never read for auth or for target selection; the
+  target user id comes only from server-side Netlify env, set by the owner.
+
+**Required Netlify env** (all separate from the real sender's env):
+- `PERSONAL_ALERTS_DIAGNOSTIC_SEND_ENABLED` — must be exactly `'true'` for a
+  real send; anything else (including absent) returns a clean disabled
+  response and sends zero.
+- `PERSONAL_ALERTS_DIAGNOSTIC_SECRET` — compared timing-safely against the
+  `x-terminal-diagnostic-secret` request header.
+- `PERSONAL_ALERTS_DIAGNOSTIC_TARGET_USER_ID` — the one target user id,
+  server-side only; never printed, never returned, never accepted from a
+  request body.
+- The existing `TG_BOT_TOKEN` (shared with the real sender).
+
+**Approved trigger:** `.github/workflows/personal-alerts-diagnostic.yml`,
+`workflow_dispatch` only — **no `schedule`, ever**. It `POST`s the diagnostic
+URL with `x-terminal-diagnostic-secret` from the GitHub secret
+`PERSONAL_ALERTS_DIAGNOSTIC_SECRET`, and no-ops (`exit 0`, no HTTP call) if
+that GitHub secret is not configured.
+
+**Fail-closed gates, in order:** send-enable flag exactly `'true'` →
+diagnostic secret configured → target user id configured → `TG_BOT_TOKEN`
+configured → durable store available → target record found → target has a
+saved chat id → target has **exactly one** watched symbol → Telegram send
+succeeds. Any failure returns a clean, aggregate-only JSON reason
+(`DIAGNOSTIC_DISABLED`, `DIAGNOSTIC_AUTH_REQUIRED`,
+`DIAGNOSTIC_SECRET_NOT_CONFIGURED`, `DIAGNOSTIC_TARGET_NOT_CONFIGURED`,
+`DIAGNOSTIC_TOKEN_MISSING`, `DIAGNOSTIC_STORE_UNAVAILABLE`,
+`DIAGNOSTIC_TARGET_NOT_FOUND`, `DIAGNOSTIC_TARGET_NO_CHAT`,
+`DIAGNOSTIC_TARGET_WATCH_COUNT_NOT_ONE`, `DIAGNOSTIC_TELEGRAM_FAILED`) and
+`sent:0`; `sent:1` only after a genuine Telegram API success.
+
+The diagnostic message text explicitly says it is only a delivery test, with
+no market signal and no trading action — it can never be mistaken for a real
+RADAR alert. **Diagnostic send must never be used as a substitute for real
+alert eligibility, must never bypass RADAR for normal alerting, must never
+change RADAR thresholds/gates, must never trigger trading/execution, and
+should be disabled again (`PERSONAL_ALERTS_DIAGNOSTIC_SEND_ENABLED` unset or
+not `'true'`) immediately after one test.** No chat ids, user ids, or
+secrets are ever printed in responses, logs, docs, issues, or prompts.
+
+Covered by `tests/personal-alerts-diagnostic.test.mjs` and
+`tests/personal-alerts-diagnostic-workflow.test.mjs`.
+
 ## Non-blocking open decision
 
 **Group/channel chat IDs** are out of scope through at least Phase 3.

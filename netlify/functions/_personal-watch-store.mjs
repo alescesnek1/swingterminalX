@@ -284,6 +284,24 @@ export async function listPersonalWatchRecipients() {
   }
 }
 
+// Phase 5F diagnostic-only helper. Reads exactly ONE user's record by a
+// server-configured target id — a single-key durable read, never an
+// enumeration of all recipients. Requires the durable Blobs backend, same
+// as every other sender-side helper above: the diagnostic path must fail
+// closed exactly like the real sender if Blobs is unavailable.
+export async function getPersonalWatchRecordForDiagnostic(targetUserId) {
+  const store = await requireDurableStore();
+  const id = String(targetUserId || '');
+  try {
+    const data = await store.get(userKey(id), { type: 'json' });
+    const found = !!(data && typeof data === 'object' && String(data.userId || '') === id);
+    const record = normalizeRecord(data, { userId: id, email: (data && data.email) || '' });
+    return { found, record };
+  } catch {
+    throw storeUnavailable();
+  }
+}
+
 export async function getPersonalAlertState(userId) {
   const store = await requireDurableStore();
   try {

@@ -305,6 +305,19 @@ test('Repo guard: api.telegram.org usage limited to the three authorized senders
       assert.doesNotMatch(source, /function\s+(evaluateConfirmedRadarEntryReady|isConfirmedRadarEntryReady)/);
       continue;
     }
+    // Personal Watch diagnostic test-send is a separate, manual-only,
+    // single-recipient delivery test. It must never touch RADAR at all (no
+    // confirmed-entry selector, no fleet read/write, no recipient
+    // enumeration) and must stay behind its own dedicated enable flag,
+    // independent of the real sender's PERSONAL_ALERTS_ENABLED.
+    if (normalized.endsWith('netlify/functions/personal-alerts-diagnostic.mjs')) {
+      const source = fs.readFileSync(hit, 'utf8');
+      assert.match(source, /PERSONAL_ALERTS_DIAGNOSTIC_SEND_ENABLED\s*!==\s*['"]true['"]/);
+      assert.doesNotMatch(source, /selectRadarEntryAlerts/);
+      assert.doesNotMatch(source, /loadFleet|saveFleet/);
+      assert.doesNotMatch(source, /listPersonalWatchRecipients/);
+      continue;
+    }
     assert.fail(`Found illegal telegram api usage: ${hit}`);
   }
 });
