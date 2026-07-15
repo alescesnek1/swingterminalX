@@ -148,6 +148,52 @@ set `PERSONAL_ALERTS_ENABLED=true`. Do not place real secrets or chat ids in
 code, docs, URLs, tests, or logs. Turning the gate off, leaving the scheduler
 secret unset, or omitting the header sends zero.
 
+## Phase 5 — External authenticated scheduler (implemented locally)
+
+**Native Netlify scheduled functions are not used for `personal-alerts.mjs`.**
+`personal-alerts.mjs` used to declare `export const config = { schedule: '*/5 * * * *' }`,
+registering it as a native Netlify scheduled function. That trigger has been
+removed.
+
+**Why:** a native Netlify scheduled invocation cannot attach a custom request
+header — it identifies itself only by a `next_run` field in the POST body.
+`personal-alerts.mjs` requires the `x-terminal-scheduler-secret` header to
+authenticate before any fan-out, and deliberately never trusts `next_run` as
+authentication (a public, unauthenticated signal must never be able to
+trigger a Telegram send). With the native schedule in place, every 5-minute
+invocation would have arrived without that header, hit a hard 401, and
+production sending would be permanently unreachable — dead code with 401 log
+noise, not a security hole, but not workable either.
+
+**Approved scheduler path:** `.github/workflows/personal-alerts.yml`, a
+GitHub Actions workflow (`workflow_dispatch` + `schedule: "*/5 * * * *"`)
+that `POST`s `https://swingterminalx.netlify.app/.netlify/functions/personal-alerts`
+with the `x-terminal-scheduler-secret` header, sourced from the GitHub
+repository secret `PERSONAL_ALERTS_SCHEDULER_SECRET`. It no-ops safely
+(`exit 0`, no HTTP call) when that GitHub secret is not configured, and never
+echoes/prints the secret value. This is the only approved caller; there is no
+other production scheduler for this function.
+
+`personal-alerts.mjs`'s handler now also requires the request **method** to be
+`POST` (in addition to the header) before it will reach the fan-out pipeline
+when `PERSONAL_ALERTS_ENABLED === 'true'` — a direct `GET`, even with a
+correct header, is rejected with a clean `401` and never runs fan-out. This is
+additional defense in depth; the external scheduler always POSTs.
+
+**This phase changes nothing about activation.** Real sending still requires,
+separately and all together:
+- `PERSONAL_ALERTS_ENABLED === 'true'` exactly, set intentionally in Netlify
+  production env (still absent/unset as of this phase).
+- The Telegram bot token (`TG_BOT_TOKEN`) configured in Netlify env.
+- The GitHub secret `PERSONAL_ALERTS_SCHEDULER_SECRET` configured to match the
+  Netlify env value of the same name.
+
+Sending remains off until `PERSONAL_ALERTS_ENABLED` is intentionally enabled
+by the owner. **Do not** trust `next_run` for auth, weaken or bypass the
+scheduler-secret check, add a watch-all mode, add custom conditions, or
+change RADAR thresholds/gates to force a signal. The first real send still
+requires a separate, dedicated enablement runbook and explicit owner
+approval — this phase is scheduler plumbing only, not an enablement.
 
 ## Non-blocking open decision
 

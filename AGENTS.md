@@ -38,6 +38,16 @@ Do not rediscover the whole repo from scratch unless these are clearly stale.
   for invocation, and must never log or return raw chat ids. Request bodies,
   including `next_run`, are metadata only and never authentication.
   No new sender may bypass that gate.
+- **`personal-alerts.mjs` must not use Netlify's native scheduled-function
+  trigger** (`export const config = { schedule: ... }`) unless the platform
+  can attach an unforgeable auth signal to that trigger — it currently cannot
+  (native scheduled invocations identify themselves only via a `next_run`
+  body field, which is not trustworthy as auth). The approved scheduler is
+  the external GitHub Actions workflow `.github/workflows/personal-alerts.yml`
+  (or an equivalent external caller), which must attach the
+  `x-terminal-scheduler-secret` header from a GitHub/CI secret on every
+  invocation. **No sender may ever trust request body fields (including
+  `next_run`) as authentication.**
 - **No secrets / keys / tokens / customer PII** in code, docs, URLs, or commits.
 
 ## Git / deploy

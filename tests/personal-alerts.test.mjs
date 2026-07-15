@@ -497,6 +497,78 @@ test('wrong scheduler header on direct call returns a clean rejection and sends 
   }
 });
 
+test('enabled: GET is rejected even with a correct scheduler header (POST required for fan-out)', async () => {
+  const savedEnabled = process.env.PERSONAL_ALERTS_ENABLED;
+  const savedToken = process.env.TG_BOT_TOKEN;
+  const savedSecret = process.env.PERSONAL_ALERTS_SCHEDULER_SECRET;
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  process.env.PERSONAL_ALERTS_ENABLED = 'true';
+  process.env.TG_BOT_TOKEN = 'test-token';
+  process.env.PERSONAL_ALERTS_SCHEDULER_SECRET = 'test-scheduler-secret';
+  globalThis.fetch = async () => { fetchCalls += 1; return new Response('{}', { status: 200 }); };
+  try {
+    const req = new Request('https://example.test/.netlify/functions/personal-alerts', {
+      method: 'GET',
+      headers: { 'x-terminal-scheduler-secret': 'test-scheduler-secret' },
+    });
+    const response = await handler(req);
+    assert.ok(response instanceof Response);
+    assert.equal(response.status, 401);
+    assert.equal(fetchCalls, 0);
+    const body = await response.json();
+    const raw = JSON.stringify(body);
+    assert.doesNotMatch(raw, /test-scheduler-secret|test-token/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (savedEnabled === undefined) delete process.env.PERSONAL_ALERTS_ENABLED;
+    else process.env.PERSONAL_ALERTS_ENABLED = savedEnabled;
+    if (savedToken === undefined) delete process.env.TG_BOT_TOKEN;
+    else process.env.TG_BOT_TOKEN = savedToken;
+    if (savedSecret === undefined) delete process.env.PERSONAL_ALERTS_SCHEDULER_SECRET;
+    else process.env.PERSONAL_ALERTS_SCHEDULER_SECRET = savedSecret;
+  }
+});
+
+test('enabled: authenticated POST passes the method+auth gate, runs the pipeline, and leaks nothing', async () => {
+  const savedEnabled = process.env.PERSONAL_ALERTS_ENABLED;
+  const savedToken = process.env.TG_BOT_TOKEN;
+  const savedSecret = process.env.PERSONAL_ALERTS_SCHEDULER_SECRET;
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  process.env.PERSONAL_ALERTS_ENABLED = 'true';
+  process.env.TG_BOT_TOKEN = 'test-token';
+  process.env.PERSONAL_ALERTS_SCHEDULER_SECRET = 'test-scheduler-secret';
+  globalThis.fetch = async () => { fetchCalls += 1; return new Response('{}', { status: 200 }); };
+  try {
+    const req = new Request('https://example.test/.netlify/functions/personal-alerts', {
+      method: 'POST',
+      headers: { 'x-terminal-scheduler-secret': 'test-scheduler-secret' },
+      body: '{}',
+    });
+    const response = await handler(req);
+    assert.ok(response instanceof Response);
+    // Never the 401 gate response — this request is authenticated and POST.
+    assert.notEqual(response.status, 401);
+    assert.equal(response.status, 200);
+    // No real recipient/fleet state exists in the test process, so no send
+    // is possible here regardless of branch reached — proves the gate change
+    // alone never causes a Telegram call in this environment.
+    assert.equal(fetchCalls, 0);
+    const body = await response.json();
+    const raw = JSON.stringify(body);
+    assert.doesNotMatch(raw, /test-scheduler-secret|test-token|NetlifyUserError|at file:/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (savedEnabled === undefined) delete process.env.PERSONAL_ALERTS_ENABLED;
+    else process.env.PERSONAL_ALERTS_ENABLED = savedEnabled;
+    if (savedToken === undefined) delete process.env.TG_BOT_TOKEN;
+    else process.env.TG_BOT_TOKEN = savedToken;
+    if (savedSecret === undefined) delete process.env.PERSONAL_ALERTS_SCHEDULER_SECRET;
+    else process.env.PERSONAL_ALERTS_SCHEDULER_SECRET = savedSecret;
+  }
+});
+
 test('missing or wrong scheduler secret rejects enabled invocation', () => {
   const env = { PERSONAL_ALERTS_ENABLED: 'true', PERSONAL_ALERTS_SCHEDULER_SECRET: 'expected-secret' };
   const missing = new Request('https://example.test/personal-alerts', { method: 'POST', body: '{}' });
@@ -538,4 +610,12 @@ test('source guard: sender reuses cron gate and has no trading or browser-storag
   ]) {
     assert.doesNotMatch(source, forbidden);
   }
+});
+
+test('source guard: no native Netlify schedule is registered (external scheduler only)', async () => {
+  const mod = await import('../netlify/functions/personal-alerts.mjs');
+  assert.equal(mod.config, undefined);
+  const source = fs.readFileSync(new URL('../netlify/functions/personal-alerts.mjs', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /export const config/);
+  assert.doesNotMatch(source, /schedule\s*:\s*['"]/);
 });
