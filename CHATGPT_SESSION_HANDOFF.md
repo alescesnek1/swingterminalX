@@ -14,8 +14,8 @@
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
 > _Last synced to repo state: branch
-> `feat/personal-alerts-telegram-failure-classification`, on top of `main` @
-> `f4cf02d` (see §11). Update the commit ref whenever this file is re-synced._
+> `feat/personal-alerts-allowlist-rollout`, on top of `main` @ `4aff022`
+> (see §11). Update the commit ref whenever this file is re-synced._
 
 ---
 
@@ -333,6 +333,33 @@ email allowlist (§9), not a billing tier.
   `tests/personal-alerts-diagnostic.test.mjs` (41 tests total). Production
   remains OFF; this branch is local only and requires review before
   push/deploy.
+- **Personal watch — Phase 5G rollout allowlist (this branch,
+  `feat/personal-alerts-allowlist-rollout`):** before the first real
+  production rollout, the normal sender (`personal-alerts.mjs`) now also
+  requires a new env, `PERSONAL_ALERTS_ALLOWED_USER_IDS` (comma/newline/space
+  separated raw backend `identity.userId` values), whenever
+  `PERSONAL_ALERTS_ENABLED === 'true'`. Absent/empty fails closed
+  (`PERSONAL_ALERTS_ALLOWLIST_EMPTY`, `sent:0`, no Telegram call). A
+  wildcard/global value (`*`, `all`, `any`, `wildcard`, `everyone`) anywhere
+  in the list is invalid and also fails closed
+  (`PERSONAL_ALERTS_ALLOWLIST_INVALID`) — wildcard/"all" mode is
+  intentionally unsupported this phase. A recipient's raw `userId` must be on
+  the parsed allowlist before the existing watch/chat-id checks, before
+  per-user/global caps, and before any Telegram send attempt; disallowed
+  recipients are counted only (`recipientsSkippedByAllowlist`), never
+  logged/returned by id. The response adds only counts —
+  `allowlistEnabled`, `allowedRecipientsConfigured`,
+  `recipientsSkippedByAllowlist` — never the raw allowlisted or skipped ids.
+  This does **not** change the diagnostic sender, the diagnostic target
+  helper, RADAR scoring/gates, or trading/Binance behavior; the existing
+  confirmed `ENTRY_READY` selection, caps, dedup/cooldown/reservation state,
+  and scheduler secret/header gate are all unchanged. First rollout runbook:
+  set `PERSONAL_ALERTS_ALLOWED_USER_IDS` to the owner's own backend user id
+  only (via the diagnostic target helper's copy action — never typed/pasted
+  into chat, logs, or issues), verify, and only then separately enable
+  `PERSONAL_ALERTS_ENABLED=true`. Covered by extended cases in
+  `tests/personal-alerts.test.mjs`. Production remains OFF; this branch is
+  local only and requires review before push/deploy.
 - There is **no** broker support inbox, no `/reply` command, no `/admin_summary`.
   Don't invent them.
 

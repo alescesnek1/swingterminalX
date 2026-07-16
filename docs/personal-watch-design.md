@@ -309,6 +309,56 @@ enable-flag behavior. No raw token, chat id, or user id should ever be
 pasted into chat, logs, or issues when reporting a `telegramFailureKind`.
 Covered by extended cases in `tests/personal-alerts-diagnostic.test.mjs`.
 
+## Phase 5G — Rollout allowlist for normal Personal Alerts (implemented locally)
+
+Before the first real production rollout, normal Personal Alerts
+(`netlify/functions/personal-alerts.mjs`) additionally require a non-empty,
+non-wildcard allowlist of raw backend user ids. **This applies only to the
+normal sender — the diagnostic sender
+(`netlify/functions/personal-alerts-diagnostic.mjs`) is untouched and already
+targets exactly one server-configured user via its own separate path.**
+
+**New env:** `PERSONAL_ALERTS_ALLOWED_USER_IDS` — comma/newline/space
+separated raw backend `identity.userId` values, trimmed, empty entries
+ignored. Get your own id via the Cockpit **"Copy my diagnostic target ID"**
+action (the same helper used to configure the diagnostic target) — never
+type or guess it. **Never paste raw user ids into chat, logs, or issues.**
+
+Gate behavior, in order (all fail-closed):
+- `PERSONAL_ALERTS_ENABLED !== 'true'` — unchanged: disabled, `sent:0`.
+- `PERSONAL_ALERTS_ENABLED === 'true'` but `PERSONAL_ALERTS_ALLOWED_USER_IDS`
+  is absent or parses to zero entries (empty/whitespace-only) — fails closed
+  before loading the RADAR fleet or calling the store: `sent:0`, no Telegram
+  call, `reason: "PERSONAL_ALERTS_ALLOWLIST_EMPTY"`.
+- The allowlist contains a wildcard/global value (`*`, `all`, `any`,
+  `wildcard`, `everyone`, case-insensitive) anywhere in the list — treated as
+  invalid and fails closed the same way: `sent:0`, no Telegram call,
+  `reason: "PERSONAL_ALERTS_ALLOWLIST_INVALID"`. **Wildcard/"all" mode is
+  intentionally unsupported in this phase** — there is no way to opt every
+  recipient in at once.
+- Otherwise, each candidate recipient's raw backend `userId` is checked
+  against the parsed allowlist **before** the existing watch/chat-id checks,
+  before per-user/global caps, and before any Telegram send attempt. A
+  recipient not on the allowlist is counted in
+  `recipientsSkippedByAllowlist` and never reaches Telegram, regardless of a
+  matching watch or a confirmed `ENTRY_READY`.
+
+The response stays aggregate-only and additive: `allowlistEnabled: true`,
+`allowedRecipientsConfigured` (the allowlist's size, a count only),
+`recipientsSkippedByAllowlist` (a count only). **The raw allowlisted or
+skipped user ids are never printed, logged, or returned** — only their
+counts. Everything else — the confirmed RADAR `ENTRY_READY` selection,
+per-user/global caps, dedup/cooldown/reservation state, the scheduler
+secret/header gate, and Telegram send behavior for an allowed recipient — is
+unchanged.
+
+**First rollout runbook:** set `PERSONAL_ALERTS_ALLOWED_USER_IDS=<owner's own
+backend user id>` (and only that id) first, verify behavior, and only then
+separately enable `PERSONAL_ALERTS_ENABLED=true`. Do not widen the allowlist
+or move to a wildcard/all mode without a separate, reviewed decision.
+
+Covered by extended cases in `tests/personal-alerts.test.mjs`.
+
 ## Non-blocking open decision
 
 **Group/channel chat IDs** are out of scope through at least Phase 3.
