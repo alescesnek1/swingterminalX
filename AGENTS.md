@@ -72,6 +72,21 @@ Do not rediscover the whole repo from scratch unless these are clearly stale.
     an enumeration of all recipients, and must never log or return a raw
     chat id or raw user id.
 - **Diagnostic target setup:** `PERSONAL_ALERTS_DIAGNOSTIC_TARGET_USER_ID` must be the raw backend `identity.userId`, never a Telegram chat ID, email, name, JWT token, storage key, or masked ID. Use the authenticated Cockpit helper to copy the exact current-user value directly into Netlify; never paste it into chat, logs, or issues. Keep diagnostic sending disabled while configuring it, enable it only for one attended workflow run, then disable it again.
+- **Diagnostic Telegram failure classification:** on a diagnostic send
+  failure the response may add `telegramFailureKind`, `telegramHttpStatus`,
+  `telegramApiErrorCode`, and `telegramApiDescriptionCode` — a fixed,
+  allowlisted set of codes only (see `docs/personal-watch-design.md`). Never
+  add a field carrying the token, chat id, user id, a raw Telegram request
+  URL, a raw Telegram `description` string, or a raw Personal Watch record.
+  These fields must never appear on a successful send. Common owner actions:
+  `TELEGRAM_UNAUTHORIZED` → verify/replace `TG_BOT_TOKEN`;
+  `TELEGRAM_FORBIDDEN` → open the bot chat and send `/start` (unblock the
+  bot); `TELEGRAM_BAD_REQUEST` / `CHAT_NOT_FOUND_OR_INVALID` →
+  reconnect/save the Telegram chat id using the production bot;
+  `TELEGRAM_RATE_LIMITED` → wait and retry once; `TELEGRAM_SERVER_ERROR` /
+  `TELEGRAM_NETWORK_ERROR` / `TELEGRAM_TIMEOUT` → retry later. As always, no
+  raw token/chat ID/user ID should ever be pasted into chat, logs, or
+  issues.
 - **No secrets / keys / tokens / customer PII** in code, docs, URLs, or commits.
 
 ## Git / deploy

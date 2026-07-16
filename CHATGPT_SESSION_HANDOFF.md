@@ -13,9 +13,9 @@
 > `/reply` or `/admin_summary` support system** here. If you find yourself
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
-> _Last synced to repo state: branch `feat/personal-watch-alert-sender`, on top of
-> `main` @ `e99ca25` (see §11). Update the commit ref whenever this file is
-> re-synced._
+> _Last synced to repo state: branch
+> `feat/personal-alerts-telegram-failure-classification`, on top of `main` @
+> `f4cf02d` (see §11). Update the commit ref whenever this file is re-synced._
 
 ---
 
@@ -301,7 +301,7 @@ email allowlist (§9), not a billing tier.
   production env changed; `PERSONAL_ALERTS_ENABLED` and the new diagnostic
   flag both remain unset. Production remains OFF; this branch is local
   only and requires review before push/deploy.
-- **Personal watch diagnostic target helper (this branch):** the authenticated
+- **Personal watch diagnostic target helper (merged/live):** the authenticated
   Cockpit endpoint `/api/cockpit-personal-watch-diagnostic-target` returns the
   current user's exact backend `identity.userId` as a copy-only value plus
   aggregate `hasChat` / `watchCount` / `exactlyOneWatch` status. It reads only
@@ -310,6 +310,29 @@ email allowlist (§9), not a billing tier.
   rendering it. The diagnostic target is never a Telegram chat ID, email, name,
   JWT token, storage key, or masked ID; keep diagnostic sending disabled while
   configuring it, enable it for one attended workflow run only, then disable it.
+- **Personal watch diagnostic Telegram failure classification (this branch,
+  `feat/personal-alerts-telegram-failure-classification`):** the diagnostic
+  sender (`netlify/functions/personal-alerts-diagnostic.mjs`) previously
+  collapsed every Telegram send failure into a single
+  `error: 'DIAGNOSTIC_TELEGRAM_FAILED'` with no further detail, which made a
+  real failed test-send (invalid/revoked token, bot blocked, bad chat id,
+  rate limit, Telegram 5xx, network/timeout) impossible to diagnose from the
+  response alone. `sendDiagnosticTelegram` now classifies non-2xx HTTP
+  responses (using the status and Telegram's own `error_code`/`description`,
+  the latter only inspected internally for keyword matching and never
+  forwarded) and network/timeout exceptions into a fixed, allowlisted set of
+  codes. On failure, `runDiagnosticSend`'s response additively includes
+  `telegramFailureKind`, `telegramHttpStatus`, `telegramApiErrorCode`, and
+  `telegramApiDescriptionCode` alongside the existing `error` field — never
+  the token, chat id, user id, raw request URL, raw Telegram description, or
+  a raw Personal Watch record. A successful send is unchanged (`sent:1`, no
+  classification fields). This does not change the real sender
+  (`personal-alerts.mjs`), the diagnostic target lookup, or any enable flag.
+  See `docs/personal-watch-design.md` for the full status→code table and
+  owner-action guidance. Covered by extended cases in
+  `tests/personal-alerts-diagnostic.test.mjs` (41 tests total). Production
+  remains OFF; this branch is local only and requires review before
+  push/deploy.
 - There is **no** broker support inbox, no `/reply` command, no `/admin_summary`.
   Don't invent them.
 
