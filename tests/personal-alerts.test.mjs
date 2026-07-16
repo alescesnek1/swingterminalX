@@ -8,12 +8,17 @@ import handler, {
   personalAlertDecision,
   sendPersonalTelegram,
   runPersonalAlerts,
+  parsePersonalAlertsAllowlist,
 } from '../netlify/functions/personal-alerts.mjs';
 import { RADAR_TELEGRAM_COOLDOWN_MS } from '../netlify/functions/cron-alerts.mjs';
 
 const NOW = Date.parse('2026-07-13T10:00:00.000Z');
 const FAKE_CHAT = '12345';
-const ENV_ENABLED = { PERSONAL_ALERTS_ENABLED: 'true', TG_BOT_TOKEN: 'test-token' };
+const ENV_ENABLED = {
+  PERSONAL_ALERTS_ENABLED: 'true',
+  TG_BOT_TOKEN: 'test-token',
+  PERSONAL_ALERTS_ALLOWED_USER_IDS: 'user-a',
+};
 
 function validEntry(overrides = {}) {
   return {
@@ -148,6 +153,125 @@ test('enabled without Telegram token sends nothing', async () => {
   assert.equal(result.ok, false);
   assert.equal(result.error, 'PERSONAL_ALERTS_TELEGRAM_TOKEN_MISSING');
   assert.equal(result.sent, 0);
+});
+
+test('allowlist: enabled but PERSONAL_ALERTS_ALLOWED_USER_IDS absent fails closed', async () => {
+  const { result, sends } = await run({
+    env: { PERSONAL_ALERTS_ENABLED: 'true', TG_BOT_TOKEN: 'test-token' },
+  });
+  assert.equal(result.sent, 0);
+  assert.equal(result.reason, 'PERSONAL_ALERTS_ALLOWLIST_EMPTY');
+  assert.equal(sends, 0);
+});
+
+test('allowlist: enabled but PERSONAL_ALERTS_ALLOWED_USER_IDS is empty/whitespace fails closed', async () => {
+  for (const value of ['', '   ', '\n\n', '  \n  \n  ']) {
+    const { result, sends } = await run({
+      env: { PERSONAL_ALERTS_ENABLED: 'true', TG_BOT_TOKEN: 'test-token', PERSONAL_ALERTS_ALLOWED_USER_IDS: value },
+    });
+    assert.equal(result.sent, 0, JSON.stringify(value));
+    assert.equal(result.reason, 'PERSONAL_ALERTS_ALLOWLIST_EMPTY', JSON.stringify(value));
+    assert.equal(sends, 0, JSON.stringify(value));
+  }
+});
+
+test('allowlist: wildcard/all values are invalid and fail closed', async () => {
+  for (const value of ['*', 'all', 'ALL', 'any', 'user-a,*', '*,user-a']) {
+    const { result, sends } = await run({
+      env: { PERSONAL_ALERTS_ENABLED: 'true', TG_BOT_TOKEN: 'test-token', PERSONAL_ALERTS_ALLOWED_USER_IDS: value },
+    });
+    assert.equal(result.sent, 0, value);
+    assert.equal(result.reason, 'PERSONAL_ALERTS_ALLOWLIST_INVALID', value);
+    assert.equal(sends, 0, value);
+  }
+});
+
+test('allowlist: one allowed user with a matching watch and ENTRY_READY sends exactly once', async () => {
+  const { result, sends } = await run({
+    env: { ...ENV_ENABLED, PERSONAL_ALERTS_ALLOWED_USER_IDS: 'user-a' },
+    store: makeStore([recipient({ userId: 'user-a' })]),
+  });
+  assert.equal(result.sent, 1);
+  assert.equal(sends, 1);
+});
+
+test('allowlist: one disallowed user with a matching watch and ENTRY_READY is skipped, no Telegram call', async () => {
+  const { result, sends } = await run({
+    env: { ...ENV_ENABLED, PERSONAL_ALERTS_ALLOWED_USER_IDS: 'someone-else' },
+    store: makeStore([recipient({ userId: 'user-a' })]),
+  });
+  assert.equal(result.sent, 0);
+  assert.equal(result.recipientsSkippedByAllowlist, 1);
+  assert.equal(sends, 0);
+});
+
+test('allowlist: mixed allowed/disallowed recipients — only the allowed one can send', async () => {
+  const store = makeStore([
+    recipient({ userId: 'user-a', telegramChatId: '12345' }),
+    recipient({ userId: 'user-b', telegramChatId: '67890' }),
+  ]);
+  const { result, sends } = await run({
+    env: { ...ENV_ENABLED, PERSONAL_ALERTS_ALLOWED_USER_IDS: 'user-a' },
+    store,
+  });
+  assert.equal(result.sent, 1);
+  assert.equal(result.recipientsSkippedByAllowlist, 1);
+  assert.equal(sends, 1);
+});
+
+test('allowlist: parsing supports comma, newline, and space separated ids', async () => {
+  const store = makeStore([
+    recipient({ userId: 'user-a', telegramChatId: '12345' }),
+    recipient({ userId: 'user-b', telegramChatId: '67890' }),
+  ]);
+  for (const raw of ['user-a,user-b', 'user-a\nuser-b', 'user-a user-b', '  user-a , \n user-b  ']) {
+    const { result, sends } = await run({
+      env: { ...ENV_ENABLED, PERSONAL_ALERTS_ALLOWED_USER_IDS: raw },
+      store: makeStore([
+        recipient({ userId: 'user-a', telegramChatId: '12345' }),
+        recipient({ userId: 'user-b', telegramChatId: '67890' }),
+      ]),
+    });
+    assert.equal(result.sent, 2, JSON.stringify(raw));
+    assert.equal(result.recipientsSkippedByAllowlist, 0, JSON.stringify(raw));
+    assert.equal(sends, 2, JSON.stringify(raw));
+  }
+});
+
+test('allowlist: response never exposes raw allowlisted or skipped user ids', async () => {
+  const store = makeStore([
+    recipient({ userId: 'user-a', telegramChatId: '12345' }),
+    recipient({ userId: 'user-b', telegramChatId: '67890' }),
+  ]);
+  const { result } = await run({
+    env: { ...ENV_ENABLED, PERSONAL_ALERTS_ALLOWED_USER_IDS: 'user-a' },
+    store,
+  });
+  const raw = JSON.stringify(result);
+  assert.doesNotMatch(raw, /user-a|user-b|12345|67890|someone-else/);
+  assert.equal(result.allowlistEnabled, true);
+  assert.equal(typeof result.allowedRecipientsConfigured, 'number');
+  assert.equal(typeof result.recipientsSkippedByAllowlist, 'number');
+});
+
+test('allowlist: logs never include raw user ids (source guard on the console.log line)', () => {
+  const source = fs.readFileSync(new URL('../netlify/functions/personal-alerts.mjs', import.meta.url), 'utf8');
+  const logLineMatch = source.match(/console\.log\(`[^`]*`\)/);
+  assert.ok(logLineMatch, 'expected a console.log template literal in the handler');
+  assert.doesNotMatch(logLineMatch[0], /userId|allowlist|recipient\b/i);
+});
+
+test('parsePersonalAlertsAllowlist: unit behavior', () => {
+  assert.equal(parsePersonalAlertsAllowlist(undefined).ok, false);
+  assert.equal(parsePersonalAlertsAllowlist('').ok, false);
+  assert.equal(parsePersonalAlertsAllowlist('   ').ok, false);
+  assert.equal(parsePersonalAlertsAllowlist('*').ok, false);
+  assert.equal(parsePersonalAlertsAllowlist('*').reason, 'invalid');
+  assert.equal(parsePersonalAlertsAllowlist('all').ok, false);
+  assert.equal(parsePersonalAlertsAllowlist('ALL').ok, false);
+  const parsed = parsePersonalAlertsAllowlist('user-a, user-b\nuser-c');
+  assert.equal(parsed.ok, true);
+  assert.deepEqual([...parsed.ids].sort(), ['user-a', 'user-b', 'user-c']);
 });
 
 test('no confirmed RADAR ENTRY_READY alerts sends nothing', async () => {
@@ -285,6 +409,7 @@ test('one user send failure does not block another user', async () => {
   ]);
   let attempt = 0;
   const { result } = await run({
+    env: { ...ENV_ENABLED, PERSONAL_ALERTS_ALLOWED_USER_IDS: 'user-a,user-b' },
     store,
     sendMessage: async () => {
       attempt += 1;
@@ -315,7 +440,11 @@ test('global cap skips remaining fan-out', async () => {
     recipient({ userId: 'user-a', telegramChatId: '12345' }),
     recipient({ userId: 'user-b', telegramChatId: '67890' }),
   ]);
-  const { result } = await run({ store, globalCap: 1 });
+  const { result } = await run({
+    env: { ...ENV_ENABLED, PERSONAL_ALERTS_ALLOWED_USER_IDS: 'user-a,user-b' },
+    store,
+    globalCap: 1,
+  });
   assert.equal(result.sent, 1);
   assert.equal(result.skipped.cap, 1);
 });

@@ -50,6 +50,26 @@ Do not rediscover the whole repo from scratch unless these are clearly stale.
   `x-terminal-scheduler-secret` header from a GitHub/CI secret on every
   invocation. **No sender may ever trust request body fields (including
   `next_run`) as authentication.**
+- **`personal-alerts.mjs` requires a rollout allowlist before it may send.**
+  In addition to `PERSONAL_ALERTS_ENABLED === 'true'`, the normal sender now
+  requires `PERSONAL_ALERTS_ALLOWED_USER_IDS` (comma/newline/space separated
+  raw backend `identity.userId` values) to be set and non-empty. Missing or
+  empty fails closed with `reason: "PERSONAL_ALERTS_ALLOWLIST_EMPTY"`. A
+  wildcard/global value (`*`, `all`, `any`, `wildcard`, `everyone`) anywhere
+  in the list is invalid and fails closed with
+  `reason: "PERSONAL_ALERTS_ALLOWLIST_INVALID"` — **wildcard/"all" mode is
+  intentionally unsupported.** Only recipients whose raw `userId` is in the
+  parsed allowlist are ever considered for a send; this check runs before
+  the watch/chat-id checks, before caps, and before any Telegram call. The
+  response only ever returns counts (`allowlistEnabled`,
+  `allowedRecipientsConfigured`, `recipientsSkippedByAllowlist`) — **never
+  the raw allowlisted or skipped user ids.** This gate applies only to the
+  normal sender; it does not apply to `personal-alerts-diagnostic.mjs`,
+  which already targets exactly one server-configured user via its own
+  separate, unrelated path. First rollout: set
+  `PERSONAL_ALERTS_ALLOWED_USER_IDS` to the owner's own backend user id
+  (obtained via the diagnostic target helper's copy action, never typed or
+  guessed) and verify before separately enabling `PERSONAL_ALERTS_ENABLED`.
 - **`personal-alerts-diagnostic.mjs` is a manual delivery-test path, not a
   second alert engine.** Rules specific to it:
   - **Do not use diagnostic send as a substitute for real alert

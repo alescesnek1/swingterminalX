@@ -34,6 +34,31 @@ export const PERSONAL_ALERTS_GLOBAL_CAP = 100;
 export const PERSONAL_ALERT_RESERVATION_MS = RADAR_TELEGRAM_COOLDOWN_MS;
 export const PERSONAL_ALERTS_SCHEDULER_HEADER = 'x-terminal-scheduler-secret';
 
+// First-rollout safety gate: normal fan-out additionally requires an
+// explicit, non-wildcard allowlist of raw backend user ids. This never
+// applies to the diagnostic sender (personal-alerts-diagnostic.mjs), which
+// already targets exactly one server-configured user by its own path.
+const PERSONAL_ALERTS_ALLOWLIST_WILDCARDS = new Set(['*', 'all', 'any', 'wildcard', 'everyone']);
+
+// Parses PERSONAL_ALERTS_ALLOWED_USER_IDS: comma/newline/space separated raw
+// backend user ids, trimmed, empty entries ignored. Never logs or returns the
+// parsed ids themselves — only their count is ever surfaced to callers.
+export function parsePersonalAlertsAllowlist(raw) {
+  const entries = String(raw == null ? '' : raw)
+    .split(/[\s,]+/)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  if (entries.length === 0) {
+    return { ok: false, reason: 'empty', ids: new Set() };
+  }
+  for (const entry of entries) {
+    if (PERSONAL_ALERTS_ALLOWLIST_WILDCARDS.has(entry.toLowerCase())) {
+      return { ok: false, reason: 'invalid', ids: new Set() };
+    }
+  }
+  return { ok: true, reason: null, ids: new Set(entries) };
+}
+
 const DEFAULT_STORE = {
   getPersonalAlertState,
   listPersonalWatchRecipients,
@@ -134,6 +159,16 @@ export async function runPersonalAlerts(deps = {}) {
     return baseSummary({ ok: false, enabled: true, error: 'PERSONAL_ALERTS_TELEGRAM_TOKEN_MISSING' });
   }
 
+  const allowlist = parsePersonalAlertsAllowlist(env.PERSONAL_ALERTS_ALLOWED_USER_IDS);
+  if (!allowlist.ok) {
+    return baseSummary({
+      enabled: true,
+      allowlistEnabled: true,
+      allowedRecipientsConfigured: 0,
+      reason: allowlist.reason === 'invalid' ? 'PERSONAL_ALERTS_ALLOWLIST_INVALID' : 'PERSONAL_ALERTS_ALLOWLIST_EMPTY',
+    });
+  }
+
   const nowMs = Number.isFinite(Number(deps.nowMs)) ? Number(deps.nowMs) : Date.now();
   const nowIso = new Date(nowMs).toISOString();
   const loadRadarFleet = deps.loadFleet || loadFleet;
@@ -172,6 +207,9 @@ export async function runPersonalAlerts(deps = {}) {
   const recipients = recipientResult.recipients;
   const summary = baseSummary({
     enabled: true,
+    allowlistEnabled: true,
+    allowedRecipientsConfigured: allowlist.ids.size,
+    recipientsSkippedByAllowlist: 0,
     alertsChecked: alerts.length,
     recipientsChecked: recipients.length,
   });
@@ -188,6 +226,17 @@ export async function runPersonalAlerts(deps = {}) {
         continue;
       }
 
+      const userId = String(recipient.userId || '');
+      if (!userId) {
+        summary.skipped.failed += 1;
+        summary.ok = false;
+        continue;
+      }
+      if (!allowlist.ids.has(userId)) {
+        summary.recipientsSkippedByAllowlist += 1;
+        continue;
+      }
+
       const watches = Array.isArray(recipient.watches) ? recipient.watches : [];
       if (!watches.some((watch) => String(watch && watch.symbol || '').toUpperCase() === symbol)) {
         summary.skipped.noWatch += 1;
@@ -200,12 +249,6 @@ export async function runPersonalAlerts(deps = {}) {
         continue;
       }
 
-      const userId = String(recipient.userId || '');
-      if (!userId) {
-        summary.skipped.failed += 1;
-        summary.ok = false;
-        continue;
-      }
       if ((sentByUser.get(userId) || 0) >= perUserCap) {
         summary.skipped.cap += 1;
         continue;
