@@ -39,9 +39,40 @@ export function buildDiagnosticMessage(watchSymbol) {
   return lines.join('\n');
 }
 
+// Maps an HTTP status + Telegram's own error_code/description to an
+// allowlisted failure kind + description code. The raw `description` is
+// only ever inspected here for keyword matching and is never forwarded —
+// callers only ever see the fixed codes returned below.
+function classifyTelegramHttpFailure(status, description) {
+  const desc = String(description || '').toLowerCase();
+  if (status === 401) {
+    return { telegramFailureKind: 'TELEGRAM_UNAUTHORIZED', telegramApiDescriptionCode: 'BOT_TOKEN_INVALID_OR_REVOKED' };
+  }
+  if (status === 403) {
+    return { telegramFailureKind: 'TELEGRAM_FORBIDDEN', telegramApiDescriptionCode: 'BOT_BLOCKED_OR_CHAT_NOT_STARTED' };
+  }
+  if (status === 400) {
+    let descriptionCode = 'BAD_REQUEST';
+    if (desc.includes('chat not found') || desc.includes('chat_id is empty') || desc.includes('invalid chat')) {
+      descriptionCode = 'CHAT_NOT_FOUND_OR_INVALID';
+    } else if (desc.includes('message text') || desc.includes('text is empty') || desc.includes('parse entities') || desc.includes('entity')) {
+      descriptionCode = 'MESSAGE_TEXT_INVALID';
+    }
+    return { telegramFailureKind: 'TELEGRAM_BAD_REQUEST', telegramApiDescriptionCode: descriptionCode };
+  }
+  if (status === 429) {
+    return { telegramFailureKind: 'TELEGRAM_RATE_LIMITED', telegramApiDescriptionCode: 'RATE_LIMITED' };
+  }
+  if (status >= 500 && status <= 599) {
+    return { telegramFailureKind: 'TELEGRAM_SERVER_ERROR', telegramApiDescriptionCode: 'TELEGRAM_SERVER_ERROR' };
+  }
+  return { telegramFailureKind: 'TELEGRAM_API_ERROR', telegramApiDescriptionCode: 'UNKNOWN_TELEGRAM_API_ERROR' };
+}
+
 export async function sendDiagnosticTelegram(token, chatId, text, fetchImpl = globalThis.fetch) {
+  let response;
   try {
-    const response = await fetchImpl(`https://api.telegram.org/bot${token}/sendMessage`, {
+    response = await fetchImpl(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -51,10 +82,34 @@ export async function sendDiagnosticTelegram(token, chatId, text, fetchImpl = gl
       }),
       signal: AbortSignal.timeout(10_000),
     });
-    return { ok: response.ok === true, code: response.ok === true ? 'SENT' : 'TELEGRAM_API_ERROR' };
-  } catch {
-    return { ok: false, code: 'TELEGRAM_API_ERROR' };
+  } catch (err) {
+    const isTimeout = err && (err.name === 'TimeoutError' || err.name === 'AbortError');
+    return isTimeout
+      ? { ok: false, code: 'TELEGRAM_API_ERROR', telegramFailureKind: 'TELEGRAM_TIMEOUT', telegramApiDescriptionCode: 'NETWORK_TIMEOUT' }
+      : { ok: false, code: 'TELEGRAM_API_ERROR', telegramFailureKind: 'TELEGRAM_NETWORK_ERROR', telegramApiDescriptionCode: 'NETWORK_ERROR' };
   }
+
+  if (response.ok === true) {
+    return { ok: true, code: 'SENT' };
+  }
+
+  let apiErrorCode = response.status;
+  let description = '';
+  try {
+    const body = await response.json();
+    if (body && typeof body.error_code === 'number') apiErrorCode = body.error_code;
+    if (body && typeof body.description === 'string') description = body.description;
+  } catch {
+    // Non-JSON or unreadable body — classify on HTTP status alone.
+  }
+
+  return {
+    ok: false,
+    code: 'TELEGRAM_API_ERROR',
+    telegramHttpStatus: response.status,
+    telegramApiErrorCode: apiErrorCode,
+    ...classifyTelegramHttpFailure(response.status, description),
+  };
 }
 
 function baseSummary(extra = {}) {
@@ -146,6 +201,11 @@ export async function runDiagnosticSend(deps = {}) {
   const watchSymbol = String(watches[0] && watches[0].symbol || '').toUpperCase();
   const sent = await sendMessage(token, chatId, buildDiagnosticMessage(watchSymbol));
   if (!sent || sent.ok !== true) {
+    const failureFields = {};
+    if (sent && sent.telegramFailureKind) failureFields.telegramFailureKind = sent.telegramFailureKind;
+    if (sent && typeof sent.telegramHttpStatus === 'number') failureFields.telegramHttpStatus = sent.telegramHttpStatus;
+    if (sent && typeof sent.telegramApiErrorCode === 'number') failureFields.telegramApiErrorCode = sent.telegramApiErrorCode;
+    if (sent && sent.telegramApiDescriptionCode) failureFields.telegramApiDescriptionCode = sent.telegramApiDescriptionCode;
     return baseSummary({
       ok: false,
       targetConfigured: true,
@@ -153,6 +213,7 @@ export async function runDiagnosticSend(deps = {}) {
       targetHasChat: true,
       targetWatchCount: 1,
       error: 'DIAGNOSTIC_TELEGRAM_FAILED',
+      ...failureFields,
     });
   }
 

@@ -266,6 +266,49 @@ secrets are ever printed in responses, logs, docs, issues, or prompts.
 Covered by `tests/personal-alerts-diagnostic.test.mjs` and
 `tests/personal-alerts-diagnostic-workflow.test.mjs`.
 
+### Diagnostic Telegram failure classification (implemented locally)
+
+When the diagnostic send reaches Telegram but the send itself fails, the
+response adds safe, allowlisted classification fields alongside the existing
+`error: "DIAGNOSTIC_TELEGRAM_FAILED"` — `telegramFailureKind`,
+`telegramHttpStatus`, `telegramApiErrorCode`, `telegramApiDescriptionCode`.
+These fields are present **only on failure**; a successful send (`sent:1`)
+never carries them. Classification never leaks the token, chat id, user id,
+the raw Telegram request URL, a raw Telegram `description` string, or a raw
+Personal Watch record — Telegram's own `description` text is inspected only
+internally to pick one of a fixed set of description codes, then discarded.
+
+Classification (`sendDiagnosticTelegram` in
+`netlify/functions/personal-alerts-diagnostic.mjs`):
+
+| Condition | `telegramFailureKind` | `telegramApiDescriptionCode` |
+| --- | --- | --- |
+| HTTP 401 | `TELEGRAM_UNAUTHORIZED` | `BOT_TOKEN_INVALID_OR_REVOKED` |
+| HTTP 403 | `TELEGRAM_FORBIDDEN` | `BOT_BLOCKED_OR_CHAT_NOT_STARTED` |
+| HTTP 400, chat-not-found-like | `TELEGRAM_BAD_REQUEST` | `CHAT_NOT_FOUND_OR_INVALID` |
+| HTTP 400, message/entity-like | `TELEGRAM_BAD_REQUEST` | `MESSAGE_TEXT_INVALID` |
+| HTTP 400, other | `TELEGRAM_BAD_REQUEST` | `BAD_REQUEST` |
+| HTTP 429 | `TELEGRAM_RATE_LIMITED` | `RATE_LIMITED` |
+| HTTP 5xx | `TELEGRAM_SERVER_ERROR` | `TELEGRAM_SERVER_ERROR` |
+| Fetch timeout/abort | `TELEGRAM_TIMEOUT` | `NETWORK_TIMEOUT` |
+| Other network/fetch exception | `TELEGRAM_NETWORK_ERROR` | `NETWORK_ERROR` |
+| Unknown non-2xx | `TELEGRAM_API_ERROR` | `UNKNOWN_TELEGRAM_API_ERROR` |
+
+Owner actions per kind:
+- `TELEGRAM_UNAUTHORIZED` — verify/replace `TG_BOT_TOKEN`.
+- `TELEGRAM_FORBIDDEN` — open the bot chat and send `/start`; unblock the bot.
+- `TELEGRAM_BAD_REQUEST` / `CHAT_NOT_FOUND_OR_INVALID` — reconnect/save the
+  Telegram chat id using the production bot.
+- `TELEGRAM_RATE_LIMITED` — wait and retry once.
+- `TELEGRAM_SERVER_ERROR` / `TELEGRAM_NETWORK_ERROR` / `TELEGRAM_TIMEOUT` —
+  retry later.
+
+This is diagnostics-only: it does not change the successful-send path, the
+real sender (`personal-alerts.mjs`), the diagnostic target lookup, or any
+enable-flag behavior. No raw token, chat id, or user id should ever be
+pasted into chat, logs, or issues when reporting a `telegramFailureKind`.
+Covered by extended cases in `tests/personal-alerts-diagnostic.test.mjs`.
+
 ## Non-blocking open decision
 
 **Group/channel chat IDs** are out of scope through at least Phase 3.

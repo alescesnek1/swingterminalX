@@ -247,6 +247,127 @@ test('14. Telegram API failure returns sent:0 and a clean failure reason', async
   assert.equal(result.error, 'DIAGNOSTIC_TELEGRAM_FAILED');
 });
 
+function mockFetchStatus(status, body) {
+  return async () => new Response(JSON.stringify(body || {}), { status });
+}
+
+function sendViaFetch(fetchImpl) {
+  return (token, chatId, message) => sendDiagnosticTelegram(token, chatId, message, fetchImpl);
+}
+
+test('14a. Telegram 401 classifies as TELEGRAM_UNAUTHORIZED', async () => {
+  const { result } = await run({
+    sendMessage: sendViaFetch(mockFetchStatus(401, { ok: false, error_code: 401, description: 'Unauthorized' })),
+  });
+  assert.equal(result.error, 'DIAGNOSTIC_TELEGRAM_FAILED');
+  assert.equal(result.telegramFailureKind, 'TELEGRAM_UNAUTHORIZED');
+  assert.equal(result.telegramHttpStatus, 401);
+  assert.equal(result.telegramApiErrorCode, 401);
+  assert.equal(result.telegramApiDescriptionCode, 'BOT_TOKEN_INVALID_OR_REVOKED');
+});
+
+test('14b. Telegram 403 classifies as TELEGRAM_FORBIDDEN', async () => {
+  const { result } = await run({
+    sendMessage: sendViaFetch(mockFetchStatus(403, { ok: false, error_code: 403, description: 'Forbidden: bot was blocked by the user' })),
+  });
+  assert.equal(result.telegramFailureKind, 'TELEGRAM_FORBIDDEN');
+  assert.equal(result.telegramHttpStatus, 403);
+  assert.equal(result.telegramApiErrorCode, 403);
+  assert.equal(result.telegramApiDescriptionCode, 'BOT_BLOCKED_OR_CHAT_NOT_STARTED');
+});
+
+test('14c. Telegram 400 chat-not-found-like response classifies as CHAT_NOT_FOUND_OR_INVALID', async () => {
+  const { result } = await run({
+    sendMessage: sendViaFetch(mockFetchStatus(400, { ok: false, error_code: 400, description: 'Bad Request: chat not found' })),
+  });
+  assert.equal(result.telegramFailureKind, 'TELEGRAM_BAD_REQUEST');
+  assert.equal(result.telegramHttpStatus, 400);
+  assert.equal(result.telegramApiDescriptionCode, 'CHAT_NOT_FOUND_OR_INVALID');
+});
+
+test('14d. Telegram 429 classifies as TELEGRAM_RATE_LIMITED', async () => {
+  const { result } = await run({
+    sendMessage: sendViaFetch(mockFetchStatus(429, { ok: false, error_code: 429, description: 'Too Many Requests' })),
+  });
+  assert.equal(result.telegramFailureKind, 'TELEGRAM_RATE_LIMITED');
+  assert.equal(result.telegramHttpStatus, 429);
+  assert.equal(result.telegramApiDescriptionCode, 'RATE_LIMITED');
+});
+
+test('14e. Telegram 5xx classifies as TELEGRAM_SERVER_ERROR', async () => {
+  const { result } = await run({
+    sendMessage: sendViaFetch(mockFetchStatus(502, { ok: false, error_code: 502, description: 'Bad Gateway' })),
+  });
+  assert.equal(result.telegramFailureKind, 'TELEGRAM_SERVER_ERROR');
+  assert.equal(result.telegramHttpStatus, 502);
+  assert.equal(result.telegramApiDescriptionCode, 'TELEGRAM_SERVER_ERROR');
+});
+
+test('14f. timeout/abort classifies as TELEGRAM_TIMEOUT', async () => {
+  const timeoutFetch = async () => { throw new DOMException('The operation was aborted due to timeout', 'TimeoutError'); };
+  const { result } = await run({ sendMessage: sendViaFetch(timeoutFetch) });
+  assert.equal(result.telegramFailureKind, 'TELEGRAM_TIMEOUT');
+  assert.equal(result.telegramApiDescriptionCode, 'NETWORK_TIMEOUT');
+  assert.equal(result.telegramHttpStatus, undefined);
+});
+
+test('14g. generic network/fetch exception classifies as TELEGRAM_NETWORK_ERROR', async () => {
+  const networkFetch = async () => { throw new Error('getaddrinfo ENOTFOUND'); };
+  const { result } = await run({ sendMessage: sendViaFetch(networkFetch) });
+  assert.equal(result.telegramFailureKind, 'TELEGRAM_NETWORK_ERROR');
+  assert.equal(result.telegramApiDescriptionCode, 'NETWORK_ERROR');
+  assert.equal(result.telegramHttpStatus, undefined);
+});
+
+test('14h. unknown non-2xx classifies as TELEGRAM_API_ERROR', async () => {
+  const { result } = await run({
+    sendMessage: sendViaFetch(mockFetchStatus(418, { ok: false, error_code: 418, description: "I'm a teapot" })),
+  });
+  assert.equal(result.telegramFailureKind, 'TELEGRAM_API_ERROR');
+  assert.equal(result.telegramApiDescriptionCode, 'UNKNOWN_TELEGRAM_API_ERROR');
+});
+
+test('14i. successful diagnostic send still returns sent:1 and no failure classification fields', async () => {
+  const { result } = await run();
+  assert.equal(result.sent, 1);
+  assert.equal(result.telegramFailureKind, undefined);
+  assert.equal(result.telegramHttpStatus, undefined);
+  assert.equal(result.telegramApiErrorCode, undefined);
+  assert.equal(result.telegramApiDescriptionCode, undefined);
+});
+
+test('14j. failure response never contains the bot token', async () => {
+  const { result } = await run({
+    sendMessage: sendViaFetch(mockFetchStatus(401, { ok: false, error_code: 401, description: 'Unauthorized' })),
+  });
+  const raw = JSON.stringify(result);
+  assert.doesNotMatch(raw, /test-token/);
+});
+
+test('14k. failure response never contains the raw chat id', async () => {
+  const { result } = await run({
+    sendMessage: sendViaFetch(mockFetchStatus(403, { ok: false, error_code: 403, description: 'Forbidden' })),
+  });
+  const raw = JSON.stringify(result);
+  assert.doesNotMatch(raw, new RegExp(FAKE_CHAT));
+});
+
+test('14l. failure response never contains a raw Telegram request URL', async () => {
+  const { result } = await run({
+    sendMessage: sendViaFetch(mockFetchStatus(400, { ok: false, error_code: 400, description: 'Bad Request: chat not found' })),
+  });
+  const raw = JSON.stringify(result);
+  assert.doesNotMatch(raw, /api\.telegram\.org/);
+});
+
+test('14m. failure response never contains a raw Personal Watch record', async () => {
+  const { result } = await run({
+    sendMessage: sendViaFetch(mockFetchStatus(500, { ok: false, error_code: 500, description: 'Internal Server Error' })),
+  });
+  const raw = JSON.stringify(result);
+  assert.doesNotMatch(raw, /BTCUSDT|addedAt|telegramChatId/);
+});
+
 test('15. response never includes the raw chat id', async () => {
   const { result } = await run();
   const raw = JSON.stringify(result);
