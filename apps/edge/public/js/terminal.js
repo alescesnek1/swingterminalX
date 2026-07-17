@@ -2314,6 +2314,22 @@ function pickCoin(id) {
     </div>
 
     ${(() => {
+      // V8: explicit price-data source so the trader can always see whether
+      // the live fields come from Binance (real venue) or CoinGecko (the
+      // fallback used only when the coin is not on Binance). The BIN/ALPHA/
+      // DEX badge already encodes this, but spell it out in the panel.
+      const ex = d.exchange;
+      let src, col;
+      if (ex === 'BIN')        { src = 'Binance · Spot';                 col = 'var(--grn)'; }
+      else if (ex === 'ALPHA') { src = 'Binance · Futures (perp/ALPHA)'; col = 'var(--acc)'; }
+      else                     { src = 'CoinGecko (Binance nemá tento coin)'; col = 'var(--txt3)'; }
+      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 10px;font-size:9px;border-bottom:1px solid var(--b1)">
+        <span style="color:var(--txt3)">DATA</span>
+        <span style="color:${col};font-weight:600">${_esc(src)}</span>
+      </div>`;
+    })()}
+
+    ${(() => {
       // V5 (Phase 4 Wildcard B): Multi-TF Momentum panel in the
       // detail view. Shows the composite score, alignment %, and a
       // per-TF micro-bar so the trader can see exactly which
@@ -2347,11 +2363,26 @@ function pickCoin(id) {
       `;
     })()}
 
-    <div style="padding:10px">
-      <div class="ml" style="margin-bottom:3px">SIGNAL FLOW (interní)</div>
-      <div class="lsbar"><div class="lsl" style="width:${ls.l}%"></div><div class="lss" style="width:${ls.s}%"></div></div>
-      <div style="display:flex;justify-content:space-between;font-size:9px"><span class="pos">${ls.l.toFixed(0)}% L</span><span class="neg">${ls.s.toFixed(0)}% S</span></div>
-    </div>
+    ${(() => {
+      // V8: SIGNAL FLOW used to render `_takerRatio`, a hard-coded 0.5
+      // placeholder (the live taker-flow feed died with the ingest
+      // worker) → it always showed a fake 50/50. Now it shows the REAL,
+      // LIVE order-book bid/ask pressure: this skeleton is filled + kept
+      // updated in place by the order-book poll (loadOrderbook), so the
+      // green/red bar moves live like on Binance instead of faking data.
+      const onBin = d.binance_available !== false && (d.exchange === 'BIN' || d.exchange === 'ALPHA');
+      if (!onBin) {
+        return `<div style="padding:10px">
+          <div class="ml" style="margin-bottom:3px">SIGNAL FLOW · BID/ASK</div>
+          <div style="font-size:9px;color:var(--txt3)">N/A — coin není na Binance (DEX), order book neexistuje.</div>
+        </div>`;
+      }
+      return `<div style="padding:10px">
+        <div class="ml" style="margin-bottom:3px">SIGNAL FLOW · BID/ASK (živě z knihy)</div>
+        <div class="lsbar"><div class="lsl" data-obflow="l" style="width:50%"></div><div class="lss" data-obflow="s" style="width:50%"></div></div>
+        <div style="display:flex;justify-content:space-between;font-size:9px"><span class="pos" data-obflow="lt">…% BID</span><span class="neg" data-obflow="st">…% ASK</span></div>
+      </div>`;
+    })()}
 
     ${(() => {
       // V5 (Sniper Limit Protocol): show the calculated optimal LIMIT
@@ -2414,6 +2445,11 @@ function pickCoin(id) {
   // "[STREAM] aggressive poll failed". getBinanceLink() does NOT alter any
   // link behavior; loadOrderbook only issues a public depth fetch.
   loadOrderbook(d, getBinanceLink(d));
+  // V8: stamp the rendered coin so a same-coin data refresh updates fields
+  // in place (no full-panel flicker), and start the live order-book poll so
+  // the book + bid/ask bar keep ticking like Binance.
+  { const _dc = document.getElementById('dcon'); if (_dc) _dc.dataset.coinId = id; }
+  _startOrderbookLive(d);
   renderList();
 }
 
@@ -2432,80 +2468,166 @@ function pickCoin(id) {
 //      and silently return. NO global toast — the news/regime/etc.
 //      already toast errors, and stacking an order-book toast on every
 //      coin click is the noisiest UX failure mode we have.
-async function loadOrderbook(d, binance) {
-  // Capability guard: never assume the caller handed us a valid link
-  // object. A missing/undefined arg must degrade to "unavailable", not
-  // throw a ReferenceError/TypeError that bubbles into a poll catch.
+// Live order-book pressure bar (SIGNAL FLOW skeleton) — updated in place
+// from the book so the green/red bar moves without a panel re-render.
+// Guarded so the unit-test DOM mock (plain {innerHTML}) is a no-op.
+function _updateObFlow(ob) {
+  const dcon = document.getElementById('dcon');
+  if (!dcon || typeof dcon.querySelector !== 'function') return;
+  const bid = Number(ob?.cumulative_bid_qty) || 0;
+  const ask = Number(ob?.cumulative_ask_qty) || 0;
+  const tot = bid + ask;
+  if (tot <= 0) return;
+  const bidPct = (bid / tot) * 100;
+  const askPct = 100 - bidPct;
+  const set = (sel, fn) => { const el = dcon.querySelector(sel); if (el) fn(el); };
+  set('[data-obflow="l"]',  (el) => { el.style.width = bidPct.toFixed(1) + '%'; });
+  set('[data-obflow="s"]',  (el) => { el.style.width = askPct.toFixed(1) + '%'; });
+  set('[data-obflow="lt"]', (el) => { el.textContent = `${bidPct.toFixed(0)}% BID`; });
+  set('[data-obflow="st"]', (el) => { el.textContent = `${askPct.toFixed(0)}% ASK`; });
+}
+
+// Format an order-book price/qty for compact display across BTC-sized
+// and sub-cent coins alike.
+function _obPrice(p) {
+  const n = parseFloat(p);
+  if (!Number.isFinite(n)) return '—';
+  if (n >= 1000) return n.toFixed(2);
+  if (n >= 1) return n.toFixed(4);
+  return n.toPrecision(4);
+}
+function _obQty(q) {
+  const n = parseFloat(q);
+  if (!Number.isFinite(n)) return '—';
+  return n >= 1000 ? Math.round(n).toLocaleString() : n.toFixed(3);
+}
+
+// Live Binance order book for the detail panel, served via OUR backend
+// (/api/orderbook) — never a direct browser→Binance fetch (adblockers
+// block api.binance.com). Works for spot AND futures/ALPHA.
+//
+// `opts.silent` = a live-poll refresh: keep the current book visible, do
+// NOT flash "načítám…", and swap the numbers in one atomic innerHTML
+// assignment so it updates like Binance (numbers + green/red depth bars
+// move) instead of the whole box disappearing and reappearing.
+async function loadOrderbook(d, binance, opts) {
+  opts = opts || {};
   binance = binance || {};
   const slot = document.getElementById('orderbook-' + d.id);
   const status = document.getElementById('ob-status');
   if (!slot) return;
-  if (!binance.available) {
-    slot.innerHTML = '<div style="color:var(--txt3)">Binance pár pro tento coin není dostupný.</div>';
+
+  // Resolve venue + exact pair straight from the row (authoritative).
+  // DEX coins have no Binance pair at all.
+  const onBinance = d?.binance_available !== false && (d?.exchange === 'BIN' || d?.exchange === 'ALPHA');
+  if (!onBinance) {
+    slot.innerHTML = '<div style="color:var(--txt3)">Tento coin není na Binance (DEX) — order book není k dispozici. Cena je z CoinGecku.</div>';
+    if (status) status.textContent = 'DEX · bez knihy';
+    return;
+  }
+  const market = (d?.binance_market === 'futures' || d?.exchange === 'ALPHA') ? 'futures' : 'spot';
+  const pair = (market === 'futures' ? (d?.futures_pair || d?.pair) : (d?.spot_pair || d?.pair) || '')
+    .replace('/', '');
+  if (!pair) {
+    slot.innerHTML = '<div style="color:var(--txt3)">Binance pár pro tento coin se nepodařilo určit.</div>';
     if (status) status.textContent = '–';
     return;
   }
-  const pair = binance.pair.replace('/', '');
-  // Non-Spot listings are skipped here; this panel is Spot-only.
-  // Non-Spot listings are skipped here; this panel is Spot-only.
-  const useFutures = (d?.binance_market === 'futures') || (binance.market === 'futures') || (d?.exchange === 'ALPHA');
-  if (useFutures) {
-    slot.innerHTML = '<div style="color:var(--txt3)">Spot order book unavailable for this listing.</div>';
-    if (status) status.textContent = 'Spot only';
-    return;
-  }
-  const baseUrl = 'https://api.binance.com/api/v3/depth';
-  const url = `${baseUrl}?symbol=${encodeURIComponent(pair)}&limit=10`;
 
-  // Manual AbortController — AbortSignal.timeout() is patchy across
-  // older Safari and we still see legitimate users on it.
+  // Only flash "načítám…" on the first (non-silent) load; live polls keep
+  // the last book on screen until the new numbers swap in.
+  if (status && !opts.silent) status.textContent = 'načítám…';
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 4000);
+  const timer = setTimeout(() => ctrl.abort(), 6000);
 
   try {
-    const r = await fetch(url, { signal: ctrl.signal, headers: { 'Accept': 'application/json' } });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const authHeaders = await _getAuthHeaders();
+    const url = `/api/orderbook?pair=${encodeURIComponent(pair)}&market=${market}`;
+    const r = await fetch(url, { signal: ctrl.signal, headers: { 'Accept': 'application/json', ...authHeaders } });
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      throw new Error(body?.detail || body?.error || `HTTP ${r.status}`);
+    }
     const j = await r.json();
     if (SEL !== d.id) return;
-    const bids = (j.bids || []).slice(0, 5);
-    const asks = (j.asks || []).slice(0, 5).reverse();
-    if (!bids.length && !asks.length) {
-      slot.innerHTML = '<div style="color:var(--txt3)">Order book prázdný.</div>';
+    const ob = j.orderbook || {};
+    // best-first arrays; compute cumulative depth for the green/red bars.
+    const asksRaw = (ob.top5_asks || []).slice(0, 5);
+    const bidsRaw = (ob.top5_bids || []).slice(0, 5);
+    if (!asksRaw.length && !bidsRaw.length) {
+      if (!opts.silent) slot.innerHTML = '<div style="color:var(--txt3)">Order book prázdný.</div>';
       if (status) status.textContent = pair;
       return;
     }
-    const row = (p, q, side) => {
-      const cls = side === 'b' ? 'pos' : 'neg';
-      return `<div style="display:flex;justify-content:space-between"><span class="${cls}">${parseFloat(p).toFixed(4)}</span><span style="color:var(--txt3)">${parseFloat(q).toFixed(3)}</span></div>`;
+    let ac = 0, bc = 0;
+    const asksC = asksRaw.map(([p, q]) => { ac += parseFloat(q) || 0; return [p, q, ac]; });
+    const bidsC = bidsRaw.map(([p, q]) => { bc += parseFloat(q) || 0; return [p, q, bc]; });
+    const maxCum = Math.max(ac, bc, 1e-9);
+    const row = (p, q, cum, side) => {
+      const pct = Math.min(100, (cum / maxCum) * 100);
+      const bar = side === 'b' ? 'rgba(34,197,94,0.16)' : 'rgba(239,68,68,0.16)';
+      const txt = side === 'b' ? 'var(--grn)' : 'var(--red)';
+      return `<div style="position:relative;display:flex;justify-content:space-between;padding:1px 3px;line-height:1.5">`
+        + `<span style="position:absolute;top:0;right:0;bottom:0;width:${pct.toFixed(1)}%;background:${bar};pointer-events:none"></span>`
+        + `<span style="position:relative;color:${txt}">${_obPrice(p)}</span>`
+        + `<span style="position:relative;color:var(--txt2)">${_obQty(q)}</span></div>`;
     };
-    slot.innerHTML = `
-      <div style="display:flex;flex-direction:column;gap:1px">${asks.map(([p, q]) => row(p, q, 'a')).join('')}</div>
-      <div style="border-top:1px dashed var(--b2);border-bottom:1px dashed var(--b2);text-align:center;padding:3px;color:var(--acc)">— mid —</div>
-      <div style="display:flex;flex-direction:column;gap:1px">${bids.map(([p, q]) => row(p, q, 'b')).join('')}</div>
-    `;
-    if (status) status.textContent = pair;
+    // asks displayed worst→best (top→mid); bids best→worst (mid→bottom).
+    const asksHtml = asksC.slice().reverse().map(([p, q, c]) => row(p, q, c, 'a')).join('');
+    const bidsHtml = bidsC.map(([p, q, c]) => row(p, q, c, 'b')).join('');
+    const spreadTxt = Number.isFinite(ob.spread_bps) ? ` · spread ${ob.spread_bps} bps` : '';
+    // Single atomic assignment → no flicker; only the numbers/bars change.
+    slot.innerHTML =
+      `<div style="display:flex;flex-direction:column;gap:1px">${asksHtml}</div>`
+      + `<div style="border-top:1px dashed var(--b2);border-bottom:1px dashed var(--b2);text-align:center;padding:3px;color:var(--acc)">— mid —${_esc(spreadTxt)}</div>`
+      + `<div style="display:flex;flex-direction:column;gap:1px">${bidsHtml}</div>`;
+    if (status) status.textContent = `${pair} · ${market === 'futures' ? 'futures' : 'spot'} · live`;
+    // Drive the SIGNAL FLOW bid/ask pressure bar from the same book.
+    _updateObFlow(ob);
   } catch (e) {
-    // Distinguish the common failure modes for the inline message only.
-    // A generic "Failed to fetch" / AbortError is almost always an
-    // adblocker or corporate proxy blocking the Binance host directly
-    // from the browser — not an actual outage.
     if (SEL !== d.id) return;
-    const isNet = e.name === 'AbortError'
-      || /Failed to fetch|NetworkError|TypeError/i.test(String(e.message || ''));
-    // V6.8 Sprint 1 (FIX-3): e.message is an arbitrary string from any
-    // network-layer failure. Escape it before insertion.
-    const msg = isNet
-      ? 'Order book blokován prohlížečem (adblock / CORS). Použijte AI Analýzu pro plnou hloubku.'
-      : `Order book nedostupný: ${_esc(e.message)}`;
-    slot.innerHTML = `<div style="color:var(--txt3);font-size:9px;line-height:1.4">${msg}</div>`;
-    if (status) status.textContent = isNet ? 'blocked' : 'error';
-    // Intentionally NO global Toast here — the inline UI message is
-    // already in the slot the user is looking at, and a toast per coin
-    // click would flood the screen.
-    console.warn('[ORDERBOOK]', e.name, e.message);
+    console.warn('[ORDERBOOK]', e.name, e.message, { pair, market });
+    // Per the error-observability rule the failure must be VISIBLE + LOGGED.
+    // On a live-poll blip keep the last book (don't wipe it to red on one
+    // transient miss) but flag it; on the first load show the full error
+    // and raise a toast so it cannot be missed.
+    if (opts.silent) {
+      if (status) status.textContent = `${pair} · ⚠ pauza`;
+    } else {
+      const isAbort = e.name === 'AbortError';
+      const msg = isAbort
+        ? 'Order book: časový limit (backend/Binance neodpověděl).'
+        : `Order book nedostupný: ${_esc(String(e.message || e))}`;
+      slot.innerHTML = `<div style="color:var(--red);font-size:9px;line-height:1.4">${msg}</div>`;
+      if (status) status.textContent = 'chyba';
+      window.Toast?.error('Order book se nenačetl', String(e.message || e), { endpoint: '/api/orderbook', pair, market });
+    }
   } finally {
     clearTimeout(timer);
   }
+}
+
+// ── Live order-book poll ──────────────────────────────────────────────
+// Re-fetches the book every ~1.5 s while a coin is open and swaps the
+// numbers in place, so the panel behaves like a real exchange book
+// (numbers + green/red depth bars move) instead of a frozen snapshot.
+// Only one timer runs at a time; it self-stops when the coin changes or
+// the panel is gone.
+let _obPollTimer = null;
+const OB_POLL_MS = 1500;
+function _stopOrderbookLive() {
+  if (_obPollTimer) { clearInterval(_obPollTimer); _obPollTimer = null; }
+}
+function _startOrderbookLive(d) {
+  _stopOrderbookLive();
+  if (!d || !d.id) return;
+  // DEX coins have no book — nothing to poll.
+  const onBinance = d.binance_available !== false && (d.exchange === 'BIN' || d.exchange === 'ALPHA');
+  if (!onBinance) return;
+  _obPollTimer = setInterval(() => {
+    if (SEL !== d.id || !document.getElementById('orderbook-' + d.id)) { _stopOrderbookLive(); return; }
+    loadOrderbook(d, getBinanceLink(d), { silent: true });
+  }, OB_POLL_MS);
 }
 
 function resolveTvSymbol(d) {
@@ -3891,7 +4013,26 @@ async function doRefresh() {
     LiveFeed.push(`Regime: ${(REGIME.label||REGIME.bucket||'—').toUpperCase()} (score ${REGIME.score|0})`, 'regime');
   });
 
-  if (SEL) pickCoin(SEL);
+  if (SEL) _refreshSelectedDetail();
+}
+
+// V8: on a scanner data refresh, do NOT rebuild the whole detail panel
+// for the coin that is already open — that wholesale innerHTML rebuild is
+// what made the panel (and the order book) visibly disappear and reappear.
+// Instead mutate just the changing numeric cells in place (Binance-style),
+// and let the order-book poll keep the book live. Only fall back to a full
+// pickCoin() build when the panel is showing a different coin (or nothing).
+function _refreshSelectedDetail() {
+  if (!SEL) return;
+  const d = DATA.find((x) => x.id === SEL);
+  if (!d) return;
+  const dcon = document.getElementById('dcon');
+  if (dcon && dcon.dataset && dcon.dataset.coinId === SEL) {
+    const p = parseFloat(d.current_price) || 0;
+    try { _updateDetailPanel(d, p, p, d._panic); } catch (e) { console.warn('[DETAIL] in-place refresh failed:', e.message); }
+    return;
+  }
+  pickCoin(SEL);
 }
 
 window.__lastRadarContextPush = null;
