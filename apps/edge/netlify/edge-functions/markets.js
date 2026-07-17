@@ -528,6 +528,18 @@ function shapeFromCoingecko(cg, spotTicker, spotMeta, futTicker, futMeta, liveFu
 
   const onBinance = !!venueTicker;
 
+  // Debug: no live Binance venue for this token — every live field below
+  // falls back to CoinGecko (60-90s lag). Distinguish a genuine DEX-only
+  // coin from one whose Binance match was dropped by the gauntlet above.
+  if (!onBinance) {
+    const hadBinanceCandidate = !!(spotTicker || futTicker || spotMeta || futMeta || spotReject || futReject);
+    console.warn(
+      `[MARKETS] Binance fallback → CoinGecko for ${sym} (cg.id=${cg.id}) — ` +
+      `${hadBinanceCandidate ? 'candidate rejected by gauntlet' : 'no Binance pair (DEX-only)'}; ` +
+      `cg_price=${cg.current_price} cg_mc=${cg.market_cap}`
+    );
+  }
+
   // Prefer the live venue ticker when present — it's more real-time
   // than CoinGecko's 60-90s lag.
   const price = onBinance ? parseFloat(venueTicker.lastPrice) : (cg.current_price || 0);
