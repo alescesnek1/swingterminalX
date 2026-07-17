@@ -136,6 +136,28 @@ function summarizeOrderbook(depth) {
   };
 }
 
+/**
+ * Lightweight order-book-only fetch for the /api/orderbook edge endpoint.
+ * Unlike fetchBinanceSnapshot (which pulls ticker + klines + funding + OI
+ * too), this issues a SINGLE /depth call and returns the summarized book —
+ * cheap enough to serve on every coin click. Works for both spot and
+ * futures so ALPHA (perp-only) listings get a real book instead of the
+ * old "Spot only" dead-end.
+ *
+ * Throws on any upstream failure (non-200, empty/invalid book) so the
+ * caller can surface a visible error AND log it — never a silent null.
+ */
+export async function fetchOrderbook({ pair, market = 'spot' }) {
+  if (!pair) throw new Error('fetchOrderbook: missing pair');
+  const base = market === 'futures' ? FUT_BASE : SPOT_BASE;
+  const path = market === 'futures' ? '/fapi/v1/depth' : '/api/v3/depth';
+  const url = `${base}${path}?symbol=${pair}&limit=${ORDERBOOK_DEPTH}`;
+  const depth = await fetchJson(url, `${market}-depth/${pair}`);
+  const book = summarizeOrderbook(depth);
+  if (!book) throw new Error(`empty or invalid ${market} depth for ${pair}`);
+  return book;
+}
+
 // ─────────────────────────────────────────────────────────────
 // Klines / multi-timeframe
 // ─────────────────────────────────────────────────────────────

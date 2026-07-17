@@ -188,6 +188,12 @@ email allowlist (§9), not a billing tier.
   unavailable" (fail-closed). `binance-public` is a **local-only diagnostic**
   (Binance public fapi is region-blocked 451 from Netlify/GitHub egress). **There
   is no production microstructure scheduler/cron** — do not add one.
+- **Scanner detail live book:** authenticated users can read the live Binance
+  Spot/Futures depth through `/api/orderbook`; it is a UI-only, server-side
+  proxy with short per-isolate caching, clear inline errors and no trading or
+  RADAR-gate effect. The selected detail panel updates its changing values in
+  place on scanner refresh; its order-book rows and green/red bid/ask signal
+  flow poll independently, so the panel does not disappear and rebuild.
 - **Rolling microstructure** (`docs/radar-rolling-microstructure-design.md`) is
   **design only, not implemented.** The gate already reads its field names and
   fails closed when absent.

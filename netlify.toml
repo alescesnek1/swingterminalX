@@ -52,6 +52,10 @@
   path = "/api/sniper-detect"
   function = "sniper-detect"
 
+[[edge_functions]]
+  path = "/api/orderbook"
+  function = "orderbook"
+
 # ── Headers ──
 [[headers]]
   for = "/*"

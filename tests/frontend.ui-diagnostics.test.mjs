@@ -45,18 +45,30 @@ function loadRadarMicroDiag() {
 // Extract loadOrderbook() in isolation. It depends on _esc (for the error
 // path) plus a tiny DOM/fetch surface that the caller injects, so we slice
 // just the function and hand it controllable globals.
-function loadOrderbookFn({ getEl, fetchImpl, sel } = {}) {
-  const block = sliceBetween(terminalJs, 'async function loadOrderbook(d, binance)', 'function resolveTvSymbol');
+function loadOrderbookFn({ getEl, fetchImpl, sel, authHeaders } = {}) {
+  const block = sliceBetween(terminalJs, 'async function loadOrderbook(d, binance, opts)', 'function resolveTvSymbol');
+  // V8: loadOrderbook now calls _getAuthHeaders() (forwards the Supabase
+  // token to /api/orderbook), window.Toast on failure, and the order-book
+  // formatting/flow helpers. Provide stubs so the isolated function runs
+  // like it does in the browser.
   const prelude = `
     function _esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+    async function _getAuthHeaders(){ return ${JSON.stringify(authHeaders || {})}; }
+    function _obPrice(p){ const n=parseFloat(p); if(!isFinite(n))return '—'; if(n>=1000)return n.toFixed(2); if(n>=1)return n.toFixed(4); return n.toPrecision(4); }
+    function _obQty(q){ const n=parseFloat(q); if(!isFinite(n))return '—'; return n>=1000?Math.round(n).toLocaleString():n.toFixed(3); }
+    function _updateObFlow(){}
+    function getBinanceLink(){ return {}; }
+    function setInterval(){ return 0; }
+    function clearInterval(){}
   `;
   const document = { getElementById: getEl || (() => null) };
   const fetch = fetchImpl || (() => { throw new Error('fetch must not be called'); });
   const AbortController = function () { this.signal = {}; this.abort = () => {}; };
+  const window = { Toast: { error() {} } };
   return Function(
-    'document', 'fetch', 'AbortController', 'SEL', 'setTimeout', 'clearTimeout',
+    'document', 'fetch', 'AbortController', 'SEL', 'setTimeout', 'clearTimeout', 'window',
     `${prelude}${block}; return loadOrderbook;`,
-  )(document, fetch, AbortController, sel ?? null, () => 0, () => {});
+  )(document, fetch, AbortController, sel ?? null, () => 0, () => {}, window);
 }
 
 test('Binance link helper routes spot, futures, Alpha, and unsupported rows safely', () => {
@@ -319,41 +331,61 @@ test('aggressive-poll path: pickCoin passes a resolved link object, never a bare
   assert.match(terminalJs, /loadOrderbook\(\s*d\s*,\s*getBinanceLink\(d\)\s*\)\s*;/);
 });
 
-test('loadOrderbook degrades safely when handed no/invalid link object (no ReferenceError)', async () => {
-  // Simulates the aggressive-poll path firing with the order-book slot in
-  // the DOM but no usable Binance link. Must NOT throw and must NOT issue a
-  // network fetch — it renders an "unavailable" message and returns.
+test('loadOrderbook renders a clear no-book message for a non-Binance (DEX) coin, no fetch', async () => {
+  // A DEX/CoinGecko-only coin has no Binance pair — the book must fail
+  // closed with a VISIBLE, honest message (not a silent empty box) and must
+  // NOT issue any network fetch.
   const statusEl = { textContent: '' };
   const slotEl = { innerHTML: '' };
   const getEl = (id) => (id === 'ob-status' ? statusEl : (String(id).startsWith('orderbook-') ? slotEl : null));
 
   const loadOrderbook = loadOrderbookFn({ getEl }); // fetch defaults to throw-if-called
 
-  // undefined link arg (the exact crash shape) — must fail closed.
-  await assert.doesNotReject(() => loadOrderbook({ id: 'beat' }, undefined));
-  assert.match(slotEl.innerHTML, /není dostupný|nedostupn/i);
-  assert.equal(statusEl.textContent, '–');
+  // Explicit DEX row — no fetch, visible reason.
+  await assert.doesNotReject(() => loadOrderbook({ id: 'beat', exchange: 'DEX', binance_available: false }, undefined));
+  assert.match(slotEl.innerHTML, /DEX|není na Binance|CoinGeck/i);
+  assert.match(statusEl.textContent, /DEX/i);
 
-  // explicit unavailable link — same safe, no-fetch outcome.
+  // A row with no venue info at all still fails closed the same way.
   slotEl.innerHTML = '';
-  await assert.doesNotReject(() => loadOrderbook({ id: 'beat' }, { available: false, url: null, pair: null }));
-  assert.match(slotEl.innerHTML, /není dostupný|nedostupn/i);
+  await assert.doesNotReject(() => loadOrderbook({ id: 'beat' }, undefined));
+  assert.match(slotEl.innerHTML, /DEX|není na Binance|CoinGeck/i);
 });
 
-test('loadOrderbook still fetches the public depth endpoint for an available spot pair', async () => {
-  // Guards that the safety hardening did not break the happy path.
+test('loadOrderbook fetches the backend /api/orderbook for a spot (BIN) coin — never api.binance.com', async () => {
+  // V8: the book goes through OUR backend, not a direct browser→Binance
+  // call (which adblockers block). Assert the request target moved.
   const statusEl = { textContent: '' };
   const slotEl = { innerHTML: '' };
   const getEl = (id) => (id === 'ob-status' ? statusEl : slotEl);
   let fetchedUrl = null;
   const fetchImpl = async (url) => {
     fetchedUrl = url;
-    return { ok: true, json: async () => ({ bids: [['10', '1']], asks: [['11', '2']] }) };
+    return { ok: true, json: async () => ({ orderbook: { top5_bids: [['10', '1']], top5_asks: [['11', '2']], spread_bps: 1 } }) };
   };
   const loadOrderbook = loadOrderbookFn({ getEl, fetchImpl, sel: 'btc' });
   await assert.doesNotReject(() =>
-    loadOrderbook({ id: 'btc' }, { available: true, market: 'spot', pair: 'BTC/USDT' }));
-  assert.match(String(fetchedUrl), /api\.binance\.com\/api\/v3\/depth\?symbol=BTCUSDT/);
+    loadOrderbook({ id: 'btc', exchange: 'BIN', binance_market: 'spot', spot_pair: 'BTCUSDT' }, {}));
+  assert.match(String(fetchedUrl), /\/api\/orderbook\?pair=BTCUSDT&market=spot/);
+  assert.doesNotMatch(String(fetchedUrl), /api\.binance\.com/); // no direct browser→Binance anymore
+  assert.match(slotEl.innerHTML, /mid/);
+});
+
+test('loadOrderbook fetches FUTURES depth for an ALPHA (perp-only) coin', async () => {
+  // The old code dead-ended ALPHA coins with "Spot only". The backend
+  // serves futures depth, so ALPHA must now request market=futures.
+  const statusEl = { textContent: '' };
+  const slotEl = { innerHTML: '' };
+  const getEl = (id) => (id === 'ob-status' ? statusEl : slotEl);
+  let fetchedUrl = null;
+  const fetchImpl = async (url) => {
+    fetchedUrl = url;
+    return { ok: true, json: async () => ({ orderbook: { top5_bids: [['9', '1']], top5_asks: [['10', '2']], spread_bps: 2 } }) };
+  };
+  const loadOrderbook = loadOrderbookFn({ getEl, fetchImpl, sel: 'hype' });
+  await assert.doesNotReject(() =>
+    loadOrderbook({ id: 'hype', exchange: 'ALPHA', binance_market: 'futures', futures_pair: 'HYPEUSDT' }, {}));
+  assert.match(String(fetchedUrl), /\/api\/orderbook\?pair=HYPEUSDT&market=futures/);
   assert.match(slotEl.innerHTML, /mid/);
 });
 
