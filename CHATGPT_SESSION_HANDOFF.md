@@ -411,17 +411,20 @@ email allowlist (§9), not a billing tier.
   - `tests/db.connection.test.mjs` and `tests/db.schema.test.mjs` prove the
     schema and connection helper; they **skip gracefully** when no local
     Netlify dev DB is reachable (never require/fall back to production).
-  - **No product behavior changed.** Nothing reads or writes these tables yet;
-    market data, RADAR, reclaim/absorption, alerts, and auth are all
-    untouched by this work.
-  - **Phase 2C admin observability read route:** production route is only
-    /api/admin-observability (not /.netlify/functions/admin-observability).
-    It is GET-only; unsupported methods return 405 before any auth or DB work.
-    Auth and observability modules load lazily after the relevant gate so an
-    unavailable auth dependency returns 401 and an unavailable DB dependency
-    after verified admin auth returns 503, never an internal-error response.
-    The route has no diagnostic write path, migration, market-data, RADAR,
-    alert, Telegram, trading, or Supabase-auth behavior change.
+  - **Phase 2B changed no product behavior.** It only established the
+    observability tables; market data, RADAR, reclaim/absorption, alerts, and
+    Supabase auth were untouched.
+  - **Phase 2C DB-backed observability is production-verified** on `1f03fe1`:
+    the homepage smoke returned 200 and the unauthenticated admin smoke
+    returned 401. The only route is `/api/admin-observability`; do not smoke
+    `/.netlify/functions/admin-observability`.
+  - The endpoint is admin-only, GET-only, and read-only. Non-GET requests
+    return 405; unauthenticated or auth-import/parser failures return 401;
+    forbidden identities return 403; and an observability/DB import or read
+    failure after verified-admin authorization returns safe 503. It has no
+    diagnostic write path, migration, market-data, RADAR, alert, Telegram,
+    trading, or Supabase-auth behavior change.
+  - **Start Phase 2D only after this Phase 2C documentation sync.**
   - **Do not** write market data, implement reclaim/absorption, or remove/
     migrate Supabase auth as part of this DB work yet — those are separate,
     later phases with their own review.
