@@ -421,6 +421,16 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .hm-tip__row b{color:var(--txt);font-weight:600}
 .hm-tip__hint{margin-top:6px;padding-top:5px;border-top:1px dashed rgba(255,255,255,.08);font-size:9px;color:var(--txt3);letter-spacing:.04em}
 
+/* ═══════════ BUBBLES — premium market bubble map ═══════════ */
+/* Position/size/gradient are computed per-bubble in JS (inline); this
+   class only owns the interaction states inline styles can't express
+   (hover lift/glow, drag, selection) so they compose over the JS-set
+   background/box-shadow instead of fighting it via !important. */
+.bubble-item{transform:translate(-50%,-50%);transition:transform .15s ease,filter .15s ease;will-change:transform}
+.bubble-item:hover{transform:translate(-50%,-50%) scale(1.08);filter:brightness(1.15);z-index:30 !important}
+.bubble-item.is-dragging{transition:none;z-index:40 !important}
+.bubble-item.is-selected{outline:2px solid var(--acc);outline-offset:3px}
+
 /* ═══════════ MOVERS — V6.8 Gainers & Losers (1H/24H/7D) ═══════════ */
 .movers-table{padding:4px 0}
 .mover-hdr,.mover-row{display:grid;grid-template-columns:28px minmax(70px,1fr) 84px 56px 56px 56px 72px;align-items:center;padding:5px 10px;gap:5px;font-size:10px;font-family:var(--mono)}

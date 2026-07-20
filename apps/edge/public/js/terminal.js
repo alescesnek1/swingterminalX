@@ -2822,6 +2822,7 @@ const _hm = {
   lastHeight: 0,
   resizeRaf: 0,
   hoverIdx: -1,
+  selectedId: null,    // persists across hover/redraw until another cell is clicked
 };
 
 function _hmColor(c) {
@@ -2931,6 +2932,20 @@ function _hmDraw(canvas) {
     }
   }
 
+  // Selected cell (click) persists across hover/redraw until another cell
+  // is clicked — matched by coin id since _hm.rects is rebuilt on every
+  // render and indices can't be trusted to stay stable.
+  if (_hm.selectedId) {
+    for (const r of _hm.rects) {
+      if (String(r.d.id || '') === _hm.selectedId) {
+        ctx.strokeStyle = '#c084fc';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2);
+        break;
+      }
+    }
+  }
+
   if (_hm.hoverIdx >= 0 && _hm.hoverIdx < _hm.rects.length) {
     const r = _hm.rects[_hm.hoverIdx];
     ctx.strokeStyle = '#00e8c8';
@@ -3007,6 +3022,8 @@ function _hmEnsureChrome() {
       const idx = _hmHit(e.clientX - rect.left, e.clientY - rect.top);
       if (idx < 0) return;
       const d = _hm.rects[idx].d;
+      _hm.selectedId = String(d.id || '');
+      _hmDraw(canvas);
       if (typeof showHeatmapDetail === 'function') showHeatmapDetail(d);
     });
 
@@ -3022,7 +3039,7 @@ function _hmEnsureChrome() {
   return canvas;
 }
 
-window.hmState = { search: '', limit: 500, density: 'normal' };
+window.hmState = { search: '', limit: 500, density: 'roomy' };
 window.bubState = { search: '', limit: 100 };
 
 function renderHeatmap() {
@@ -3068,9 +3085,11 @@ function renderHeatmap() {
   const W = wrap.clientWidth || 800;
   let H = wrap.clientHeight || 500;
   
-  // Heatmap 1000 fix: ensure enough vertical space so cells remain readable
-  const density = window.hmState?.density || 'normal';
-  const minCellArea = density === 'roomy' ? 4200 : density === 'compact' ? 1150 : 2200; // roomy ~65x65, normal ~45x45, compact ~34x34
+  // Heatmap readability fix: ensure enough vertical space so cells stay
+  // large — owner explicitly rejected a "cramped wall" default. Scroll
+  // vertically instead of shrinking cells to fit everything on-screen.
+  const density = window.hmState?.density || 'roomy';
+  const minCellArea = density === 'roomy' ? 6400 : density === 'compact' ? 2100 : 3800; // roomy ~80x80, normal ~62x62, compact ~46x46
   const requiredH = Math.ceil((pool.length * minCellArea) / W);
   if (requiredH > H) {
     H = requiredH;
@@ -3190,35 +3209,55 @@ function renderSectors() {
   renderBubbles(); // Proxy in case something calls renderSectors still
 }
 
+// Dark-premium palette for bubble fill/rim/glow, keyed by 24h direction.
+// Radial gradients give the inner-shadow "orb" depth the flat rgba fill
+// used to lack; ring/glow alpha still scales with |24h %| per-bubble.
+const BUBBLE_PALETTE = {
+  up:   { fill: 'radial-gradient(circle at 34% 27%, rgba(22,84,60,.95), rgba(6,20,15,.98) 72%)', ring: 'rgba(52,211,153,', glow: 'rgba(0,212,132,', pct: 'var(--grn)' },
+  down: { fill: 'radial-gradient(circle at 34% 27%, rgba(92,26,36,.95), rgba(24,7,10,.98) 72%)',  ring: 'rgba(248,113,113,', glow: 'rgba(255,51,86,', pct: 'var(--red)' },
+  flat: { fill: 'radial-gradient(circle at 34% 27%, rgba(48,58,76,.9), rgba(14,18,27,.98) 72%)',   ring: 'rgba(148,163,184,', glow: 'rgba(100,116,139,', pct: 'var(--txt3)' }
+};
+
 class BubbleLayout {
   static bubbles = [];
   static container = null;
   static W = 0;
   static H = 0;
+  static selectedEl = null;
 
   static init(container, pool) {
     this.container = container;
     this.W = container.clientWidth || 800;
     this.H = container.clientHeight || 500;
-    
-    const modeScale = pool.length > 250 ? 0.6 : 1;
-    
+
+    const isMobile = this.W < 640;
+    const minSize = isMobile ? 40 : 48;
+    const maxSize = isMobile ? 132 : 200;
+
+    // Size by volume RANK-PERCENTILE within the visible pool, not raw
+    // magnitude: real volume distributions are often too clustered for
+    // log-scale to show visible variety, and the reference market maps
+    // rely on a handful of big bubbles among many smaller ones regardless
+    // of the underlying value spread. An eased percentile guarantees that
+    // "few giants, many smaller" cloud feel deterministically.
+    const byVol = [...pool].sort((a, b) => (Number(b.total_volume) || 0) - (Number(a.total_volume) || 0));
+    const volRank = new Map(byVol.map((d, i) => [String(d.id || ''), i]));
+    const nSpan = Math.max(1, pool.length - 1);
+
     this.bubbles = pool.map(d => {
-      const vol = Number(d.total_volume) || 0;
-      const minSize = 40 * modeScale, maxSize = 120 * modeScale;
-      const maxVol = Math.max(...pool.map(p => Number(p.total_volume) || 0));
-      const size = maxVol > 0 ? minSize + (Math.log10(1 + vol) / Math.log10(1 + maxVol)) * (maxSize - minSize) : minSize;
-      
-      const c = Number(d.price_change_percentage_24h) || 0;
-      const absC = Math.min(Math.abs(c), 15) / 15;
-      const intensity = Math.floor(60 + absC * (255 - 60));
-      const bg = c >= 0 ? `rgba(0, ${intensity}, 0, 0.7)` : `rgba(${intensity}, 0, 0, 0.7)`;
-      const border = c >= 0 ? `1px solid rgba(0, 255, 0, 0.4)` : `1px solid rgba(255, 0, 0, 0.4)`;
       const idAttr = String(d.id || '');
+      const rank = volRank.has(idAttr) ? volRank.get(idAttr) : nSpan;
+      const pct = 1 - (rank / nSpan);
+      const eased = Math.pow(pct, 1.7);
+      const size = minSize + eased * (maxSize - minSize);
+
+      const c = Number(d.price_change_percentage_24h) || 0;
+      const dir = c > 0.5 ? 'up' : c < -0.5 ? 'down' : 'flat';
+      const glow = Math.min(1, Math.abs(c) / 10);
       const sym = String(d.symbol||'').toUpperCase();
-      
+
       return {
-        id: idAttr, d, sym, c, bg, border,
+        id: idAttr, d, sym, c, dir, glow,
         r: size / 2,
         x: this.W/2 + (Math.random() - 0.5) * 20,
         y: this.H/2 + (Math.random() - 0.5) * 20,
@@ -3282,29 +3321,38 @@ class BubbleLayout {
   static renderDOM() {
     this.container.innerHTML = '';
     this.container.style.overflow = 'auto';
+    this.selectedEl = null;
     let maxY = 0;
 
     this.bubbles.forEach(b => {
       const el = document.createElement('div');
       el.className = 'bubble-item';
-      el.style.cssText = `position:absolute; width:${b.r*2}px; height:${b.r*2}px; border-radius:50%; background:${b.bg}; border:${b.border}; display:flex; flex-direction:column; justify-content:center; align-items:center; cursor:pointer; touch-action:none; transform:translate(-50%, -50%); user-select:none; z-index:1; overflow:hidden;`;
-      
-      const fontSym = Math.max(9, b.r*0.45);
-      const fontChg = Math.max(8, fontSym * 0.8);
-      const maxChars = Math.max(2, Math.floor((b.r*2 - 8) / (fontSym*0.6)));
+      const pal = BUBBLE_PALETTE[b.dir];
+      const ringA = (0.4 + b.glow * 0.35).toFixed(2);
+      const glowA = (0.16 + b.glow * 0.34).toFixed(2);
+      const glowPx = Math.round(8 + b.glow * 16 + b.r * 0.12);
+      el.style.cssText = `position:absolute; width:${b.r*2}px; height:${b.r*2}px; border-radius:50%; background:${pal.fill}; border:1px solid ${pal.ring}${ringA}); box-shadow:0 0 ${glowPx}px ${pal.glow}${glowA}), inset 0 0 ${Math.round(b.r*0.55)}px rgba(0,0,0,.55), inset 0 1px 2px rgba(255,255,255,.08); display:flex; flex-direction:column; justify-content:center; align-items:center; cursor:pointer; touch-action:none; user-select:none; z-index:1; overflow:hidden;`;
+
+      const showBadge = b.r >= 34;
+      const fontSym = Math.max(9, b.r*0.4);
+      const fontChg = Math.max(8, fontSym * 0.78);
+      const maxChars = Math.max(2, Math.floor((b.r*2 - 10) / (fontSym*0.6)));
       const symFit = b.sym.length > maxChars ? b.sym.slice(0, Math.max(1, maxChars-1)) + '…' : b.sym;
       const pC = (b.c>=0?'+':'')+b.c.toFixed(1)+'%';
-      
+      const badgeSize = Math.max(12, Math.round(b.r*0.4));
+      const badgeLetter = b.sym.slice(0, 1) || '?';
+
       el.innerHTML = `
-        <div style="font-weight:bold; font-size:${fontSym}px; text-shadow:1px 1px 2px #000; text-align:center; white-space:nowrap;" title="${_esc(b.sym)}">${_esc(symFit)}</div>
-        <div style="font-size:${fontChg}px; color:${b.c>=0?'#8f8':'#f88'}; text-shadow:1px 1px 1px #000; margin-top:2px;">${pC}</div>
+        ${showBadge ? `<div style="position:absolute; top:${Math.round(b.r*0.24)}px; width:${badgeSize}px; height:${badgeSize}px; border-radius:50%; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.18); display:flex; align-items:center; justify-content:center; font-size:${Math.round(badgeSize*0.55)}px; font-weight:700; color:rgba(255,255,255,.8); pointer-events:none;">${_esc(badgeLetter)}</div>` : ''}
+        <div style="font-weight:700; font-size:${fontSym}px; color:#eef3fb; text-shadow:0 1px 3px rgba(0,0,0,.65); text-align:center; white-space:nowrap; margin-top:${showBadge ? Math.round(b.r*0.32) : 0}px;" title="${_esc(b.sym)}">${_esc(symFit)}</div>
+        <div style="font-size:${fontChg}px; font-weight:600; color:${pal.pct}; text-shadow:0 1px 2px rgba(0,0,0,.6); margin-top:2px;">${pC}</div>
       `;
-      
+
       let startX, startY, moved = false;
       el.addEventListener('pointerdown', (e) => {
         e.preventDefault();
         el.setPointerCapture(e.pointerId);
-        el.style.zIndex = '10';
+        el.classList.add('is-dragging');
         startX = e.clientX; startY = e.clientY;
         moved = false;
       });
@@ -3323,15 +3371,18 @@ class BubbleLayout {
       const endDrag = (e) => {
         if (el.hasPointerCapture(e.pointerId)) {
           el.releasePointerCapture(e.pointerId);
-          el.style.zIndex = '1';
+          el.classList.remove('is-dragging');
           if (!moved) {
+            if (BubbleLayout.selectedEl) BubbleLayout.selectedEl.classList.remove('is-selected');
+            el.classList.add('is-selected');
+            BubbleLayout.selectedEl = el;
             if (window.showBubbleDetail) window.showBubbleDetail(_esc(b.id), el);
           }
         }
       };
       el.addEventListener('pointerup', endDrag);
       el.addEventListener('pointercancel', endDrag);
-      
+
       el.style.left = b.x + 'px';
       el.style.top = b.y + 'px';
 
@@ -3421,9 +3472,10 @@ window.showBubbleDetail = function(id, el) {
   const mc = Number(d.market_cap) || 0;
   const vol = Number(d.total_volume) || 0;
   const rank = d.market_cap_rank || '—';
+  const accent = c > 0.5 ? 'var(--grn)' : c < -0.5 ? 'var(--red)' : 'var(--pur)';
 
-  detail.style.cssText = 'display:block; position:absolute; top:20px; right:20px; background:var(--s1); border:1px solid var(--b2); padding:16px; border-radius:var(--rad); width:280px; z-index:100; box-shadow:0 8px 24px rgba(0,0,0,0.8); font-family:var(--mono, monospace); font-size:12px;';
-  
+  detail.style.cssText = `display:block; position:absolute; top:20px; right:20px; background:var(--s1); border:1px solid var(--b2); border-top:3px solid ${accent}; padding:16px; border-radius:var(--rad); width:280px; z-index:100; box-shadow:0 8px 24px rgba(0,0,0,0.8); font-family:var(--mono, monospace); font-size:12px;`;
+
   detail.innerHTML = `
     <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--b1); padding-bottom:10px; margin-bottom:12px;">
       <div style="font-size:16px; font-weight:700; color:var(--txt);">${_esc(String(d.symbol||'').toUpperCase())} <span style="font-size:10px; font-weight:400; color:var(--txt3);">${_esc(String(d.name||''))}</span></div>
@@ -3450,9 +3502,10 @@ window.showHeatmapDetail = function(d) {
   const mc = Number(d.market_cap) || 0;
   const vol = Number(d.total_volume) || 0;
   const rank = d.market_cap_rank || '—';
+  const accent = c > 0.5 ? 'var(--grn)' : c < -0.5 ? 'var(--red)' : 'var(--pur)';
 
-  detail.style.cssText = 'display:block; position:absolute; top:20px; right:20px; background:var(--s1); border:1px solid var(--b2); padding:16px; border-radius:var(--rad); width:280px; z-index:100; box-shadow:0 8px 24px rgba(0,0,0,0.8); font-family:var(--mono, monospace); font-size:12px;';
-  
+  detail.style.cssText = `display:block; position:absolute; top:20px; right:20px; background:var(--s1); border:1px solid var(--b2); border-top:3px solid ${accent}; padding:16px; border-radius:var(--rad); width:280px; z-index:100; box-shadow:0 8px 24px rgba(0,0,0,0.8); font-family:var(--mono, monospace); font-size:12px;`;
+
   detail.innerHTML = `
     <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--b1); padding-bottom:10px; margin-bottom:12px;">
       <div style="font-size:16px; font-weight:700; color:var(--txt);">${_esc(String(d.symbol||'').toUpperCase())} <span style="font-size:10px; font-weight:400; color:var(--txt3);">${_esc(String(d.name||''))}</span></div>
