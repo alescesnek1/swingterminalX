@@ -1,0 +1,346 @@
+// Market price history storage foundation only.
+//
+// Writes/reads rows for `market_price_snapshots` / `market_price_points`
+// (see netlify/database/migrations/20260720130902_add-market-price-history).
+// No product function calls this yet — it exists so a future ingest point
+// has one safe, tested path instead of hand-rolling INSERT/SELECT.
+//
+// SAFETY MODEL (mirrors netlify/functions/_observability.mjs)
+//   - Every export returns { ok:true, ... } or { ok:false, reason }. Nothing
+//     here throws for an expected failure (bad input, DB unavailable, write
+//     failure) — callers can always check `.ok`. `reason` is always a
+//     stable, short code, never a raw error message or connection string.
+//   - raw_meta is allowlist-sanitized the same way observability payloads
+//     are: dangerous-named keys (token, secret, password, auth, ids,
+//     connection info) are stripped unconditionally, JSON-unsafe values are
+//     dropped, and size is bounded. The full external API payload is never
+//     stored.
+//   - No query runs at import time. No env var is read at import time.
+//   - No trading, RADAR, reclaim/absorption, alert, or Telegram side effects
+//     of any kind live in this file.
+import { getDb } from './_db.mjs';
+
+export const ALLOWED_SNAPSHOT_STATUSES = Object.freeze(['ok', 'partial', 'failed']);
+const ALLOWED_SNAPSHOT_STATUSES_SET = new Set(ALLOWED_SNAPSHOT_STATUSES);
+
+const MAX_ROWS_PER_WRITE = 2000;
+const MAX_RAW_META_CHARS = 500;
+const MAX_TEXT_FIELD_CHARS = 200;
+
+// Same dangerous-key list/behavior as _observability.mjs's sanitizePayload,
+// duplicated locally so this module has no import-time dependency on the
+// observability helper's internals.
+const DANGEROUS_KEYS = new Set([
+  'token', 'accesstoken', 'refreshtoken', 'idtoken', 'apikey',
+  'secret', 'password', 'passwd', 'authorization', 'auth', 'cookie', 'jwt',
+  'chatid', 'userid', 'dburl', 'databaseurl', 'connection', 'connectionstring',
+]);
+
+function isDangerousKey(key) {
+  const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return DANGEROUS_KEYS.has(normalized)
+    || normalized.includes('token')
+    || normalized.includes('secret')
+    || normalized.includes('password');
+}
+
+function isPlainObject(v) {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) return false;
+  try {
+    const proto = Object.getPrototypeOf(v);
+    return proto === Object.prototype || proto === null;
+  } catch {
+    return false;
+  }
+}
+
+function isJsonSafePrimitive(v) {
+  return v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean';
+}
+
+function sanitizeValue(value, depth) {
+  if (depth > 3) return '[max-depth-exceeded]';
+  if (isJsonSafePrimitive(value)) return value;
+  if (Array.isArray(value)) return value.slice(0, 20).map((v) => sanitizeValue(v, depth + 1));
+  if (isPlainObject(value)) {
+    const out = {};
+    for (const [key, val] of Object.entries(value)) {
+      if (isDangerousKey(key)) continue;
+      out[key] = sanitizeValue(val, depth + 1);
+    }
+    return out;
+  }
+  return undefined;
+}
+
+// Sanitizes a raw market row into a tiny, safe `raw_meta` blob — never the
+// full external API payload. Exported so tests can verify stripping
+// behavior directly.
+export function sanitizeRawMeta(value) {
+  if (value === undefined || value === null || !isPlainObject(value)) return {};
+  const cleaned = sanitizeValue(value, 0);
+  let json;
+  try {
+    json = JSON.stringify(cleaned);
+  } catch {
+    return {};
+  }
+  if (json.length > MAX_RAW_META_CHARS) return { _truncated: true };
+  return cleaned;
+}
+
+function truncate(str, max) {
+  if (typeof str !== 'string') return str;
+  return str.length > max ? str.slice(0, max) : str;
+}
+
+function toSafeNumber(v) {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function toSafeInt(v) {
+  const n = toSafeNumber(v);
+  return n === null ? null : Math.trunc(n);
+}
+
+function firstDefined(row, keys) {
+  for (const key of keys) {
+    if (row[key] !== undefined && row[key] !== null) return row[key];
+  }
+  return undefined;
+}
+
+function logFailure(location, err) {
+  // Never log err.message — pg connection errors can embed host/port
+  // details. name + code (a stable Postgres SQLSTATE when present) is
+  // enough to diagnose without risking a leak.
+  console.warn(`[PRICE_HISTORY] ${location} failed`, { name: err?.name || 'Error', code: err?.code || null });
+}
+
+/**
+ * Normalizes one raw market row into a DB-ready point object, or `null` if
+ * the row has no usable symbol. Never throws for a malformed row. Missing
+ * values stay `null` — nothing is invented.
+ */
+export function normalizePricePoint(row, sampledAt, source) {
+  if (!row || typeof row !== 'object') return null;
+
+  const rawSymbol = firstDefined(row, ['symbol', 's']);
+  const symbol = typeof rawSymbol === 'string' ? rawSymbol.trim().toUpperCase() : '';
+  if (!symbol) return null;
+
+  const rawName = firstDefined(row, ['name', 'coinName']);
+  const name = typeof rawName === 'string' && rawName.trim() ? truncate(rawName.trim(), MAX_TEXT_FIELD_CHARS) : null;
+
+  const priceUsd = toSafeNumber(firstDefined(row, ['price', 'priceUsd', 'price_usd', 'lastPrice']));
+  const change1hPct = toSafeNumber(firstDefined(row, ['change1h', 'change_1h_pct', 'pct1h']));
+  const change24hPct = toSafeNumber(firstDefined(row, ['change24h', 'change_24h_pct', 'priceChangePercent', 'pct24h']));
+  const change7dPct = toSafeNumber(firstDefined(row, ['change7d', 'change_7d_pct', 'pct7d']));
+  const volume24hUsd = toSafeNumber(firstDefined(row, ['volume24h', 'quoteVolume', 'volume_24h_usd']));
+  const marketCapUsd = toSafeNumber(firstDefined(row, ['marketCap', 'market_cap_usd']));
+
+  const rawRank = toSafeInt(firstDefined(row, ['rank', 'marketCapRank']));
+  const rank = rawRank !== null && rawRank > 0 ? rawRank : null;
+
+  const sourceTag = typeof source === 'string' && source.trim() ? truncate(source.trim(), MAX_TEXT_FIELD_CHARS) : null;
+
+  const sampledAtDate = sampledAt instanceof Date && !Number.isNaN(sampledAt.getTime())
+    ? sampledAt
+    : new Date();
+
+  return {
+    symbol,
+    name,
+    priceUsd,
+    change1hPct,
+    change24hPct,
+    change7dPct,
+    volume24hUsd,
+    marketCapUsd,
+    rank,
+    source: sourceTag,
+    sampledAt: sampledAtDate,
+    rawMeta: sanitizeRawMeta(row),
+  };
+}
+
+/**
+ * Deduplicates normalized points by symbol, first occurrence wins. Matches
+ * the DB's own `ON CONFLICT (snapshot_id, symbol) DO NOTHING` semantics, so
+ * dedupe here and the unique index agree on which row survives. Exported so
+ * tests can verify dedupe logic without touching the DB.
+ */
+export function dedupePointsBySymbol(points) {
+  const bySymbol = new Map();
+  let duplicates = 0;
+  for (const point of points) {
+    if (bySymbol.has(point.symbol)) {
+      duplicates += 1;
+    } else {
+      bySymbol.set(point.symbol, point);
+    }
+  }
+  return { deduped: [...bySymbol.values()], duplicates };
+}
+
+/**
+ * Writes one snapshot row plus its normalized, deduped point rows. Returns
+ * { ok:true, snapshotId, inserted, dropped, duplicates } or
+ * { ok:false, reason }. Rows sharing a symbol within one batch are deduped
+ * before insert (first occurrence wins) so `inserted` and the snapshot's
+ * `coin_count` always reflect actual insertable rows, never attempted
+ * inserts — `inserted` itself is summed from each INSERT's rowCount, so it
+ * always equals the number of rows that actually landed in the DB even if
+ * the unique constraint ever skips one unexpectedly. Never throws for
+ * DB-unavailable or invalid input. No trading, alert, or Telegram side
+ * effects — this is a storage write only.
+ */
+export async function writeMarketPriceSnapshot(input, deps = {}) {
+  const getDbImpl = deps.getDbImpl || getDb;
+  const { source, sampledAt, rows, metadata } = input && typeof input === 'object' ? input : {};
+
+  const sourceTag = typeof source === 'string' ? source.trim() : '';
+  if (!sourceTag) return { ok: false, reason: 'MISSING_SOURCE' };
+  if (!Array.isArray(rows)) return { ok: false, reason: 'INVALID_ROWS' };
+
+  const sampledAtDate = sampledAt instanceof Date && !Number.isNaN(sampledAt.getTime())
+    ? sampledAt
+    : new Date();
+
+  const boundedRows = rows.slice(0, MAX_ROWS_PER_WRITE);
+  const normalized = [];
+  let dropped = rows.length - boundedRows.length;
+  for (const row of boundedRows) {
+    const point = normalizePricePoint(row, sampledAtDate, sourceTag);
+    if (point) normalized.push(point);
+    else dropped += 1;
+  }
+
+  const { deduped, duplicates } = dedupePointsBySymbol(normalized);
+
+  const safeMetadata = sanitizeRawMeta(metadata);
+  const status = ALLOWED_SNAPSHOT_STATUSES_SET.has(input?.status) ? input.status : 'ok';
+
+  let db;
+  try {
+    db = getDbImpl();
+  } catch {
+    return { ok: false, reason: 'DB_UNAVAILABLE' };
+  }
+
+  const client = await (async () => {
+    try {
+      return await db.pool.connect();
+    } catch {
+      return null;
+    }
+  })();
+  if (!client) return { ok: false, reason: 'DB_UNAVAILABLE' };
+
+  try {
+    await client.query('BEGIN');
+    const snapshotRes = await client.query(
+      `INSERT INTO market_price_snapshots (source, sampled_at, coin_count, status, metadata)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id`,
+      [sourceTag, sampledAtDate, deduped.length, status, JSON.stringify(safeMetadata)],
+    );
+    const snapshotId = snapshotRes.rows[0].id;
+
+    let inserted = 0;
+    for (const point of deduped) {
+      const pointRes = await client.query(
+        `INSERT INTO market_price_points
+           (snapshot_id, symbol, name, price_usd, change_1h_pct, change_24h_pct, change_7d_pct,
+            volume_24h_usd, market_cap_usd, rank, source, sampled_at, raw_meta)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+         ON CONFLICT (snapshot_id, symbol) DO NOTHING`,
+        [
+          snapshotId, point.symbol, point.name, point.priceUsd, point.change1hPct,
+          point.change24hPct, point.change7dPct, point.volume24hUsd, point.marketCapUsd,
+          point.rank, point.source, point.sampledAt, JSON.stringify(point.rawMeta),
+        ],
+      );
+      inserted += pointRes.rowCount;
+    }
+
+    await client.query('COMMIT');
+    return { ok: true, snapshotId, inserted, dropped, duplicates };
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch { /* connection already broken */ }
+    logFailure('writeMarketPriceSnapshot', err);
+    return { ok: false, reason: 'DB_UNAVAILABLE' };
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Reads the most recent points for one symbol, newest first. `raw_meta` is
+ * never included by default. Returns { ok:true, points } or
+ * { ok:false, reason }.
+ */
+export async function listRecentPricePoints(opts = {}, deps = {}) {
+  const getDbImpl = deps.getDbImpl || getDb;
+  const rawSymbol = typeof opts.symbol === 'string' ? opts.symbol.trim().toUpperCase() : '';
+  if (!rawSymbol) return { ok: false, reason: 'MISSING_SYMBOL' };
+  const limit = Math.min(Math.max(1, Number.isFinite(opts.limit) ? Math.trunc(opts.limit) : 100), 500);
+
+  let db;
+  try {
+    db = getDbImpl();
+  } catch {
+    return { ok: false, reason: 'DB_UNAVAILABLE' };
+  }
+
+  try {
+    const res = await db.pool.query(
+      `SELECT id, snapshot_id, symbol, name, price_usd, change_1h_pct, change_24h_pct, change_7d_pct,
+              volume_24h_usd, market_cap_usd, rank, source, sampled_at
+       FROM market_price_points
+       WHERE symbol = $1
+       ORDER BY sampled_at DESC
+       LIMIT $2`,
+      [rawSymbol, limit],
+    );
+    return { ok: true, points: res.rows };
+  } catch (err) {
+    logFailure('listRecentPricePoints', err);
+    return { ok: false, reason: 'DB_UNAVAILABLE' };
+  }
+}
+
+/**
+ * Reads the most recent snapshot metadata rows, newest first. Returns
+ * { ok:true, snapshots } or { ok:false, reason }.
+ */
+export async function listRecentSnapshots(opts = {}, deps = {}) {
+  const getDbImpl = deps.getDbImpl || getDb;
+  const limit = Math.min(Math.max(1, Number.isFinite(opts.limit) ? Math.trunc(opts.limit) : 50), 200);
+
+  let db;
+  try {
+    db = getDbImpl();
+  } catch {
+    return { ok: false, reason: 'DB_UNAVAILABLE' };
+  }
+
+  try {
+    const res = await db.pool.query(
+      `SELECT id, source, sampled_at, coin_count, status, metadata, created_at
+       FROM market_price_snapshots
+       ORDER BY sampled_at DESC
+       LIMIT $1`,
+      [limit],
+    );
+    return { ok: true, snapshots: res.rows };
+  } catch (err) {
+    logFailure('listRecentSnapshots', err);
+    return { ok: false, reason: 'DB_UNAVAILABLE' };
+  }
+}
