@@ -13,9 +13,10 @@
 > `/reply` or `/admin_summary` support system** here. If you find yourself
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
-> _Last synced to repo state: branch
-> `feat/personal-alerts-allowlist-rollout`, on top of `main` @ `4aff022`
-> (see §11). Update the commit ref whenever this file is re-synced._
+> _Last synced to repo state: `main` @ `294c72e` (`feat(db): add
+> observability database foundation`, Phase 2B — pushed and deployed to
+> production; see §10 and §11). Update the commit ref whenever this file is
+> re-synced._
 
 ---
 
@@ -65,11 +66,13 @@ Defaults:
   confirmed RADAR `ENTRY_READY` setups and a daily morning briefing.
 - **Production:** deployed on **Netlify** at `https://swingterminalx.netlify.app`.
   A separate **ingest** service runs on **Fly.io** (`apps/ingest`). Durable state
-  is **Netlify Blobs**. Auth is **Supabase JWT**.
+  is **Netlify Blobs** (product data) plus a new **Netlify Database (Postgres)**
+  foundation for observability only (see §10). Auth is **Supabase JWT** —
+  unchanged, Supabase holds no product data.
 - **Local repo path (owner machine):**
   `C:\Users\Ales\Desktop\Bots\terminal crypto\terminal-X`
-- **Current `main` at time of writing:** `e99ca25` (`Merge branch
-  'feat/cockpit-personal-watch-list'`).
+- **Current `main` at time of writing:** `294c72e` (`feat(db): add
+  observability database foundation`) — Phase 2B, pushed and deployed.
 - **Read-first docs** (see §4).
 
 ## 4. Mandatory repo read order for new coding-agent sessions
@@ -391,11 +394,39 @@ email allowlist (§9), not a billing tier.
   in-memory fallback when Blobs unavailable (fallback is close-only for live).
 - **Do not** casually touch worker/execution/routing/scraping paths — data-source
   degradation must fail closed and never crash or relax a gate.
+- **Netlify Database / Postgres — observability foundation only (Phase 2B,
+  `294c72e`, live in production):**
+  - Netlify Database is **enabled** for this project; native migrations live in
+    `netlify/database/migrations/` and **auto-apply on every deploy** — a push
+    to `main` is both a deploy *and* a production schema migration. Treat any
+    future migration with the same care as a push/deploy approval.
+  - Production migration `20260720081238_init-observability-tables` is
+    **applied** (confirmed via the Netlify API post-deploy). It created exactly
+    two tables, **`system_events`** and **`ingest_runs`** — structured logging
+    / ingest-run tracking only. No `schema_migrations` table (Netlify already
+    tracks applied migrations in its own `netlify.migrations` ledger).
+  - `netlify/functions/_db.mjs` exports `getDb()` (lazy `@netlify/database`
+    connection, cached) and a test-only `closeDbForTests()`. **No product
+    function imports it yet** — it is unused infrastructure, wired to nothing.
+  - `tests/db.connection.test.mjs` and `tests/db.schema.test.mjs` prove the
+    schema and connection helper; they **skip gracefully** when no local
+    Netlify dev DB is reachable (never require/fall back to production).
+  - **No product behavior changed.** Nothing reads or writes these tables yet;
+    market data, RADAR, reclaim/absorption, alerts, and auth are all
+    untouched by this work.
+  - **Do not** write market data, implement reclaim/absorption, or remove/
+    migrate Supabase auth as part of this DB work yet — those are separate,
+    later phases with their own review.
 
 ## 11. Known completed work / recent milestones
 
 From current git history (most recent first, condensed — see `git log` for full):
 
+- **Database foundation (Phase 2B, `294c72e`, pushed/deployed)** — Netlify
+  Database enabled; first migration creates `system_events` + `ingest_runs`
+  only; unused `_db.mjs` connection helper; DB tests skip gracefully without
+  a local dev DB. Trading bot, RADAR, alerts, and Supabase auth untouched.
+  See §10 for the full state and the migration-auto-apply-on-push warning.
 - **RADAR positioning context** — long/short positioning context parser + wiring,
   context-only positioning readiness, source guards (`edba29b`…`9fd340f`).
 - **RADAR ↔ Cockpit import hardening** — explicit RADAR selection required for
@@ -436,6 +467,10 @@ _(Grounded in git + docs; do not over-invent.)_
 
 - Keep this handoff **and** `AGENTS.md` / `docs/` synchronized after behavior
   changes (§16).
+- **Next recommended phase: Fáze 2C** — the first safe DB-backed write path
+  (e.g. structured logging actually writing to `system_events`) and/or an
+  admin-only log viewer reading it. Small, additive, still no market data,
+  no reclaim/absorption, no auth change, no trading-bot change.
 - Continue RADAR **positioning / pressure-zone / trade-readiness** context work
   (the active line of commits) — additive, context-only, fail-closed.
 - Security-review Personal Watch Phase 4 before any push/deploy, and keep
@@ -443,6 +478,11 @@ _(Grounded in git + docs; do not over-invent.)_
 - Rolling microstructure remains **design-only** until real measurement can be
   honestly sourced — do not ship a producer that fabricates fields.
 - Verify production behavior after any approved Netlify deploy.
+- **Standing warnings from Phase 2B:** a push to `main` auto-applies any
+  pending Netlify Database migration to production — review migrations with
+  the same care as the deploy itself. Do not write market data, do not
+  implement reclaim/absorption, and do not remove/migrate Supabase auth as
+  side effects of DB work. Trading bot stays frozen and untouched throughout.
 
 ## 14. Runbook snippets (safe, sanitized — use placeholders)
 

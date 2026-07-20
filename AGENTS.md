@@ -109,6 +109,41 @@ Do not rediscover the whole repo from scratch unless these are clearly stale.
   issues.
 - **No secrets / keys / tokens / customer PII** in code, docs, URLs, or commits.
 
+## Error observability (non-negotiable)
+
+Failures must be **visible and logged** — never silently swallowed. The owner
+must always be able to tell that something broke and what broke.
+
+- **Every fetch / external call that can fail must both (a) surface a specific,
+  visible error in the UI where the user is looking, and (b) be logged**
+  (client: `console.warn`/`console.error` with context; edge/Node functions:
+  `console.*` so it lands in Netlify function logs). No empty `catch {}` that
+  hides the failure.
+- **Distinguish "no data" from "fetch failed."** A genuinely empty result and a
+  broken request must render differently — a blank / "no data" state must never
+  stand in for an error the user can't see.
+- **Log enough context to diagnose:** what failed (endpoint / symbol / venue),
+  the status or error name, and the fallback taken — but still **never** log
+  secrets, tokens, chat/user IDs, or PII (see the rules above).
+- **Data-source fallbacks must be honest, not silent.** Binance→CoinGecko
+  fallback is allowed *behaviour*, but the active source (Binance vs CoinGecko,
+  spot vs futures) must be visible in the UI, and any *unexpected* upstream
+  failure behind the fallback must still be logged.
+- **Order book specifically:** a failure to load the book must show the user a
+  clear reason (blocked / unavailable / upstream error) and log it — it must
+  never appear as an empty or "loading…" box that silently never resolves.
+- **No `catch { return 0 }` (or `return false` / `[]` / `null`) where that value
+  is indistinguishable from a genuinely valid result.** A caught error must
+  return a value the caller can tell apart from real data — never silently
+  collapse into a number/boolean/array that looks legitimate downstream.
+- **Missing or failed data must render as `UNKNOWN` — never as a bearish/SELL
+  signal or any other trading label.** A computed score, panic indicator, or
+  signal that could not be computed (missing inputs, thrown error) must never
+  fall through to a default that a user could mistake for a real reading.
+  Trading- and alert-relevant logic must **fail closed**: on missing/degraded
+  data, block the action or mark it unknown — never proceed as if the data
+  were bearish, bullish, or otherwise actionable.
+
 ## Git / deploy
 
 - **No push, no deploy** (Netlify or Fly.io) without explicit owner approval. A
