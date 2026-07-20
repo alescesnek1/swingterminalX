@@ -146,7 +146,7 @@
       <div class="tab" onclick="sv('radar',this)" data-target="view-radar">TRADING RADAR</div>
       <div class="tab" onclick="sv('cockpit',this)" data-target="view-cockpit">COCKPIT</div>
       <div class="tab" onclick="sv('charts',this)">TOP CHARTS</div>
-      <div class="tab" onclick="sv('sectors',this)">SECTORS</div>
+      <div class="tab" onclick="sv('bubbles',this)">BUBBLES</div>
       <div class="tab" onclick="sv('heatmap',this)">HEATMAP</div>
       <div class="tab" onclick="sv('movers',this)">MOVERS</div>
       <div class="tab" onclick="sv('calendar',this)">CALENDAR</div>
@@ -517,31 +517,37 @@
       <div id="topcharts-grid" class="topcharts-grid"></div>
     </div>
 
-    <!-- SECTORS -->
-    <div id="v-sectors" class="view" style="max-height:calc(100vh - 85px);overflow-y:auto">
-      <div class="filter-bar"><span style="font-size:9px;color:var(--txt3)">Souhrn sektoru a live alerty</span></div>
-      <div style="display:flex;gap:12px;padding:12px;align-items:flex-start;flex-wrap:wrap">
-        <div style="flex:1;min-width:300px">
-          <div class="ph" style="margin-bottom:8px;border-radius:var(--rad)"><span class="pt">SECTOR OVERVIEW</span></div>
-          <div id="sector-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px"></div>
-        </div>
-        <div style="width:300px;flex-shrink:0">
-          <div class="ph" style="margin-bottom:8px;border-radius:var(--rad)"><span class="pt">SECTOR ALERTY</span></div>
-          <div id="sector-alerts" style="display:flex;flex-direction:column;gap:4px"></div>
-        </div>
+    <!-- BUBBLES -->
+    <div id="v-bubbles" class="view">
+      <div class="filter-bar" style="display: flex; align-items: center; flex-wrap: wrap;">
+        <input type="text" class="f-input" id="bub-search" placeholder="Search symbol" onkeyup="bubState.search = this.value; renderBubbles()">
+        <select id="bub-limit" class="f-input" style="width:auto; margin-left:8px" onchange="bubState.limit = parseInt(this.value); renderBubbles()">
+          <option value="50">Top 50</option>
+          <option value="100" selected>Top 100</option>
+          <option value="250">Top 250</option>
+          <option value="500">Top 500</option>
+          <option value="1000">Top 1000</option>
+        </select>
+        <span style="margin-left:auto;font-size:9px;color:var(--txt3)" id="bub-count">—</span>
       </div>
+      <div id="bub-grid" style="display: flex; flex-wrap: wrap; justify-content: center; align-content: flex-start; gap: 8px; padding: 20px; overflow-y: auto; height: calc(100vh - 120px);"></div>
+      <div id="bub-detail" style="display:none; position:absolute; top:40px; right:20px; background:var(--s2); border:1px solid var(--b1); padding:15px; border-radius:var(--rad); width:250px; z-index:100; box-shadow:0 10px 30px rgba(0,0,0,0.5);"></div>
     </div>
 
     <!-- HEATMAP -->
     <div id="v-heatmap" class="view">
-      <div class="filter-bar">
-        <span data-tip="Every cell has identical pixel dimensions — the grid does NOT scale boxes by size. The sort order is the only ranking signal.">EQUAL GRID</span>
-        <span style="font-size:9px;color:var(--txt3)" data-tip="Color encodes the 24-hour price change. Green up, red down, deeper shade = bigger move.">· COLOR = 24h %</span>
-        <span style="font-size:9px;color:var(--txt3)" data-tip="Cells are filled row-major, top-left to bottom-right, sorted by market-cap rank ascending (CMC standard #1 → #500).">· SORT = MC RANK ASC</span>
-        <span style="font-size:9px;color:var(--txt3)" data-tip="Top 500 coins by market-cap rank, rendered to a single hardware-accelerated canvas. 60 FPS resize.">· TOP 500 · CANVAS</span>
+      <div class="filter-bar" style="display: flex; align-items: center; flex-wrap: wrap;">
+        <input type="text" class="f-input" id="hm-search" placeholder="Search symbol" onkeyup="hmState.search = this.value; renderHeatmap()">
+        <select id="hm-limit" class="f-input" style="width:auto; margin-left:8px" onchange="hmState.limit = parseInt(this.value); renderHeatmap()">
+          <option value="100">Top 100</option>
+          <option value="250">Top 250</option>
+          <option value="500" selected>Top 500</option>
+          <option value="1000">Top 1000</option>
+        </select>
         <span style="margin-left:auto;font-size:9px;color:var(--txt3)" id="hm-count">—</span>
       </div>
-      <div id="hm-grid" class="hm-canvas-wrap"></div>
+      <div id="hm-grid" class="hm-canvas-wrap" style="position:relative; overflow-y:auto; overflow-x:hidden;"></div>
+      <div id="hm-detail" style="display:none; position:absolute; top:40px; right:20px; background:var(--s2); border:1px solid var(--b1); padding:15px; border-radius:var(--rad); width:250px; z-index:100; box-shadow:0 10px 30px rgba(0,0,0,0.5);"></div>
     </div>
 
     <!-- MOVERS (V6.5 — Top 30 Gainers & Losers) -->
@@ -846,10 +852,7 @@
           </div>
         </div>
         <div class="lf-view__filters">
-          <span class="f-chip on" onclick="LiveFeed.setFilter('all',this)">ALL</span>
-          <span class="f-chip" onclick="LiveFeed.setFilter('news',this)">📰 NEWS</span>
-          <span class="f-chip" onclick="LiveFeed.setFilter('system',this)">⚙️ SYSTEM</span>
-          <span class="f-chip" onclick="LiveFeed.setFilter('ai',this)">🧠 AI</span>
+          <span class="f-chip on" onclick="LiveFeed.setFilter('alert',this)">TELEGRAM ALERTS</span>
         </div>
         <div class="lf-feed" id="live-feed-list"></div>
       </div>

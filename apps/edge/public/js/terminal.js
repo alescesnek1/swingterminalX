@@ -262,50 +262,43 @@ const LiveFeed = {
   },
 
   // ── Render into the tab view ──
+  // ── Render into the tab view ──
   render() {
     if (!this._list) this._list = document.getElementById('live-feed-list');
     if (!this._statsEl) this._statsEl = document.getElementById('lf-stats');
     if (!this._list) return;
 
-    // To prevent wiping out expanded state, we shouldn't re-render everything 
-    // ideally, but for now we'll just re-render and lose expansion on new ticks 
-    // unless we're in reading mode. If reading mode is on, we skip rendering new items?
-    // Actually, if we just push HTML we can keep it. But we overwrite innerHTML.
-    // Let's just avoid re-rendering if reading mode is ON, EXCEPT for the toggle itself.
-    
-    let items = this._events;
-    if (this._filter === 'news') items = items.filter(e => e.category === 'news');
-    else if (this._filter === 'system') items = items.filter(e => e.category === 'system');
-    else if (this._filter === 'ai') items = items.filter(e => e.category === 'ai' || e.type === 'ai');
+    const isTelegram = (e) => String(e.source || '').toLowerCase().includes('telegram') || String(e.category || '').toLowerCase() === 'telegram';
+    let items = this._events.filter(isTelegram);
 
     if (!items.length) {
       this._list.innerHTML = `
-        <div class="lf-empty">
-          <div class="lf-empty__icon">📡</div>
-          <div class="lf-empty__text">Žádné události${this._filter !== 'all' ? ' pro tento filtr' : ''}. Feed se naplní automaticky při refreshi dat a příchodu novinek.</div>
+        <div class="lf-empty" style="padding:40px; text-align:center; color:var(--txt3);">
+          <div class="lf-empty__icon" style="font-size:32px; margin-bottom:10px;">💬</div>
+          <div class="lf-empty__text">No Telegram group messages yet. Waiting for alert events...</div>
         </div>`;
     } else {
-      // Rebuild HTML but preserve expanded classes by checking the DOM
       const expandedIds = new Set(Array.from(document.querySelectorAll('.lf-item.expanded')).map(el => el.id));
       this._list.innerHTML = items.map(e => this._renderItem(e, expandedIds.has(e.id))).join('');
     }
 
     if (this._statsEl) {
-      const newsCount = this._events.filter(e => e.category === 'news').length;
-      const sysCount = this._events.filter(e => e.category === 'system').length;
-      this._statsEl.textContent = `${this._events.length} events · ${newsCount} news · ${sysCount} system`;
+      this._statsEl.textContent = `${items.length} Telegram Alerts`;
     }
   },
 
   _renderItem(e, isExpanded = false) {
     const iconMap = {
-      regime: '🟠', hot: '🔥', alert: '⚠️', ai: '🧠', news: '📰', info: '◈'
+      regime: '🟠', hot: '🔥', alert: '⚠️', ai: '🧠', news: '📰', info: '◈', telegram: '💬'
     };
-    const icon = iconMap[e.type] || '◈';
+    const isTelegram = String(e.source || '').toLowerCase().includes('telegram') || String(e.category || '').toLowerCase() === 'telegram';
+    const icon = isTelegram ? '💬' : (iconMap[e.type] || '◈');
 
     // Badge
     let badge = '';
-    if (e.category === 'system' && e.type !== 'info') {
+    if (isTelegram) {
+      badge = '<span class="lf-badge" style="background:#2AABEE; color:#fff; padding:2px 6px; border-radius:4px; font-size:9px; font-weight:bold; margin-right:6px;">TELEGRAM</span>';
+    } else if (e.category === 'system' && e.type !== 'info') {
       badge = '<span class="lf-badge lf-badge--system">SYSTEM</span>';
     } else if (e.category === 'news') {
       badge = '<span class="lf-badge lf-badge--news">NEWS</span>';
@@ -331,17 +324,25 @@ const LiveFeed = {
     let sourceLine = '';
     let detailsBlock = '';
     if (e.source) {
-      sourceLine = `<div class="lf-source">${_esc(e.source)}</div>`;
+      sourceLine = `<div class="lf-source" style="font-size:10px; color:var(--txt3); margin-top:4px;">Source: ${_esc(e.source)}</div>`;
     }
 
     // If it's a news item, we allow expansion just for the link.
     // _safeUrl rejects non-http(s) schemes so a malicious CryptoPanic
     // entry can't ship a javascript: href.
     const safeUrl = _safeUrl(e.url);
-    const isExpandable = e.category === 'news' && !!safeUrl;
-    if (isExpandable) {
-       detailsBlock = `<div class="lf-details">
-         <a href="${safeUrl}" target="_blank" rel="noopener noreferrer" style="display:inline-block;margin-top:2px;font-size:11px;font-weight:600">Read full article →</a>
+    const isNewsExpandable = e.category === 'news' && !!safeUrl;
+    
+    // We also make all telegram alerts expandable for modern interaction
+    const isExpandable = isNewsExpandable || isTelegram;
+    
+    if (isNewsExpandable) {
+       detailsBlock = `<div class="lf-details" style="display:${isExpanded ? 'block' : 'none'}; margin-top:8px; padding-top:8px; border-top:1px dashed var(--b2); font-size:11px; color:var(--txt2);">
+         <a href="${safeUrl}" target="_blank" rel="noopener noreferrer" style="display:inline-block;font-weight:600">Read full article →</a>
+       </div>`;
+    } else if (isTelegram) {
+       detailsBlock = `<div class="lf-details" style="display:${isExpanded ? 'block' : 'none'}; margin-top:8px; padding-top:8px; border-top:1px dashed var(--b2); font-size:11px; color:var(--txt2);">
+         Full message content shown here for <b>${_esc(e.ts)}</b>.
        </div>`;
     }
 
@@ -356,11 +357,16 @@ const LiveFeed = {
     // typo from breaking class parsing.
     const safeType = _esc(e.type);
 
-    return `<div id="${safeId}" class="lf-item lf-${safeType}${expandCls}" style="${cursorCls}" ${clickHandler}>
-      <span class="lf-ts">${_esc(e.ts)}</span>
-      <span class="lf-icon">${icon}</span>
-      <div class="lf-body">
-        <div class="lf-msg">${badge}${processedMsg}${sentimentTag}${impactPill}</div>
+    return `<div id="${safeId}" class="lf-item lf-${safeType}${expandCls}" style="${cursorCls} background:var(--s2); border:1px solid var(--b1); border-radius:var(--rad); padding:12px; margin-bottom:8px; transition:all 0.2s; position:relative; overflow:hidden;" ${clickHandler}>
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+        <div style="display:flex; align-items:center;">
+          ${badge}
+          <span class="lf-ts" style="font-size:10px; color:var(--txt3);">${_esc(e.ts)}</span>
+        </div>
+        <span class="lf-icon" style="font-size:14px; opacity:0.8;">${icon}</span>
+      </div>
+      <div class="lf-body" style="width:100%;">
+        <div class="lf-msg" style="font-size:13px; line-height:1.4; color:var(--txt); ${isExpanded ? '' : 'white-space:nowrap; overflow:hidden; text-overflow:ellipsis;'}">${processedMsg}${sentimentTag}${impactPill}</div>
         ${sourceLine}
         ${detailsBlock}
       </div>
@@ -3000,10 +3006,8 @@ function _hmEnsureChrome() {
       const rect = canvas.getBoundingClientRect();
       const idx = _hmHit(e.clientX - rect.left, e.clientY - rect.top);
       if (idx < 0) return;
-      const id = String(_hm.rects[idx].d.id || _hm.rects[idx].d.symbol || '').toLowerCase();
-      const scannerTab = document.querySelector('#tabs .tab');
-      pickCoin(id);
-      if (scannerTab) sv('scanner', scannerTab);
+      const d = _hm.rects[idx].d;
+      if (typeof showHeatmapDetail === 'function') showHeatmapDetail(d);
     });
 
     if (typeof ResizeObserver !== 'undefined') {
@@ -3018,23 +3022,31 @@ function _hmEnsureChrome() {
   return canvas;
 }
 
+window.hmState = { search: '', limit: 500 };
+window.bubState = { search: '', limit: 100 };
+
 function renderHeatmap() {
   const canvas = _hmEnsureChrome();
   if (!canvas) return;
 
-  // V6.8: Pool sorted by market_cap_rank ASC — matches CoinMarketCap's
-  // canonical ranking order (#1 BTC top-left, #500 bottom-right). Rows
-  // missing a rank (Binance-only synthesized BIN rows, market_cap_rank=0)
-  // are pushed to the tail so the visible grid mirrors CMC's universe.
+  const searchTerm = (window.hmState?.search || '').toLowerCase();
+  const limit = window.hmState?.limit || 500;
+
   const pool = (Array.isArray(DATA) ? DATA : [])
     .filter(d => Number(d.total_volume) > 0)
+    .filter(d => {
+      if (!searchTerm) return true;
+      const s = String(d.symbol||'').toLowerCase();
+      const n = String(d.name||'').toLowerCase();
+      return s.includes(searchTerm) || n.includes(searchTerm);
+    })
     .sort((a, b) => {
       const ra = Number(a.market_cap_rank) || Number.MAX_SAFE_INTEGER;
       const rb = Number(b.market_cap_rank) || Number.MAX_SAFE_INTEGER;
       if (ra !== rb) return ra - rb;
       return (Number(b.market_cap) || 0) - (Number(a.market_cap) || 0);
     })
-    .slice(0, 500);
+    .slice(0, limit);
 
   if (!pool.length) {
     const ctx = canvas.getContext('2d');
@@ -3043,7 +3055,12 @@ function renderHeatmap() {
     ctx.fillStyle = '#a0a0a0';
     ctx.font = '12px var(--mono, monospace)';
     ctx.textAlign = 'center';
-    ctx.fillText('No 24h volume data available.', canvas.clientWidth/2, canvas.clientHeight/2);
+    ctx.fillText('No matching coins found.', canvas.clientWidth/2, canvas.clientHeight/2);
+    const hmCount = document.getElementById('hm-count');
+    if (hmCount) hmCount.textContent = '0 coins';
+    
+    // Observability event
+    try { window.SystemEvents?.push('cockpit_heatmap_empty', { search: searchTerm, limit }); } catch(e){}
     return;
   }
 
@@ -3158,19 +3175,147 @@ function renderRegimeView() {
 }
 
 function renderSectors() {
-  const sectorStats = {};
-  for (const [sec, ids] of Object.entries(SECTOR_MAP)) {
-    const coins = DATA.filter(d => ids.includes(d.id));
-    if (!coins.length) continue;
-    const avg24h = coins.reduce((s,d) => s + (d.price_change_percentage_24h || 0), 0) / coins.length;
-    sectorStats[sec] = { avg24h, count: coins.length };
-  }
-  // V6.8 Sprint 1 (FIX-3): sec comes from SECTOR_MAP (compile-time
-  // constant) but escape anyway for consistency. st.count + fp() are
-  // numeric. Defense-in-depth in case SECTOR_MAP is ever loaded from
-  // a config endpoint.
-  document.getElementById('sector-grid').innerHTML = Object.entries(sectorStats).map(([sec, st]) => `<div class="sector-card"><div class="sc-head"><span class="sc-name">${_esc(sec)}</span><span class="sc-count">${st.count|0} coinu</span></div><div class="sc-metrics"><div class="sc-mv" style="color:${st.avg24h>=0?'var(--grn)':'var(--red)'}">${_esc(fp(st.avg24h,1))}</div></div></div>`).join('');
+  renderBubbles(); // Proxy in case something calls renderSectors still
 }
+
+function renderBubbles() {
+  const container = document.getElementById('bub-grid');
+  if (!container) return;
+
+  const searchTerm = (window.bubState?.search || '').toLowerCase();
+  const limit = window.bubState?.limit || 100;
+
+  const pool = (Array.isArray(DATA) ? DATA : [])
+    .filter(d => Number(d.total_volume) > 0)
+    .filter(d => {
+      if (!searchTerm) return true;
+      const s = String(d.symbol||'').toLowerCase();
+      const n = String(d.name||'').toLowerCase();
+      return s.includes(searchTerm) || n.includes(searchTerm);
+    })
+    .sort((a, b) => {
+      const ra = Number(a.market_cap_rank) || Number.MAX_SAFE_INTEGER;
+      const rb = Number(b.market_cap_rank) || Number.MAX_SAFE_INTEGER;
+      if (ra !== rb) return ra - rb;
+      return (Number(b.market_cap) || 0) - (Number(a.market_cap) || 0);
+    })
+    .slice(0, limit);
+
+  if (!pool.length) {
+    container.innerHTML = '<div style="color:var(--txt3); width:100%; text-align:center; padding-top:40px">No matching coins found.</div>';
+    const cEl = document.getElementById('bub-count');
+    if (cEl) cEl.textContent = '0 coins';
+    return;
+  }
+
+  const maxVol = Math.max(...pool.map(d => Number(d.total_volume) || 0));
+
+  const html = pool.map(d => {
+    const vol = Number(d.total_volume) || 0;
+    const minSize = 40;
+    const maxSize = 120;
+    const size = maxVol > 0 ? minSize + (Math.log10(1 + vol) / Math.log10(1 + maxVol)) * (maxSize - minSize) : minSize;
+    const c = Number(d.price_change_percentage_24h) || 0;
+    
+    const absC = Math.min(Math.abs(c), 15) / 15;
+    const intensity = Math.floor(60 + absC * (255 - 60));
+    const bg = c >= 0 ? `rgba(0, ${intensity}, 0, 0.6)` : `rgba(${intensity}, 0, 0, 0.6)`;
+    const border = c >= 0 ? `1px solid rgba(0, 255, 0, 0.4)` : `1px solid rgba(255, 0, 0, 0.4)`;
+    
+    const idAttr = _esc(String(d.id || ''));
+    const sym = _esc(String(d.symbol||'').toUpperCase());
+    
+    return `<div class="bubble-item" onclick="showBubbleDetail('${idAttr}', this)" style="
+      width: ${size}px; height: ${size}px; 
+      border-radius: 50%; 
+      background: ${bg}; 
+      border: ${border};
+      display: flex; flex-direction: column; justify-content: center; align-items: center;
+      cursor: pointer; transition: transform 0.2s;
+    " onmouseover="this.style.transform='scale(1.1)'" onmouseout="this.style.transform='scale(1)'">
+      <div style="font-weight: bold; font-size: ${Math.max(10, size/4)}px; text-shadow: 1px 1px 2px #000;">${sym}</div>
+      <div style="font-size: ${Math.max(8, size/6)}px; color: ${c >= 0 ? '#8f8' : '#f88'}; text-shadow: 1px 1px 1px #000;">${(c>=0?'+':'')+c.toFixed(1)}%</div>
+    </div>`;
+  }).join('');
+  
+  container.innerHTML = html;
+  const cEl = document.getElementById('bub-count');
+  if (cEl) cEl.textContent = pool.length + ' coins · size = volume · color = 24h %';
+}
+
+window.showBubbleDetail = function(id, el) {
+  const d = DATA.find(x => String(x.id||'') === id);
+  if (!d) return;
+  const detail = document.getElementById('bub-detail');
+  if (!detail) return;
+  
+  const c = Number(d.price_change_percentage_24h) || 0;
+  const mc = Number(d.market_cap) || 0;
+  const vol = Number(d.total_volume) || 0;
+  
+  detail.innerHTML = `
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+      <div style="font-size:16px; font-weight:bold;">${_esc(String(d.name||''))} (${_esc(String(d.symbol||'').toUpperCase())})</div>
+      <div style="cursor:pointer; color:var(--txt3); font-size:16px;" onclick="this.parentElement.parentElement.style.display='none'">✕</div>
+    </div>
+    <div style="margin-bottom:8px; display:flex; justify-content:space-between;">
+      <span style="color:var(--txt3)">Price</span>
+      <span>${_esc(fmt(d.current_price))}</span>
+    </div>
+    <div style="margin-bottom:8px; display:flex; justify-content:space-between;">
+      <span style="color:var(--txt3)">24h Change</span>
+      <span style="color:${c>=0?'var(--grn)':'var(--red)'}">${(c>=0?'+':'')+c.toFixed(2)}%</span>
+    </div>
+    <div style="margin-bottom:8px; display:flex; justify-content:space-between;">
+      <span style="color:var(--txt3)">Market Cap</span>
+      <span>${_esc(_hmFmtCap(mc))}</span>
+    </div>
+    <div style="margin-bottom:15px; display:flex; justify-content:space-between;">
+      <span style="color:var(--txt3)">24h Vol</span>
+      <span>${_esc(_hmFmtCap(vol))}</span>
+    </div>
+    <button onclick="document.getElementById('bub-detail').style.display='none'; pickCoin('${_esc(String(d.id||'').toLowerCase())}'); const t=document.querySelector('#tabs .tab'); if(t) sv('scanner', t);" style="width:100%; padding:8px; background:var(--blu); color:#fff; border:none; border-radius:var(--rad); cursor:pointer;">
+      Go to Scanner
+    </button>
+  `;
+  detail.style.display = 'block';
+};
+
+window.showHeatmapDetail = function(d) {
+  const detail = document.getElementById('hm-detail');
+  if (!detail) return;
+  
+  const c = Number(d.price_change_percentage_24h) || 0;
+  const mc = Number(d.market_cap) || 0;
+  const vol = Number(d.total_volume) || 0;
+  
+  detail.innerHTML = `
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+      <div style="font-size:16px; font-weight:bold;">${_esc(String(d.name||''))} (${_esc(String(d.symbol||'').toUpperCase())})</div>
+      <div style="cursor:pointer; color:var(--txt3); font-size:16px;" onclick="this.parentElement.parentElement.style.display='none'">✕</div>
+    </div>
+    <div style="margin-bottom:8px; display:flex; justify-content:space-between;">
+      <span style="color:var(--txt3)">Price</span>
+      <span>${_esc(fmt(d.current_price))}</span>
+    </div>
+    <div style="margin-bottom:8px; display:flex; justify-content:space-between;">
+      <span style="color:var(--txt3)">24h Change</span>
+      <span style="color:${c>=0?'var(--grn)':'var(--red)'}">${(c>=0?'+':'')+c.toFixed(2)}%</span>
+    </div>
+    <div style="margin-bottom:8px; display:flex; justify-content:space-between;">
+      <span style="color:var(--txt3)">Market Cap</span>
+      <span>${_esc(_hmFmtCap(mc))}</span>
+    </div>
+    <div style="margin-bottom:15px; display:flex; justify-content:space-between;">
+      <span style="color:var(--txt3)">24h Vol</span>
+      <span>${_esc(_hmFmtCap(vol))}</span>
+    </div>
+    <button onclick="document.getElementById('hm-detail').style.display='none'; pickCoin('${_esc(String(d.id||'').toLowerCase())}'); const t=document.querySelector('#tabs .tab'); if(t) sv('scanner', t);" style="width:100%; padding:8px; background:var(--blu); color:#fff; border:none; border-radius:var(--rad); cursor:pointer;">
+      Go to Scanner
+    </button>
+  `;
+  detail.style.display = 'block';
+};
 
 // ─── V6.5 MOVERS — Top 30 Gainers & Losers ───
 function renderMovers() {
