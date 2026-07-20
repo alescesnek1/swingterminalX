@@ -425,6 +425,12 @@ email allowlist (§9), not a billing tier.
     diagnostic write path, migration, market-data, RADAR, alert, Telegram,
     trading, or Supabase-auth behavior change.
   - **Start Phase 2D only after this Phase 2C documentation sync.**
+  - **Phase 2D first safe runtime wiring:** the authenticated, read-only Cockpit
+    diagnostic-target helper writes sanitized warning events only for a missing
+    personal-watch store (`cockpit_diagnostic_store_unavailable`) or incomplete
+    diagnostic setup (`cockpit_diagnostic_target_incomplete`). Writes are
+    best-effort and cannot change the endpoint response; no user/chat ids, raw
+    errors, trading, RADAR, alerts, Telegram, or Supabase-auth behavior changed.
   - **Do not** write market data, implement reclaim/absorption, or remove/
     migrate Supabase auth as part of this DB work yet — those are separate,
     later phases with their own review.

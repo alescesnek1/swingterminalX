@@ -14,7 +14,7 @@ function makeReq(method = 'GET', origin) {
   return new Request(ENDPOINT_URL, { method, headers });
 }
 
-function call({ identity = USER, record, found = true, method = 'GET', getRecord, origin } = {}) {
+function call({ identity = USER, record, found = true, method = 'GET', getRecord, writeSystemEvent, origin } = {}) {
   const lookup = getRecord || (async (userId) => ({
     found,
     record: record === undefined ? { userId, telegramChatId: CHAT, watches: [{ symbol: 'BTCUSDT' }] } : record,
@@ -22,6 +22,7 @@ function call({ identity = USER, record, found = true, method = 'GET', getRecord
   return runPersonalWatchDiagnosticTarget(makeReq(method, origin), {
     getIdentity: async () => identity,
     getRecord: lookup,
+    writeSystemEvent,
   });
 }
 
@@ -91,6 +92,25 @@ test('store failure is fail-closed and performs no mutation', async () => {
   assert.equal(calls, 1);
 });
 
+test('store failure writes a safe degraded event without changing the 503 response', async () => {
+  const events = [];
+  const res = await call({ getRecord: async () => { throw new Error('store down'); }, writeSystemEvent: async (event) => { events.push(event); return { ok: true }; } });
+  assert.equal(res.status, 503);
+  assert.deepEqual(events[0], { level: 'warn', event: 'cockpit_diagnostic_store_unavailable', source: 'cockpit-personal-watch-diagnostic-target', payload: { component: 'personal-watch-diagnostic-target', reason: 'STORE_UNAVAILABLE', status: 'degraded' } });
+  assert.equal(JSON.stringify(events).includes(USER.userId), false);
+  assert.equal(JSON.stringify(events).includes(CHAT), false);
+});
+
+test('incomplete diagnostic setup writes only safe aggregates and observability failure is non-breaking', async () => {
+  const events = [];
+  const res = await call({ found: false, record: null, writeSystemEvent: async (event) => { events.push(event); throw new Error('db unavailable'); } });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).ok, true);
+  assert.equal(events[0].event, 'cockpit_diagnostic_target_incomplete');
+  assert.deepEqual(events[0].payload, { component: 'personal-watch-diagnostic-target', reason: 'DIAGNOSTIC_TARGET_INCOMPLETE', status: 'degraded', hasPersonalWatchRecord: false, hasChat: false, watchCount: 0 });
+  assert.equal(JSON.stringify(events).includes(USER.userId), false);
+  assert.equal(JSON.stringify(events).includes(CHAT), false);
+});
 test('source guards: current-user read only, no recipient enumeration, Telegram, RADAR, or execution', () => {
   const source = readFileSync(new URL('../netlify/functions/cockpit-personal-watch-diagnostic-target.mjs', import.meta.url), 'utf8');
   assert.match(source, /getRecord\(identity\.userId\)/);

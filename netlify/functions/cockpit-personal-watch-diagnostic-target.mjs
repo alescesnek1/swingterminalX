@@ -17,6 +17,15 @@ function json(req, body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: headers(req) });
 }
 
+async function recordDiagnosticEvent(event, payload, deps) {
+  try {
+    const writeSystemEvent = deps.writeSystemEvent || (await import('./_observability.mjs')).writeSystemEvent;
+    const result = await writeSystemEvent({ level: 'warn', event, source: 'cockpit-personal-watch-diagnostic-target', payload });
+    if (!result || result.ok !== true) console.warn('[cockpitDiagnosticTarget] observability write unavailable', { reason: result?.reason || 'UNKNOWN' });
+  } catch (err) {
+    console.warn('[cockpitDiagnosticTarget] observability write failed', { name: err?.name || 'Error' });
+  }
+}
 // Authenticated, read-only helper for the owner configuring the separate
 // diagnostic sender. The returned id is the current caller's own identity id;
 // no other user's record is enumerated or exposed.
@@ -37,12 +46,17 @@ export async function runPersonalWatchDiagnosticTarget(req, deps = {}) {
   try {
     result = await getRecord(identity.userId);
   } catch {
+    await recordDiagnosticEvent('cockpit_diagnostic_store_unavailable', { component: 'personal-watch-diagnostic-target', reason: 'STORE_UNAVAILABLE', status: 'degraded' }, deps);
     return json(req, { ok: false, error: 'Personal Watch store unavailable' }, 503);
   }
 
   const record = result && result.record && typeof result.record === 'object' ? result.record : {};
   const watches = Array.isArray(record.watches) ? record.watches : [];
   const hasChat = /^\d{5,20}$/.test(String(record.telegramChatId || '').trim());
+
+  if (result?.found !== true || !hasChat || watches.length !== 1) {
+    await recordDiagnosticEvent('cockpit_diagnostic_target_incomplete', { component: 'personal-watch-diagnostic-target', reason: 'DIAGNOSTIC_TARGET_INCOMPLETE', status: 'degraded', hasPersonalWatchRecord: result?.found === true, hasChat, watchCount: watches.length }, deps);
+  }
 
   return json(req, {
     ok: true,
