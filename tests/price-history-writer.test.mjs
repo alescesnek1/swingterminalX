@@ -28,6 +28,22 @@ test('flag absent means no DB call and a stable skip result', async () => {
   assert.equal(writeCalled, false);
 });
 
+test('disabled flag emits no log output at all', async () => {
+  const originalWarn = console.warn;
+  const originalError = console.error;
+  const calls = [];
+  console.warn = (...args) => { calls.push(args); };
+  console.error = (...args) => { calls.push(args); };
+  try {
+    await writeMarketSnapshotIfEnabled({ rows: [{ symbol: 'btc' }] }, { env: {} });
+    await writeMarketSnapshotIfEnabled({ rows: [{ symbol: 'btc' }] }, { env: { PRICE_HISTORY_WRITE_ENABLED: 'false' } });
+  } finally {
+    console.warn = originalWarn;
+    console.error = originalError;
+  }
+  assert.equal(calls.length, 0);
+});
+
 test('flag explicitly false means no DB call and a stable skip result', async () => {
   let writeCalled = false;
   const res = await writeMarketSnapshotIfEnabled(
@@ -84,14 +100,68 @@ test('missing source falls back to DEFAULT_PRICE_HISTORY_SOURCE', async () => {
 });
 
 test('DB unavailable (writeMarketPriceSnapshot returns ok:false) does not throw and reports written:false', async () => {
-  const res = await writeMarketSnapshotIfEnabled(
-    { rows: [{ symbol: 'btc' }] },
-    {
-      env: { PRICE_HISTORY_WRITE_ENABLED: 'true' },
-      writeMarketPriceSnapshot: async () => ({ ok: false, reason: 'DB_UNAVAILABLE' }),
-    },
-  );
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  let res;
+  try {
+    res = await writeMarketSnapshotIfEnabled(
+      { rows: [{ symbol: 'btc' }] },
+      {
+        env: { PRICE_HISTORY_WRITE_ENABLED: 'true' },
+        writeMarketPriceSnapshot: async () => ({ ok: false, reason: 'DB_UNAVAILABLE' }),
+      },
+    );
+  } finally {
+    console.warn = originalWarn;
+  }
   assert.deepEqual(res, { ok: true, skipped: false, written: false, reason: 'DB_UNAVAILABLE' });
+});
+
+test('enabled flag + helper ok:false emits exactly one console.warn with the stable reason code', async () => {
+  const originalWarn = console.warn;
+  const calls = [];
+  console.warn = (...args) => { calls.push(args); };
+  try {
+    await writeMarketSnapshotIfEnabled(
+      { rows: [{ symbol: 'btc' }, { symbol: 'eth' }], source: 'test_source' },
+      {
+        env: { PRICE_HISTORY_WRITE_ENABLED: 'true' },
+        writeMarketPriceSnapshot: async () => ({ ok: false, reason: 'DB_UNAVAILABLE' }),
+      },
+    );
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(calls.length, 1);
+  const serialized = JSON.stringify(calls[0]);
+  assert.equal(serialized.includes('price_history_write_failed'), true);
+  assert.equal(serialized.includes('DB_UNAVAILABLE'), true);
+  assert.equal(serialized.includes('test_source'), true);
+  // Counts only — the rows themselves must never be logged.
+  assert.equal(serialized.includes('"symbol"'), false);
+  assert.equal(serialized.toLowerCase().includes('btc'), false);
+});
+
+test('the write-failed warning never contains a secret-shaped or DB-URL-shaped value', async () => {
+  const originalWarn = console.warn;
+  const calls = [];
+  console.warn = (...args) => { calls.push(args); };
+  try {
+    await writeMarketSnapshotIfEnabled(
+      { rows: [] },
+      {
+        env: { PRICE_HISTORY_WRITE_ENABLED: 'true' },
+        writeMarketPriceSnapshot: async () => ({ ok: false, reason: 'DB_UNAVAILABLE' }),
+      },
+    );
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(calls.length, 1);
+  const serialized = JSON.stringify(calls[0]);
+  assert.equal(serialized.includes('postgres://'), false);
+  assert.equal(serialized.toLowerCase().includes('password'), false);
+  assert.equal(serialized.toLowerCase().includes('databaseurl'), false);
 });
 
 test('a thrown error from writeMarketPriceSnapshot never propagates to the caller', async () => {

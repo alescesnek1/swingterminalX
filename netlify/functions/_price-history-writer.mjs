@@ -88,7 +88,16 @@ export async function writeMarketSnapshotIfEnabled(input, deps = {}) {
   try {
     const res = await writeImpl({ source: sourceTag, sampledAt, rows: safeRows, metadata });
     if (!res || res.ok !== true) {
-      return { ok: true, skipped: false, written: false, reason: (res && res.reason) || 'WRITE_FAILED' };
+      const reason = (res && res.reason) || 'WRITE_FAILED';
+      // Observability rule (AGENTS.md): an enabled-but-failed write must be
+      // visible in logs, never silent. Stable codes + counts only — no raw
+      // error message, no rows, no caller-provided values.
+      console.warn('[PRICE_HISTORY_WRITER] price_history_write_failed', {
+        reason,
+        source: sourceTag,
+        rows: safeRows.length,
+      });
+      return { ok: true, skipped: false, written: false, reason };
     }
     return {
       ok: true,

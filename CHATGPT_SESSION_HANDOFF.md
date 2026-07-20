@@ -13,10 +13,12 @@
 > `/reply` or `/admin_summary` support system** here. If you find yourself
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
-> _Last synced to repo state: `main` @ `294c72e` (`feat(db): add
-> observability database foundation`, Phase 2B — pushed and deployed to
-> production; see §10 and §11). Update the commit ref whenever this file is
-> re-synced._
+> _Last synced to repo state: local `main`, **ahead of pushed `origin/main`
+> (`28515fd`) by 4 unpushed local commits** — cockpit market-maps polish
+> (`bd0306f`) plus the market **price-history DB foundation + disabled
+> write wiring** (`99e011a`, `65d777e`, and this docs/logging follow-up).
+> Nothing after `28515fd` is deployed. See §10 and §11. Update the commit
+> ref whenever this file is re-synced._
 
 ---
 
@@ -67,12 +69,15 @@ Defaults:
 - **Production:** deployed on **Netlify** at `https://swingterminalx.netlify.app`.
   A separate **ingest** service runs on **Fly.io** (`apps/ingest`). Durable state
   is **Netlify Blobs** (product data) plus a new **Netlify Database (Postgres)**
-  foundation for observability only (see §10). Auth is **Supabase JWT** —
+  foundation — observability (in production) and, in local unpushed commits,
+  a market price-history store (see §10). Auth is **Supabase JWT** —
   unchanged, Supabase holds no product data.
 - **Local repo path (owner machine):**
   `C:\Users\Ales\Desktop\Bots\terminal crypto\terminal-X`
-- **Current `main` at time of writing:** `294c72e` (`feat(db): add
-  observability database foundation`) — Phase 2B, pushed and deployed.
+- **Current `main` at time of writing:** pushed `origin/main` is `28515fd`
+  (`feat(observability): wire safe runtime events`); local `main` is 4
+  unpushed commits ahead (cockpit market-maps polish + price-history DB
+  foundation, see §10/§11). **Do not assume the local commits are live.**
 - **Read-first docs** (see §4).
 
 ## 4. Mandatory repo read order for new coding-agent sessions
@@ -394,8 +399,9 @@ email allowlist (§9), not a billing tier.
   in-memory fallback when Blobs unavailable (fallback is close-only for live).
 - **Do not** casually touch worker/execution/routing/scraping paths — data-source
   degradation must fail closed and never crash or relax a gate.
-- **Netlify Database / Postgres — observability foundation only (Phase 2B,
-  `294c72e`, live in production):**
+- **Netlify Database / Postgres — observability foundation (Phase 2B,
+  `294c72e`, live in production) + market price-history foundation (LOCAL,
+  UNPUSHED):**
   - Netlify Database is **enabled** for this project; native migrations live in
     `netlify/database/migrations/` and **auto-apply on every deploy** — a push
     to `main` is both a deploy *and* a production schema migration. Treat any
@@ -406,8 +412,9 @@ email allowlist (§9), not a billing tier.
     / ingest-run tracking only. No `schema_migrations` table (Netlify already
     tracks applied migrations in its own `netlify.migrations` ledger).
   - `netlify/functions/_db.mjs` exports `getDb()` (lazy `@netlify/database`
-    connection, cached) and a test-only `closeDbForTests()`. **No product
-    function imports it yet** — it is unused infrastructure, wired to nothing.
+    connection, cached) and a test-only `closeDbForTests()`. It is imported
+    by `_observability.mjs` and (locally) `_price-history.mjs` — always
+    lazily; nothing queries the DB at import time.
   - `tests/db.connection.test.mjs` and `tests/db.schema.test.mjs` prove the
     schema and connection helper; they **skip gracefully** when no local
     Netlify dev DB is reachable (never require/fall back to production).
@@ -416,8 +423,10 @@ email allowlist (§9), not a billing tier.
     Supabase auth were untouched.
   - **Phase 2C DB-backed observability is production-verified** on `1f03fe1`:
     the homepage smoke returned 200 and the unauthenticated admin smoke
-    returned 401. The only route is `/api/admin-observability`; do not smoke
-    `/.netlify/functions/admin-observability`.
+    returned 401. Its only route is `/api/admin-observability`; do not smoke
+    `/.netlify/functions/admin-observability`. (A second admin route,
+    `/api/admin-price-history`, exists in local unpushed commits — see the
+    price-history block below.)
   - The endpoint is admin-only, GET-only, and read-only. Non-GET requests
     return 405; unauthenticated or auth-import/parser failures return 401;
     forbidden identities return 403; and an observability/DB import or read
@@ -431,14 +440,60 @@ email allowlist (§9), not a billing tier.
     diagnostic setup (`cockpit_diagnostic_target_incomplete`). Writes are
     best-effort and cannot change the endpoint response; no user/chat ids, raw
     errors, trading, RADAR, alerts, Telegram, or Supabase-auth behavior changed.
-  - **Do not** write market data, implement reclaim/absorption, or remove/
-    migrate Supabase auth as part of this DB work yet — those are separate,
-    later phases with their own review.
+  - **Market price-history foundation (LOCAL, UNPUSHED — commits `99e011a`,
+    `65d777e` + follow-up):**
+    - New migration `20260720130902_add-market-price-history` creates
+      **`market_price_snapshots`** (one row per sample batch) and
+      **`market_price_points`** (one row per coin per snapshot, FK cascade,
+      unique `(snapshot_id, symbol)`). It will **auto-apply on the next push
+      to `main`** — treat that push as a production schema migration.
+    - `netlify/functions/_price-history.mjs`: normalize + write/read helpers.
+      Parameterized SQL only; invalid numbers become `null` (never invented);
+      duplicate symbols in one batch are deduped (first occurrence wins) so
+      `inserted`, snapshot `coin_count`, and `duplicates` are truthful actual
+      DB counts; per-row `raw_meta` is allowlist-sanitized and size-bounded
+      (never the raw external API payload); DB-unavailable returns stable
+      `{ ok:false, reason }`, never throws.
+    - `netlify/functions/_price-history-writer.mjs`: best-effort wrapper,
+      **disabled by default** — writes only when
+      `PRICE_HISTORY_WRITE_ENABLED === 'true'` (exact string; flag is NOT
+      set anywhere). Disabled → `{ ok:true, skipped:true }` with no DB
+      touch. Enabled-but-failed → stable result + one `console.warn` with
+      reason code/source/row-count only (no raw errors, rows, or secrets);
+      it can never throw into or break a caller.
+    - `/api/admin-price-history` (`admin-price-history.mjs`): GET-only,
+      admin-only (verified Supabase JWT + admin allowlist, same gate as
+      `/api/admin-observability`), read-only; bounded `limit` (max 200),
+      optional `symbol` filter; no `raw_meta` in responses; 401/403/405/503
+      error boundaries mirror admin-observability.
+    - **No live market write wiring exists.** Architectural decision:
+      `/api/markets` is a **Deno Edge** function while the Postgres helpers
+      are **Node** Netlify Functions — a direct DB write from `/api/markets`
+      was intentionally NOT added. The future safe collector should be a
+      dedicated Node collector / admin-triggered or scheduled job, designed
+      and reviewed separately. `bot.mjs` is also off-limits as a wiring
+      point (upstream of trading/RADAR execution).
+    - No reclaim/absorption computation; no trading, RADAR, alert, Telegram,
+      or Supabase-auth behavior changed by any of this.
+  - **Do not** implement reclaim/absorption scoring or remove/migrate
+    Supabase auth as part of this DB work yet — those are separate, later
+    phases with their own review. Next DB phase after this follow-up:
+    **safe collector design/implementation** (not reclaim scoring).
 
 ## 11. Known completed work / recent milestones
 
 From current git history (most recent first, condensed — see `git log` for full):
 
+- **Market price-history DB foundation (LOCAL, UNPUSHED — `99e011a`,
+  `65d777e` + follow-up)** — migration for `market_price_snapshots` /
+  `market_price_points`, normalize/write/read helper, disabled-by-default
+  writer behind `PRICE_HISTORY_WRITE_ENABLED`, admin-only read route
+  `/api/admin-price-history`. No live write wiring, no reclaim/absorption,
+  no trading/RADAR/alert/Supabase-auth change. Owner chose to hold the
+  push; pushing will auto-apply the migration. See §10.
+- **Cockpit market maps overhaul/polish (LOCAL, UNPUSHED — `…bd0306f`)** —
+  interactive market panels/maps UI work; bubbles-overlap + heatmap design
+  polish intentionally deferred.
 - **Database foundation (Phase 2B, `294c72e`, pushed/deployed)** — Netlify
   Database enabled; first migration creates `system_events` + `ingest_runs`
   only; unused `_db.mjs` connection helper; DB tests skip gracefully without
@@ -484,10 +539,15 @@ _(Grounded in git + docs; do not over-invent.)_
 
 - Keep this handoff **and** `AGENTS.md` / `docs/` synchronized after behavior
   changes (§16).
-- **Next recommended phase: Fáze 2C** — the first safe DB-backed write path
-  (e.g. structured logging actually writing to `system_events`) and/or an
-  admin-only log viewer reading it. Small, additive, still no market data,
-  no reclaim/absorption, no auth change, no trading-bot change.
+- **Current local state: 3+ commits ahead of `origin/main`, unpushed** (UI
+  market-maps polish + price-history DB foundation, §10/§11). First decision
+  is the owner's push approval — that push auto-applies the price-history
+  migration to production.
+- **Next DB phase after this follow-up: safe collector design/implementation**
+  — a dedicated Node collector / admin-triggered or scheduled job feeding
+  `writeMarketSnapshotIfEnabled`, reviewed separately. **Not reclaim/
+  absorption scoring yet.** The writer stays disabled until the collector is
+  approved (`PRICE_HISTORY_WRITE_ENABLED` unset).
 - Continue RADAR **positioning / pressure-zone / trade-readiness** context work
   (the active line of commits) — additive, context-only, fail-closed.
 - Security-review Personal Watch Phase 4 before any push/deploy, and keep
