@@ -524,9 +524,8 @@
         <select id="bub-limit" class="f-input" style="width:auto; margin-left:8px" onchange="bubState.limit = parseInt(this.value); renderBubbles()">
           <option value="50">Top 50</option>
           <option value="100" selected>Top 100</option>
-          <option value="250">Top 250</option>
-          <option value="500">Top 500</option>
-          <option value="1000">Top 1000</option>
+          <option value="150">Top 150</option>
+          <option value="200">Top 200</option>
         </select>
         <button class="f-input" style="margin-left:8px;" onclick="if(window.BubblePhysics) window.BubblePhysics.reset()">Reset bubbles</button>
         <span style="margin-left:auto;font-size:9px;color:var(--txt3)" id="bub-count">—</span>
@@ -544,6 +543,11 @@
           <option value="250">Top 250</option>
           <option value="500" selected>Top 500</option>
           <option value="1000">Top 1000</option>
+        </select>
+        <select id="hm-density" class="f-input" style="width:auto; margin-left:8px" onchange="hmState.density = this.value; renderHeatmap()">
+          <option value="roomy">Roomy</option>
+          <option value="normal" selected>Normal</option>
+          <option value="compact">Compact</option>
         </select>
         <span style="margin-left:auto;font-size:9px;color:var(--txt3)" id="hm-count">—</span>
       </div>

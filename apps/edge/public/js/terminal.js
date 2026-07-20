@@ -3022,7 +3022,7 @@ function _hmEnsureChrome() {
   return canvas;
 }
 
-window.hmState = { search: '', limit: 500 };
+window.hmState = { search: '', limit: 500, density: 'normal' };
 window.bubState = { search: '', limit: 100 };
 
 function renderHeatmap() {
@@ -3069,7 +3069,8 @@ function renderHeatmap() {
   let H = wrap.clientHeight || 500;
   
   // Heatmap 1000 fix: ensure enough vertical space so cells remain readable
-  const minCellArea = 2200; // ~45x45 pixels per cell min
+  const density = window.hmState?.density || 'normal';
+  const minCellArea = density === 'roomy' ? 4200 : density === 'compact' ? 1150 : 2200; // roomy ~65x65, normal ~45x45, compact ~34x34
   const requiredH = Math.ceil((pool.length * minCellArea) / W);
   if (requiredH > H) {
     H = requiredH;
@@ -3189,22 +3190,17 @@ function renderSectors() {
   renderBubbles(); // Proxy in case something calls renderSectors still
 }
 
-class BubblePhysics {
+class BubbleLayout {
   static bubbles = [];
-  static raf = null;
   static container = null;
   static W = 0;
   static H = 0;
-  static pointerDown = false;
-  static draggedId = null;
-  static lastRenderTime = 0;
 
   static init(container, pool) {
     this.container = container;
     this.W = container.clientWidth || 800;
     this.H = container.clientHeight || 500;
     
-    // Scale bubbles down slightly in 1000 mode to fit better
     const modeScale = pool.length > 250 ? 0.6 : 1;
     
     this.bubbles = pool.map(d => {
@@ -3216,7 +3212,7 @@ class BubblePhysics {
       const c = Number(d.price_change_percentage_24h) || 0;
       const absC = Math.min(Math.abs(c), 15) / 15;
       const intensity = Math.floor(60 + absC * (255 - 60));
-      const bg = c >= 0 ? `rgba(0, ${intensity}, 0, 0.6)` : `rgba(${intensity}, 0, 0, 0.6)`;
+      const bg = c >= 0 ? `rgba(0, ${intensity}, 0, 0.7)` : `rgba(${intensity}, 0, 0, 0.7)`;
       const border = c >= 0 ? `1px solid rgba(0, 255, 0, 0.4)` : `1px solid rgba(255, 0, 0, 0.4)`;
       const idAttr = String(d.id || '');
       const sym = String(d.symbol||'').toUpperCase();
@@ -3224,57 +3220,109 @@ class BubblePhysics {
       return {
         id: idAttr, d, sym, c, bg, border,
         r: size / 2,
-        x: this.W/2 + (Math.random() - 0.5) * 100,
-        y: this.H/2 + (Math.random() - 0.5) * 100,
-        vx: 0, vy: 0,
+        x: this.W/2 + (Math.random() - 0.5) * 20,
+        y: this.H/2 + (Math.random() - 0.5) * 20,
         el: null
       };
     });
 
-    container.innerHTML = '';
+    this.packSynchronously();
+    this.renderDOM();
+  }
+
+  static packSynchronously() {
+    const cx = this.W / 2;
+    const cy = this.H / 2;
+    const maxIters = this.bubbles.length > 250 ? 30 : 60;
+
+    // Spread outward initially
+    for(let i=0; i<this.bubbles.length; i++) {
+        const angle = i * 2.4;
+        const rad = Math.sqrt(i) * (this.bubbles[0].r * 0.5);
+        this.bubbles[i].x = cx + Math.cos(angle) * rad;
+        this.bubbles[i].y = cy + Math.sin(angle) * rad;
+    }
+
+    for (let iter = 0; iter < maxIters; iter++) {
+      for (let i = 0; i < this.bubbles.length; i++) {
+        const a = this.bubbles[i];
+
+        // Gentle pull to center
+        a.x += (cx - a.x) * 0.005;
+        a.y += (cy - a.y) * 0.005;
+
+        for (let j = i + 1; j < this.bubbles.length; j++) {
+          const b = this.bubbles[j];
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const distSq = dx*dx + dy*dy;
+          const minDist = a.r + b.r + 2;
+
+          if (distSq < minDist*minDist && distSq > 0.01) {
+            const dist = Math.sqrt(distSq);
+            const force = (minDist - dist) / dist * 0.5;
+            const fx = dx * force;
+            const fy = dy * force;
+            a.x -= fx; a.y -= fy;
+            b.x += fx; b.y += fy;
+          }
+        }
+      }
+    }
+
+    // Bounds Check
+    for (let i = 0; i < this.bubbles.length; i++) {
+        const a = this.bubbles[i];
+        if (a.x < a.r) a.x = a.r;
+        if (a.x > this.W - a.r) a.x = this.W - a.r;
+        if (a.y < a.r) a.y = a.r;
+    }
+  }
+
+  static renderDOM() {
+    this.container.innerHTML = '';
+    this.container.style.overflow = 'auto';
+    let maxY = 0;
+
     this.bubbles.forEach(b => {
       const el = document.createElement('div');
       el.className = 'bubble-item';
-      // Safety: inline styles and escaped text
-      el.style.cssText = `position:absolute; width:${b.r*2}px; height:${b.r*2}px; border-radius:50%; background:${b.bg}; border:${b.border}; display:flex; flex-direction:column; justify-content:center; align-items:center; cursor:pointer; touch-action:none; transform:translate(-50%, -50%); transition: transform 0.1s; user-select:none; z-index:1;`;
+      el.style.cssText = `position:absolute; width:${b.r*2}px; height:${b.r*2}px; border-radius:50%; background:${b.bg}; border:${b.border}; display:flex; flex-direction:column; justify-content:center; align-items:center; cursor:pointer; touch-action:none; transform:translate(-50%, -50%); user-select:none; z-index:1; overflow:hidden;`;
       
-      const fontSym = Math.max(8, b.r/2);
-      const symFit = b.sym.length > 5 ? b.sym.slice(0, 4) + '…' : b.sym;
+      const fontSym = Math.max(9, b.r*0.45);
+      const fontChg = Math.max(8, fontSym * 0.8);
+      const maxChars = Math.max(2, Math.floor((b.r*2 - 8) / (fontSym*0.6)));
+      const symFit = b.sym.length > maxChars ? b.sym.slice(0, Math.max(1, maxChars-1)) + '…' : b.sym;
       const pC = (b.c>=0?'+':'')+b.c.toFixed(1)+'%';
       
       el.innerHTML = `
-        <div style="font-weight:bold; font-size:${fontSym}px; text-shadow:1px 1px 2px #000; text-align:center;">${_esc(symFit)}</div>
-        <div style="font-size:${Math.max(7, b.r/3)}px; color:${b.c>=0?'#8f8':'#f88'}; text-shadow:1px 1px 1px #000;">${pC}</div>
+        <div style="font-weight:bold; font-size:${fontSym}px; text-shadow:1px 1px 2px #000; text-align:center; white-space:nowrap;" title="${_esc(b.sym)}">${_esc(symFit)}</div>
+        <div style="font-size:${fontChg}px; color:${b.c>=0?'#8f8':'#f88'}; text-shadow:1px 1px 1px #000; margin-top:2px;">${pC}</div>
       `;
       
-      // Pointer events for drag
       let startX, startY, moved = false;
       el.addEventListener('pointerdown', (e) => {
         e.preventDefault();
         el.setPointerCapture(e.pointerId);
-        this.pointerDown = true;
-        this.draggedId = b.id;
         el.style.zIndex = '10';
         startX = e.clientX; startY = e.clientY;
         moved = false;
-        b.vx = 0; b.vy = 0;
-        this.startLoop();
       });
       el.addEventListener('pointermove', (e) => {
-        if (this.draggedId === b.id) {
+        if (el.hasPointerCapture(e.pointerId)) {
           const dx = e.clientX - startX;
           const dy = e.clientY - startY;
           if (Math.abs(dx) > 3 || Math.abs(dy) > 3) moved = true;
-          const rect = container.getBoundingClientRect();
+          const rect = this.container.getBoundingClientRect();
           b.x = e.clientX - rect.left;
           b.y = e.clientY - rect.top;
+          el.style.left = b.x + 'px';
+          el.style.top = b.y + 'px';
         }
       });
       const endDrag = (e) => {
-        if (this.draggedId === b.id) {
+        if (el.hasPointerCapture(e.pointerId)) {
           el.releasePointerCapture(e.pointerId);
-          this.pointerDown = false;
-          this.draggedId = null;
           el.style.zIndex = '1';
           if (!moved) {
             if (window.showBubbleDetail) window.showBubbleDetail(_esc(b.id), el);
@@ -3284,107 +3332,47 @@ class BubblePhysics {
       el.addEventListener('pointerup', endDrag);
       el.addEventListener('pointercancel', endDrag);
       
+      el.style.left = b.x + 'px';
+      el.style.top = b.y + 'px';
+
       b.el = el;
-      container.appendChild(el);
+      this.container.appendChild(el);
+
+      if (b.y + b.r > maxY) maxY = b.y + b.r;
     });
 
-    this.startLoop();
+    if (maxY > this.H) {
+      const pad = document.createElement('div');
+      pad.style.cssText = `position:absolute; width:1px; height:1px; top:${maxY + 40}px;`;
+      this.container.appendChild(pad);
+    }
   }
 
   static reset() {
+    if (!this.bubbles.length) return;
+    this.packSynchronously();
+    let maxY = 0;
     this.bubbles.forEach(b => {
-      b.x = this.W/2 + (Math.random() - 0.5) * 100;
-      b.y = this.H/2 + (Math.random() - 0.5) * 100;
-      b.vx = 0; b.vy = 0;
+      if (b.el) {
+        b.el.style.left = b.x + 'px';
+        b.el.style.top = b.y + 'px';
+        if (b.y + b.r > maxY) maxY = b.y + b.r;
+      }
     });
-    this.startLoop();
-  }
-
-  static startLoop() {
-    if (!this.raf) {
-      this.lastRenderTime = Date.now();
-      this.raf = requestAnimationFrame(() => this.tick());
-    }
-  }
-
-  static tick() {
-    if (!this.bubbles.length) {
-      this.raf = null;
-      return;
-    }
-    
-    let moving = false;
-    const cx = this.W / 2;
-    const cy = this.H / 2;
-    const damping = 0.85;
-    const gravity = 0.03;
-
-    // Optimization: spatial binning for 100+ items to avoid O(N^2)
-    // For 1000 items, bounded relaxation is essential.
-    const maxIters = this.bubbles.length > 250 ? 2 : 5;
-
-    for (let iter = 0; iter < maxIters; iter++) {
-      for (let i = 0; i < this.bubbles.length; i++) {
-        const a = this.bubbles[i];
-        if (this.draggedId === a.id) continue;
-        
-        // Gravity pulls to center
-        a.vx += (cx - a.x) * gravity;
-        a.vy += (cy - a.y) * gravity;
-
-        for (let j = i + 1; j < this.bubbles.length; j++) {
-          const b = this.bubbles[j];
-          const dx = b.x - a.x;
-          const dy = b.y - a.y;
-          const distSq = dx*dx + dy*dy;
-          const minDist = a.r + b.r + 2; // 2px padding
-          
-          if (distSq < minDist*minDist && distSq > 0) {
-            const dist = Math.sqrt(distSq);
-            const force = (minDist - dist) / dist * 0.5;
-            const fx = dx * force;
-            const fy = dy * force;
-            
-            if (this.draggedId !== a.id) { a.vx -= fx; a.vy -= fy; }
-            if (this.draggedId !== b.id) { b.vx += fx; b.vy += fy; }
-          }
-        }
+    if (maxY > this.H) {
+      let pad = this.container.querySelector('.bub-pad');
+      if (!pad) {
+        pad = document.createElement('div');
+        pad.className = 'bub-pad';
+        pad.style.cssText = `position:absolute; width:1px; height:1px;`;
+        this.container.appendChild(pad);
       }
-    }
-
-    for (let i = 0; i < this.bubbles.length; i++) {
-      const b = this.bubbles[i];
-      if (this.draggedId !== b.id) {
-        b.vx *= damping;
-        b.vy *= damping;
-        b.x += b.vx;
-        b.y += b.vy;
-        
-        // Bounds
-        if (b.x < b.r) { b.x = b.r; b.vx *= -0.5; }
-        if (b.x > this.W - b.r) { b.x = this.W - b.r; b.vx *= -0.5; }
-        if (b.y < b.r) { b.y = b.r; b.vy *= -0.5; }
-        if (b.y > this.H - b.r) { b.y = this.H - b.r; b.vy *= -0.5; }
-      }
-      
-      if (Math.abs(b.vx) > 0.1 || Math.abs(b.vy) > 0.1 || this.draggedId === b.id) {
-        moving = true;
-      }
-      
-      // Update DOM
-      b.el.style.left = b.x + 'px';
-      b.el.style.top = b.y + 'px';
-    }
-
-    if (moving || this.pointerDown || Date.now() - this.lastRenderTime < 1500) {
-      this.raf = requestAnimationFrame(() => this.tick());
-    } else {
-      this.raf = null;
+      pad.style.top = (maxY + 40) + 'px';
     }
   }
 }
 
-window.BubblePhysics = BubblePhysics;
+window.BubblePhysics = BubbleLayout;
 
 function renderBubbles() {
   const container = document.getElementById('bub-grid');
@@ -3410,8 +3398,7 @@ function renderBubbles() {
     .slice(0, limit);
 
   if (!pool.length) {
-    if (BubblePhysics.raf) cancelAnimationFrame(BubblePhysics.raf);
-    BubblePhysics.bubbles = [];
+    BubbleLayout.bubbles = [];
     container.innerHTML = '<div style="color:var(--txt3); width:100%; text-align:center; padding-top:40px; position:absolute;">No matching coins found.</div>';
     const cEl = document.getElementById('bub-count');
     if (cEl) cEl.textContent = '0 coins';
@@ -3421,7 +3408,7 @@ function renderBubbles() {
   const cEl = document.getElementById('bub-count');
   if (cEl) cEl.textContent = pool.length + ' coins · size = volume · color = 24h %';
 
-  BubblePhysics.init(container, pool);
+  BubbleLayout.init(container, pool);
 }
 
 window.showBubbleDetail = function(id, el) {
@@ -3433,33 +3420,26 @@ window.showBubbleDetail = function(id, el) {
   const c = Number(d.price_change_percentage_24h) || 0;
   const mc = Number(d.market_cap) || 0;
   const vol = Number(d.total_volume) || 0;
+  const rank = d.market_cap_rank || '—';
+
+  detail.style.cssText = 'display:block; position:absolute; top:20px; right:20px; background:var(--s1); border:1px solid var(--b2); padding:16px; border-radius:var(--rad); width:280px; z-index:100; box-shadow:0 8px 24px rgba(0,0,0,0.8); font-family:var(--mono, monospace); font-size:12px;';
   
   detail.innerHTML = `
-    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-      <div style="font-size:16px; font-weight:bold;">${_esc(String(d.name||''))} (${_esc(String(d.symbol||'').toUpperCase())})</div>
-      <div style="cursor:pointer; color:var(--txt3); font-size:16px;" onclick="this.parentElement.parentElement.style.display='none'">✕</div>
+    <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--b1); padding-bottom:10px; margin-bottom:12px;">
+      <div style="font-size:16px; font-weight:700; color:var(--txt);">${_esc(String(d.symbol||'').toUpperCase())} <span style="font-size:10px; font-weight:400; color:var(--txt3);">${_esc(String(d.name||''))}</span></div>
+      <div style="cursor:pointer; color:var(--txt3); font-size:14px; padding:4px;" onclick="this.parentElement.parentElement.style.display='none'">✕</div>
     </div>
-    <div style="margin-bottom:8px; display:flex; justify-content:space-between;">
-      <span style="color:var(--txt3)">Price</span>
-      <span>${_esc(fmt(d.current_price))}</span>
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-bottom:16px; color:var(--txt2);">
+      <div>Price<br><b style="color:var(--txt);">${_esc(fmt(d.current_price))}</b></div>
+      <div>24h Chg<br><b style="color:${c>=0?'var(--grn)':'var(--red)'}">${(c>=0?'+':'')+c.toFixed(2)}%</b></div>
+      <div>Rank<br><b style="color:var(--txt);">${_esc(String(rank))}</b></div>
+      <div>24h Vol<br><b style="color:var(--txt);">${_esc(_hmFmtCap(vol))}</b></div>
+      <div style="grid-column: span 2;">Market Cap<br><b style="color:var(--txt);">${_esc(_hmFmtCap(mc))}</b></div>
     </div>
-    <div style="margin-bottom:8px; display:flex; justify-content:space-between;">
-      <span style="color:var(--txt3)">24h Change</span>
-      <span style="color:${c>=0?'var(--grn)':'var(--red)'}">${(c>=0?'+':'')+c.toFixed(2)}%</span>
-    </div>
-    <div style="margin-bottom:8px; display:flex; justify-content:space-between;">
-      <span style="color:var(--txt3)">Market Cap</span>
-      <span>${_esc(_hmFmtCap(mc))}</span>
-    </div>
-    <div style="margin-bottom:15px; display:flex; justify-content:space-between;">
-      <span style="color:var(--txt3)">24h Vol</span>
-      <span>${_esc(_hmFmtCap(vol))}</span>
-    </div>
-    <button onclick="document.getElementById('bub-detail').style.display='none'; pickCoin('${_esc(String(d.id||'').toLowerCase())}'); const t=document.querySelector('#tabs .tab'); if(t) sv('scanner', t);" style="width:100%; padding:8px; background:var(--blu); color:#fff; border:none; border-radius:var(--rad); cursor:pointer;">
-      Go to Scanner
+    <button onclick="document.getElementById('bub-detail').style.display='none'; pickCoin('${_esc(String(d.id||'').toLowerCase())}'); const t=document.querySelector('#tabs .tab'); if(t) sv('scanner', t);" style="width:100%; padding:10px; background:var(--s3); color:var(--acc); border:1px solid var(--acc); border-radius:var(--rad); cursor:pointer; font-weight:700; font-family:inherit;">
+      GO TO SCANNER
     </button>
   `;
-  detail.style.display = 'block';
 };
 
 window.showHeatmapDetail = function(d) {
@@ -3469,33 +3449,26 @@ window.showHeatmapDetail = function(d) {
   const c = Number(d.price_change_percentage_24h) || 0;
   const mc = Number(d.market_cap) || 0;
   const vol = Number(d.total_volume) || 0;
+  const rank = d.market_cap_rank || '—';
+
+  detail.style.cssText = 'display:block; position:absolute; top:20px; right:20px; background:var(--s1); border:1px solid var(--b2); padding:16px; border-radius:var(--rad); width:280px; z-index:100; box-shadow:0 8px 24px rgba(0,0,0,0.8); font-family:var(--mono, monospace); font-size:12px;';
   
   detail.innerHTML = `
-    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-      <div style="font-size:16px; font-weight:bold;">${_esc(String(d.name||''))} (${_esc(String(d.symbol||'').toUpperCase())})</div>
-      <div style="cursor:pointer; color:var(--txt3); font-size:16px;" onclick="this.parentElement.parentElement.style.display='none'">✕</div>
+    <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--b1); padding-bottom:10px; margin-bottom:12px;">
+      <div style="font-size:16px; font-weight:700; color:var(--txt);">${_esc(String(d.symbol||'').toUpperCase())} <span style="font-size:10px; font-weight:400; color:var(--txt3);">${_esc(String(d.name||''))}</span></div>
+      <div style="cursor:pointer; color:var(--txt3); font-size:14px; padding:4px;" onclick="this.parentElement.parentElement.style.display='none'">✕</div>
     </div>
-    <div style="margin-bottom:8px; display:flex; justify-content:space-between;">
-      <span style="color:var(--txt3)">Price</span>
-      <span>${_esc(fmt(d.current_price))}</span>
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-bottom:16px; color:var(--txt2);">
+      <div>Price<br><b style="color:var(--txt);">${_esc(fmt(d.current_price))}</b></div>
+      <div>24h Chg<br><b style="color:${c>=0?'var(--grn)':'var(--red)'}">${(c>=0?'+':'')+c.toFixed(2)}%</b></div>
+      <div>Rank<br><b style="color:var(--txt);">${_esc(String(rank))}</b></div>
+      <div>24h Vol<br><b style="color:var(--txt);">${_esc(_hmFmtCap(vol))}</b></div>
+      <div style="grid-column: span 2;">Market Cap<br><b style="color:var(--txt);">${_esc(_hmFmtCap(mc))}</b></div>
     </div>
-    <div style="margin-bottom:8px; display:flex; justify-content:space-between;">
-      <span style="color:var(--txt3)">24h Change</span>
-      <span style="color:${c>=0?'var(--grn)':'var(--red)'}">${(c>=0?'+':'')+c.toFixed(2)}%</span>
-    </div>
-    <div style="margin-bottom:8px; display:flex; justify-content:space-between;">
-      <span style="color:var(--txt3)">Market Cap</span>
-      <span>${_esc(_hmFmtCap(mc))}</span>
-    </div>
-    <div style="margin-bottom:15px; display:flex; justify-content:space-between;">
-      <span style="color:var(--txt3)">24h Vol</span>
-      <span>${_esc(_hmFmtCap(vol))}</span>
-    </div>
-    <button onclick="document.getElementById('hm-detail').style.display='none'; pickCoin('${_esc(String(d.id||'').toLowerCase())}'); const t=document.querySelector('#tabs .tab'); if(t) sv('scanner', t);" style="width:100%; padding:8px; background:var(--blu); color:#fff; border:none; border-radius:var(--rad); cursor:pointer;">
-      Go to Scanner
+    <button onclick="document.getElementById('hm-detail').style.display='none'; pickCoin('${_esc(String(d.id||'').toLowerCase())}'); const t=document.querySelector('#tabs .tab'); if(t) sv('scanner', t);" style="width:100%; padding:10px; background:var(--s3); color:var(--acc); border:1px solid var(--acc); border-radius:var(--rad); cursor:pointer; font-weight:700; font-family:inherit;">
+      GO TO SCANNER
     </button>
   `;
-  detail.style.display = 'block';
 };
 
 // ─── V6.5 MOVERS — Top 30 Gainers & Losers ───
@@ -3643,6 +3616,12 @@ function sv(v, el) {
   // Heatmap canvas needs a redraw after the view becomes visible
   // (clientWidth/Height are zero while display:none).
   if (activeViewName === 'heatmap') requestAnimationFrame(() => { try { renderHeatmap(); } catch(e){} });
+  // Bubbles layout packs against container.clientWidth/Height, which are
+  // zero while display:none — a periodic data refresh while this tab is
+  // hidden bakes bubble positions into a stale 800x500 fallback box, so
+  // they render collapsed into the left portion of the real (wider)
+  // container once the tab becomes visible. Re-pack after reveal.
+  if (activeViewName === 'bubbles') requestAnimationFrame(() => { try { renderBubbles(); } catch(e){} });
   if (activeViewName === 'manual') requestAnimationFrame(() => { try { initManual(); } catch(e){} });
   if (activeViewName === 'bot') requestAnimationFrame(() => {
     try { refreshFleet(); _startFleetPoll(); } catch (e) { console.warn('[Fleet] init failed:', e && e.message); }
