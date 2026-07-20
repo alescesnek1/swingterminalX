@@ -9,9 +9,12 @@
     "radar:microstructure": "node scripts/radar/radar-microstructure-producer.mjs",
     "e2e": "node tests/e2e-close.mjs",
     "bot:worker": "node scripts/local-binance-worker.mjs",
-    "bot:worker:live-preflight": "node scripts/local-binance-worker.mjs --live-preflight"
+    "bot:worker:live-preflight": "node scripts/local-binance-worker.mjs --live-preflight",
+    "db:migrate:status": "netlify database status",
+    "db:migrate:apply": "netlify database migrations apply"
   },
   "dependencies": {
-    "@netlify/blobs": "^10.7.9"
+    "@netlify/blobs": "^10.7.9",
+    "@netlify/database": "^1.1.0"
   }
 }
