@@ -3064,8 +3064,19 @@ function renderHeatmap() {
     return;
   }
 
-  const W = canvas.clientWidth;
-  const H = canvas.clientHeight;
+  const wrap = canvas.parentElement;
+  const W = wrap.clientWidth || 800;
+  let H = wrap.clientHeight || 500;
+  
+  // Heatmap 1000 fix: ensure enough vertical space so cells remain readable
+  const minCellArea = 2200; // ~45x45 pixels per cell min
+  const requiredH = Math.ceil((pool.length * minCellArea) / W);
+  if (requiredH > H) {
+    H = requiredH;
+  }
+  
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
   if (W < 10 || H < 10) return;
 
   const items = pool.map(d => ({ d }));
@@ -3178,6 +3189,203 @@ function renderSectors() {
   renderBubbles(); // Proxy in case something calls renderSectors still
 }
 
+class BubblePhysics {
+  static bubbles = [];
+  static raf = null;
+  static container = null;
+  static W = 0;
+  static H = 0;
+  static pointerDown = false;
+  static draggedId = null;
+  static lastRenderTime = 0;
+
+  static init(container, pool) {
+    this.container = container;
+    this.W = container.clientWidth || 800;
+    this.H = container.clientHeight || 500;
+    
+    // Scale bubbles down slightly in 1000 mode to fit better
+    const modeScale = pool.length > 250 ? 0.6 : 1;
+    
+    this.bubbles = pool.map(d => {
+      const vol = Number(d.total_volume) || 0;
+      const minSize = 40 * modeScale, maxSize = 120 * modeScale;
+      const maxVol = Math.max(...pool.map(p => Number(p.total_volume) || 0));
+      const size = maxVol > 0 ? minSize + (Math.log10(1 + vol) / Math.log10(1 + maxVol)) * (maxSize - minSize) : minSize;
+      
+      const c = Number(d.price_change_percentage_24h) || 0;
+      const absC = Math.min(Math.abs(c), 15) / 15;
+      const intensity = Math.floor(60 + absC * (255 - 60));
+      const bg = c >= 0 ? `rgba(0, ${intensity}, 0, 0.6)` : `rgba(${intensity}, 0, 0, 0.6)`;
+      const border = c >= 0 ? `1px solid rgba(0, 255, 0, 0.4)` : `1px solid rgba(255, 0, 0, 0.4)`;
+      const idAttr = String(d.id || '');
+      const sym = String(d.symbol||'').toUpperCase();
+      
+      return {
+        id: idAttr, d, sym, c, bg, border,
+        r: size / 2,
+        x: this.W/2 + (Math.random() - 0.5) * 100,
+        y: this.H/2 + (Math.random() - 0.5) * 100,
+        vx: 0, vy: 0,
+        el: null
+      };
+    });
+
+    container.innerHTML = '';
+    this.bubbles.forEach(b => {
+      const el = document.createElement('div');
+      el.className = 'bubble-item';
+      // Safety: inline styles and escaped text
+      el.style.cssText = `position:absolute; width:${b.r*2}px; height:${b.r*2}px; border-radius:50%; background:${b.bg}; border:${b.border}; display:flex; flex-direction:column; justify-content:center; align-items:center; cursor:pointer; touch-action:none; transform:translate(-50%, -50%); transition: transform 0.1s; user-select:none; z-index:1;`;
+      
+      const fontSym = Math.max(8, b.r/2);
+      const symFit = b.sym.length > 5 ? b.sym.slice(0, 4) + '…' : b.sym;
+      const pC = (b.c>=0?'+':'')+b.c.toFixed(1)+'%';
+      
+      el.innerHTML = `
+        <div style="font-weight:bold; font-size:${fontSym}px; text-shadow:1px 1px 2px #000; text-align:center;">${_esc(symFit)}</div>
+        <div style="font-size:${Math.max(7, b.r/3)}px; color:${b.c>=0?'#8f8':'#f88'}; text-shadow:1px 1px 1px #000;">${pC}</div>
+      `;
+      
+      // Pointer events for drag
+      let startX, startY, moved = false;
+      el.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        el.setPointerCapture(e.pointerId);
+        this.pointerDown = true;
+        this.draggedId = b.id;
+        el.style.zIndex = '10';
+        startX = e.clientX; startY = e.clientY;
+        moved = false;
+        b.vx = 0; b.vy = 0;
+        this.startLoop();
+      });
+      el.addEventListener('pointermove', (e) => {
+        if (this.draggedId === b.id) {
+          const dx = e.clientX - startX;
+          const dy = e.clientY - startY;
+          if (Math.abs(dx) > 3 || Math.abs(dy) > 3) moved = true;
+          const rect = container.getBoundingClientRect();
+          b.x = e.clientX - rect.left;
+          b.y = e.clientY - rect.top;
+        }
+      });
+      const endDrag = (e) => {
+        if (this.draggedId === b.id) {
+          el.releasePointerCapture(e.pointerId);
+          this.pointerDown = false;
+          this.draggedId = null;
+          el.style.zIndex = '1';
+          if (!moved) {
+            if (window.showBubbleDetail) window.showBubbleDetail(_esc(b.id), el);
+          }
+        }
+      };
+      el.addEventListener('pointerup', endDrag);
+      el.addEventListener('pointercancel', endDrag);
+      
+      b.el = el;
+      container.appendChild(el);
+    });
+
+    this.startLoop();
+  }
+
+  static reset() {
+    this.bubbles.forEach(b => {
+      b.x = this.W/2 + (Math.random() - 0.5) * 100;
+      b.y = this.H/2 + (Math.random() - 0.5) * 100;
+      b.vx = 0; b.vy = 0;
+    });
+    this.startLoop();
+  }
+
+  static startLoop() {
+    if (!this.raf) {
+      this.lastRenderTime = Date.now();
+      this.raf = requestAnimationFrame(() => this.tick());
+    }
+  }
+
+  static tick() {
+    if (!this.bubbles.length) {
+      this.raf = null;
+      return;
+    }
+    
+    let moving = false;
+    const cx = this.W / 2;
+    const cy = this.H / 2;
+    const damping = 0.85;
+    const gravity = 0.03;
+
+    // Optimization: spatial binning for 100+ items to avoid O(N^2)
+    // For 1000 items, bounded relaxation is essential.
+    const maxIters = this.bubbles.length > 250 ? 2 : 5;
+
+    for (let iter = 0; iter < maxIters; iter++) {
+      for (let i = 0; i < this.bubbles.length; i++) {
+        const a = this.bubbles[i];
+        if (this.draggedId === a.id) continue;
+        
+        // Gravity pulls to center
+        a.vx += (cx - a.x) * gravity;
+        a.vy += (cy - a.y) * gravity;
+
+        for (let j = i + 1; j < this.bubbles.length; j++) {
+          const b = this.bubbles[j];
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const distSq = dx*dx + dy*dy;
+          const minDist = a.r + b.r + 2; // 2px padding
+          
+          if (distSq < minDist*minDist && distSq > 0) {
+            const dist = Math.sqrt(distSq);
+            const force = (minDist - dist) / dist * 0.5;
+            const fx = dx * force;
+            const fy = dy * force;
+            
+            if (this.draggedId !== a.id) { a.vx -= fx; a.vy -= fy; }
+            if (this.draggedId !== b.id) { b.vx += fx; b.vy += fy; }
+          }
+        }
+      }
+    }
+
+    for (let i = 0; i < this.bubbles.length; i++) {
+      const b = this.bubbles[i];
+      if (this.draggedId !== b.id) {
+        b.vx *= damping;
+        b.vy *= damping;
+        b.x += b.vx;
+        b.y += b.vy;
+        
+        // Bounds
+        if (b.x < b.r) { b.x = b.r; b.vx *= -0.5; }
+        if (b.x > this.W - b.r) { b.x = this.W - b.r; b.vx *= -0.5; }
+        if (b.y < b.r) { b.y = b.r; b.vy *= -0.5; }
+        if (b.y > this.H - b.r) { b.y = this.H - b.r; b.vy *= -0.5; }
+      }
+      
+      if (Math.abs(b.vx) > 0.1 || Math.abs(b.vy) > 0.1 || this.draggedId === b.id) {
+        moving = true;
+      }
+      
+      // Update DOM
+      b.el.style.left = b.x + 'px';
+      b.el.style.top = b.y + 'px';
+    }
+
+    if (moving || this.pointerDown || Date.now() - this.lastRenderTime < 1500) {
+      this.raf = requestAnimationFrame(() => this.tick());
+    } else {
+      this.raf = null;
+    }
+  }
+}
+
+window.BubblePhysics = BubblePhysics;
+
 function renderBubbles() {
   const container = document.getElementById('bub-grid');
   if (!container) return;
@@ -3202,45 +3410,18 @@ function renderBubbles() {
     .slice(0, limit);
 
   if (!pool.length) {
-    container.innerHTML = '<div style="color:var(--txt3); width:100%; text-align:center; padding-top:40px">No matching coins found.</div>';
+    if (BubblePhysics.raf) cancelAnimationFrame(BubblePhysics.raf);
+    BubblePhysics.bubbles = [];
+    container.innerHTML = '<div style="color:var(--txt3); width:100%; text-align:center; padding-top:40px; position:absolute;">No matching coins found.</div>';
     const cEl = document.getElementById('bub-count');
     if (cEl) cEl.textContent = '0 coins';
     return;
   }
 
-  const maxVol = Math.max(...pool.map(d => Number(d.total_volume) || 0));
-
-  const html = pool.map(d => {
-    const vol = Number(d.total_volume) || 0;
-    const minSize = 40;
-    const maxSize = 120;
-    const size = maxVol > 0 ? minSize + (Math.log10(1 + vol) / Math.log10(1 + maxVol)) * (maxSize - minSize) : minSize;
-    const c = Number(d.price_change_percentage_24h) || 0;
-    
-    const absC = Math.min(Math.abs(c), 15) / 15;
-    const intensity = Math.floor(60 + absC * (255 - 60));
-    const bg = c >= 0 ? `rgba(0, ${intensity}, 0, 0.6)` : `rgba(${intensity}, 0, 0, 0.6)`;
-    const border = c >= 0 ? `1px solid rgba(0, 255, 0, 0.4)` : `1px solid rgba(255, 0, 0, 0.4)`;
-    
-    const idAttr = _esc(String(d.id || ''));
-    const sym = _esc(String(d.symbol||'').toUpperCase());
-    
-    return `<div class="bubble-item" onclick="showBubbleDetail('${idAttr}', this)" style="
-      width: ${size}px; height: ${size}px; 
-      border-radius: 50%; 
-      background: ${bg}; 
-      border: ${border};
-      display: flex; flex-direction: column; justify-content: center; align-items: center;
-      cursor: pointer; transition: transform 0.2s;
-    " onmouseover="this.style.transform='scale(1.1)'" onmouseout="this.style.transform='scale(1)'">
-      <div style="font-weight: bold; font-size: ${Math.max(10, size/4)}px; text-shadow: 1px 1px 2px #000;">${sym}</div>
-      <div style="font-size: ${Math.max(8, size/6)}px; color: ${c >= 0 ? '#8f8' : '#f88'}; text-shadow: 1px 1px 1px #000;">${(c>=0?'+':'')+c.toFixed(1)}%</div>
-    </div>`;
-  }).join('');
-  
-  container.innerHTML = html;
   const cEl = document.getElementById('bub-count');
   if (cEl) cEl.textContent = pool.length + ' coins · size = volume · color = 24h %';
+
+  BubblePhysics.init(container, pool);
 }
 
 window.showBubbleDetail = function(id, el) {

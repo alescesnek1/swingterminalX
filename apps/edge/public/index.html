@@ -528,9 +528,10 @@
           <option value="500">Top 500</option>
           <option value="1000">Top 1000</option>
         </select>
+        <button class="f-input" style="margin-left:8px;" onclick="if(window.BubblePhysics) window.BubblePhysics.reset()">Reset bubbles</button>
         <span style="margin-left:auto;font-size:9px;color:var(--txt3)" id="bub-count">—</span>
       </div>
-      <div id="bub-grid" style="display: flex; flex-wrap: wrap; justify-content: center; align-content: flex-start; gap: 8px; padding: 20px; overflow-y: auto; height: calc(100vh - 120px);"></div>
+      <div id="bub-grid" style="position: relative; overflow: hidden; touch-action: none; width: 100%; height: calc(100vh - 120px);"></div>
       <div id="bub-detail" style="display:none; position:absolute; top:40px; right:20px; background:var(--s2); border:1px solid var(--b1); padding:15px; border-radius:var(--rad); width:250px; z-index:100; box-shadow:0 10px 30px rgba(0,0,0,0.5);"></div>
     </div>
 
@@ -546,7 +547,7 @@
         </select>
         <span style="margin-left:auto;font-size:9px;color:var(--txt3)" id="hm-count">—</span>
       </div>
-      <div id="hm-grid" class="hm-canvas-wrap" style="position:relative; overflow-y:auto; overflow-x:hidden;"></div>
+      <div id="hm-grid" class="hm-canvas-wrap" style="position:relative; overflow-y:auto; overflow-x:hidden; height: calc(100vh - 120px);"></div>
       <div id="hm-detail" style="display:none; position:absolute; top:40px; right:20px; background:var(--s2); border:1px solid var(--b1); padding:15px; border-radius:var(--rad); width:250px; z-index:100; box-shadow:0 10px 30px rgba(0,0,0,0.5);"></div>
     </div>
 
