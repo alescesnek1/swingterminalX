@@ -40,27 +40,46 @@ export async function runAdminObservability(req, deps = {}) {
 
   if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: headers(req) });
 
-  const identity = await verifyIdentity(req);
-  if (!identity || !identity.ok) {
-    return json(req, { ok: false, error: 'Unauthorized', reason: identity && identity.reason ? identity.reason : 'No bearer token' }, 401);
-  }
-  if (!checkAdmin(identity) || identity.verified !== true) {
-    return json(req, { ok: false, error: 'Forbidden' }, 403);
-  }
-
-  // Read-only by design in this phase — no diagnostic write path.
+  // Reject non-GET methods before auth or DB work. This endpoint has no write path.
   if (req.method !== 'GET') {
-    return json(req, { ok: false, error: 'Method Not Allowed' }, 405);
+    return json(req, { ok: false, reason: 'METHOD_NOT_ALLOWED' }, 405);
   }
 
-  const [events, runs, counts] = await Promise.all([
-    reads.listRecentSystemEvents({ limit: RECENT_LIMIT }),
-    reads.listRecentIngestRuns({ limit: RECENT_LIMIT }),
-    reads.countSystemEventsSince({ sinceMs: WINDOW_MS }),
-  ]);
+  let identity;
+  try {
+    identity = await verifyIdentity(req);
+  } catch {
+    return json(req, { ok: false, reason: 'UNAUTHENTICATED' }, 401);
+  }
+  if (!identity || !identity.ok) {
+    return json(req, { ok: false, reason: 'UNAUTHENTICATED' }, 401);
+  }
+
+  let admin = false;
+  try {
+    admin = checkAdmin(identity);
+  } catch {
+    return json(req, { ok: false, reason: 'FORBIDDEN' }, 403);
+  }
+  if (identity.verified !== true || !admin) {
+    return json(req, { ok: false, reason: 'FORBIDDEN' }, 403);
+  }
+
+  let events;
+  let runs;
+  let counts;
+  try {
+    [events, runs, counts] = await Promise.all([
+      reads.listRecentSystemEvents({ limit: RECENT_LIMIT }),
+      reads.listRecentIngestRuns({ limit: RECENT_LIMIT }),
+      reads.countSystemEventsSince({ sinceMs: WINDOW_MS }),
+    ]);
+  } catch {
+    return json(req, { ok: false, reason: 'DB_UNAVAILABLE' }, 503);
+  }
 
   if (!events.ok || !runs.ok || !counts.ok) {
-    return json(req, { ok: false, error: 'DB_UNAVAILABLE' }, 503);
+    return json(req, { ok: false, reason: 'DB_UNAVAILABLE' }, 503);
   }
 
   return json(req, {

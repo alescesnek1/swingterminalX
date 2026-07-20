@@ -36,10 +36,10 @@ function makeReq(method, { origin } = {}) {
   return new Request(URL, { method, headers });
 }
 
-function call(method, { identity = ADMIN, origin, reads } = {}) {
+function call(method, { identity = ADMIN, origin, reads, getIdentity, isAdmin } = {}) {
   return runAdminObservability(makeReq(method, { origin }), {
-    getIdentity: async () => identity,
-    isAdmin: (id) => id === ADMIN || id === ADMIN_UNVERIFIED,
+    getIdentity: getIdentity || (async () => identity),
+    isAdmin: isAdmin || ((id) => id === ADMIN || id === ADMIN_UNVERIFIED),
     reads: reads || fakeReads(),
   });
 }
@@ -62,6 +62,16 @@ test('null identity is rejected with 401', async () => {
   assert.equal(res.status, 401);
 });
 
+test('thrown identity parsing error returns a safe 401 without leaking the error', async () => {
+  const res = await call('GET', {
+    getIdentity: async () => { throw new Error('simulated auth parser failure with sensitive-looking text'); },
+  });
+  assert.equal(res.status, 401);
+  const body = await res.json();
+  assert.deepEqual(body, { ok: false, reason: 'UNAUTHENTICATED' });
+  assert.equal(JSON.stringify(body).includes('simulated auth parser failure'), false);
+});
+
 test('authenticated non-admin GET is rejected with 403', async () => {
   const res = await call('GET', { identity: NON_ADMIN });
   assert.equal(res.status, 403);
@@ -74,16 +84,19 @@ test('admin identity that is not cryptographically verified is rejected with 403
   assert.equal(res.status, 403);
 });
 
-test('POST is rejected with 405 even for a verified admin — read-only in this phase', async () => {
-  const res = await call('POST', { identity: ADMIN });
-  assert.equal(res.status, 405);
-  const body = await res.json();
-  assert.equal(body.ok, false);
-});
-
-test('DELETE is rejected with 405', async () => {
-  const res = await call('DELETE', { identity: ADMIN });
-  assert.equal(res.status, 405);
+test('POST/PUT/PATCH/DELETE return 405 without calling auth or DB', async () => {
+  for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+    let authCalled = false;
+    let dbCalled = false;
+    const res = await call(method, {
+      getIdentity: async () => { authCalled = true; throw new Error('must not run'); },
+      reads: fakeReads({ listRecentSystemEvents: async () => { dbCalled = true; return FAKE_EVENTS; } }),
+    });
+    assert.equal(res.status, 405);
+    assert.deepEqual(await res.json(), { ok: false, reason: 'METHOD_NOT_ALLOWED' });
+    assert.equal(authCalled, false);
+    assert.equal(dbCalled, false);
+  }
 });
 
 test('verified admin GET returns the expected safe aggregate shape', async () => {
@@ -112,6 +125,16 @@ test('DB_UNAVAILABLE from any read function surfaces as a stable 503, not a cras
   });
   assert.equal(res.status, 503);
   const body = await res.json();
-  assert.equal(body.ok, false);
-  assert.equal(body.error, 'DB_UNAVAILABLE');
+  assert.deepEqual(body, { ok: false, reason: 'DB_UNAVAILABLE' });
+});
+
+test('thrown DB read returns a safe 503 without leaking the error', async () => {
+  const res = await call('GET', {
+    identity: ADMIN,
+    reads: fakeReads({ listRecentSystemEvents: async () => { throw new Error('simulated database detail'); } }),
+  });
+  assert.equal(res.status, 503);
+  const body = await res.json();
+  assert.deepEqual(body, { ok: false, reason: 'DB_UNAVAILABLE' });
+  assert.equal(JSON.stringify(body).includes('simulated database detail'), false);
 });
