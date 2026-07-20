@@ -36,13 +36,26 @@ function makeReq(method, { origin } = {}) {
   return new Request(URL, { method, headers });
 }
 
-function call(method, { identity = ADMIN, origin, reads, getIdentity, isAdmin } = {}) {
-  return runAdminObservability(makeReq(method, { origin }), {
-    getIdentity: getIdentity || (async () => identity),
-    isAdmin: isAdmin || ((id) => id === ADMIN || id === ADMIN_UNVERIFIED),
-    reads: reads || fakeReads(),
-  });
+function call(method, {
+  identity = ADMIN, origin, reads, getIdentity, isAdmin, loadAuth, loadObservability,
+  injectAuth = true, injectReads = true,
+} = {}) {
+  const deps = {};
+  if (getIdentity) deps.getIdentity = getIdentity;
+  else if (injectAuth) deps.getIdentity = async () => identity;
+  if (isAdmin) deps.isAdmin = isAdmin;
+  else if (injectAuth) deps.isAdmin = (id) => id === ADMIN || id === ADMIN_UNVERIFIED;
+  if (reads) deps.reads = reads;
+  else if (injectReads) deps.reads = fakeReads();
+  if (loadAuth) deps.loadAuth = loadAuth;
+  if (loadObservability) deps.loadObservability = loadObservability;
+  return runAdminObservability(makeReq(method, { origin }), deps);
 }
+
+test('handler module imports without Netlify auth or database context', () => {
+  assert.equal(typeof runAdminObservability, 'function');
+});
+
 
 test('OPTIONS preflight returns 204 with GET-only CORS methods', async () => {
   const res = await call('OPTIONS', { origin: 'https://swingterminalx.netlify.app' });
@@ -99,6 +112,39 @@ test('POST/PUT/PATCH/DELETE return 405 without calling auth or DB', async () => 
   }
 });
 
+test('unsupported methods do not load auth or observability modules', async () => {
+  let authLoaded = false;
+  let observabilityLoaded = false;
+  const res = await call('POST', {
+    injectAuth: false,
+    injectReads: false,
+    loadAuth: async () => { authLoaded = true; throw new Error('must not load'); },
+    loadObservability: async () => { observabilityLoaded = true; throw new Error('must not load'); },
+  });
+  assert.equal(res.status, 405);
+  assert.equal(authLoaded, false);
+  assert.equal(observabilityLoaded, false);
+});
+
+test('auth module load failure returns a safe 401 without leaking the error', async () => {
+  const res = await call('GET', {
+    injectAuth: false,
+    injectReads: false,
+    loadAuth: async () => { throw new Error('simulated auth module failure'); },
+  });
+  assert.equal(res.status, 401);
+  assert.deepEqual(await res.json(), { ok: false, reason: 'UNAUTHENTICATED' });
+});
+
+test('observability module load failure after verified admin returns a safe 503', async () => {
+  const res = await call('GET', {
+    identity: ADMIN,
+    injectReads: false,
+    loadObservability: async () => { throw new Error('simulated observability module failure'); },
+  });
+  assert.equal(res.status, 503);
+  assert.deepEqual(await res.json(), { ok: false, reason: 'DB_UNAVAILABLE' });
+});
 test('verified admin GET returns the expected safe aggregate shape', async () => {
   const res = await call('GET', { identity: ADMIN });
   assert.equal(res.status, 200);

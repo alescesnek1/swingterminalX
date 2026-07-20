@@ -11,8 +11,13 @@
 // (`_auth.mjs`). Admin control here follows the same rule as everywhere
 // else in this repo (see `_auth.mjs` canControlSession) — admin access
 // always requires a cryptographically VERIFIED token, never decode-only.
-import { getIdentity, isAdmin } from './_auth.mjs';
-import { listRecentSystemEvents, listRecentIngestRuns, countSystemEventsSince } from './_observability.mjs';
+async function loadAuth() {
+  return await import('./_auth.mjs');
+}
+
+async function loadObservability() {
+  return await import('./_observability.mjs');
+}
 
 function headers(req) {
   const origin = req.headers.get('origin') || '*';
@@ -34,15 +39,23 @@ const RECENT_LIMIT = 50;
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 
 export async function runAdminObservability(req, deps = {}) {
-  const verifyIdentity = deps.getIdentity || getIdentity;
-  const checkAdmin = deps.isAdmin || isAdmin;
-  const reads = deps.reads || { listRecentSystemEvents, listRecentIngestRuns, countSystemEventsSince };
-
   if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: headers(req) });
 
   // Reject non-GET methods before auth or DB work. This endpoint has no write path.
   if (req.method !== 'GET') {
     return json(req, { ok: false, reason: 'METHOD_NOT_ALLOWED' }, 405);
+  }
+
+  let verifyIdentity = deps.getIdentity;
+  let checkAdmin = deps.isAdmin;
+  if (!verifyIdentity || !checkAdmin) {
+    try {
+      const auth = await (deps.loadAuth || loadAuth)();
+      verifyIdentity ||= auth.getIdentity;
+      checkAdmin ||= auth.isAdmin;
+    } catch {
+      return json(req, { ok: false, reason: 'UNAUTHENTICATED' }, 401);
+    }
   }
 
   let identity;
@@ -63,6 +76,16 @@ export async function runAdminObservability(req, deps = {}) {
   }
   if (identity.verified !== true || !admin) {
     return json(req, { ok: false, reason: 'FORBIDDEN' }, 403);
+  }
+
+  let reads = deps.reads;
+  if (!reads) {
+    try {
+      const observability = await (deps.loadObservability || loadObservability)();
+      reads = observability;
+    } catch {
+      return json(req, { ok: false, reason: 'DB_UNAVAILABLE' }, 503);
+    }
   }
 
   let events;

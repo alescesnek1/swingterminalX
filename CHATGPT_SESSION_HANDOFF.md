@@ -414,6 +414,14 @@ email allowlist (§9), not a billing tier.
   - **No product behavior changed.** Nothing reads or writes these tables yet;
     market data, RADAR, reclaim/absorption, alerts, and auth are all
     untouched by this work.
+  - **Phase 2C admin observability read route:** production route is only
+    /api/admin-observability (not /.netlify/functions/admin-observability).
+    It is GET-only; unsupported methods return 405 before any auth or DB work.
+    Auth and observability modules load lazily after the relevant gate so an
+    unavailable auth dependency returns 401 and an unavailable DB dependency
+    after verified admin auth returns 503, never an internal-error response.
+    The route has no diagnostic write path, migration, market-data, RADAR,
+    alert, Telegram, trading, or Supabase-auth behavior change.
   - **Do not** write market data, implement reclaim/absorption, or remove/
     migrate Supabase auth as part of this DB work yet — those are separate,
     later phases with their own review.
