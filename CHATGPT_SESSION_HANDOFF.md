@@ -14,11 +14,10 @@
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
 > _Last synced to repo state: local `main`, **ahead of pushed `origin/main`
-> (`28515fd`) by 4 unpushed local commits** — cockpit market-maps polish
-> (`bd0306f`) plus the market **price-history DB foundation + disabled
-> write wiring** (`99e011a`, `65d777e`, and this docs/logging follow-up).
-> Nothing after `28515fd` is deployed. See §10 and §11. Update the commit
-> ref whenever this file is re-synced._
+> (`28515fd`) by 5 unpushed local commits**. The latest is local-only
+> price-history analytics (`651c5c9`): pure reclaim/absorption diagnostics and
+> a read-only admin route; the collector remains deferred. Nothing after
+> `28515fd` is deployed. See sec. 10 and sec. 11._
 
 ---
 
@@ -473,24 +472,28 @@ email allowlist (§9), not a billing tier.
       dedicated Node collector / admin-triggered or scheduled job, designed
       and reviewed separately. `bot.mjs` is also off-limits as a wiring
       point (upstream of trading/RADAR execution).
-    - No reclaim/absorption computation; no trading, RADAR, alert, Telegram,
-      or Supabase-auth behavior changed by any of this.
-  - **Do not** implement reclaim/absorption scoring or remove/migrate
-    Supabase auth as part of this DB work yet — those are separate, later
-    phases with their own review. Next DB phase after this follow-up:
-    **safe collector design/implementation** (not reclaim scoring).
+    - `netlify/functions/_price-history-signals.mjs` now provides pure,
+      context-only reclaim and absorption classification over stored points.
+      It is not imported by trading, RADAR, `ENTRY_READY`, alerts, or Telegram.
+    - `/api/admin-price-history-signals` is GET-only, verified-admin-only, and
+      read-only. It returns derived summaries only; it never returns `raw_meta`
+      or an orderbook dump. Its Node runtime does not reuse the authenticated
+      Deno orderbook route, so it honestly reports `NOT_WIRED_THIS_PHASE`.
+    - Collector/write wiring remains deferred. No trading, RADAR, alert,
+      Telegram, or Supabase-auth behavior changed.
 
 ## 11. Known completed work / recent milestones
 
 From current git history (most recent first, condensed — see `git log` for full):
 
-- **Market price-history DB foundation (LOCAL, UNPUSHED — `99e011a`,
-  `65d777e` + follow-up)** — migration for `market_price_snapshots` /
-  `market_price_points`, normalize/write/read helper, disabled-by-default
-  writer behind `PRICE_HISTORY_WRITE_ENABLED`, admin-only read route
-  `/api/admin-price-history`. No live write wiring, no reclaim/absorption,
-  no trading/RADAR/alert/Supabase-auth change. Owner chose to hold the
-  push; pushing will auto-apply the migration. See §10.
+- **Market price-history foundation + local analytics (LOCAL, UNPUSHED)** - the
+  price-history migration/read-write foundation remains disabled for writes.
+  Pure reclaim/absorption helpers and the read-only verified-admin route
+  `/api/admin-price-history-signals` add context-only diagnostics. Normal
+  responses use `NOT_WIRED_THIS_PHASE` for orderbook because the authenticated
+  Deno Edge route is not safely reusable from Node. No trading, RADAR gates,
+  ENTRY_READY, alerts, Telegram, or Supabase auth behavior changed. Collector
+  wiring remains deferred; a push still auto-applies the pending migration.
 - **Cockpit market maps overhaul/polish (LOCAL, UNPUSHED — `…bd0306f`)** —
   interactive market panels/maps UI work; bubbles-overlap + heatmap design
   polish intentionally deferred.
@@ -543,11 +546,10 @@ _(Grounded in git + docs; do not over-invent.)_
   market-maps polish + price-history DB foundation, §10/§11). First decision
   is the owner's push approval — that push auto-applies the price-history
   migration to production.
-- **Next DB phase after this follow-up: safe collector design/implementation**
-  — a dedicated Node collector / admin-triggered or scheduled job feeding
-  `writeMarketSnapshotIfEnabled`, reviewed separately. **Not reclaim/
-  absorption scoring yet.** The writer stays disabled until the collector is
-  approved (`PRICE_HISTORY_WRITE_ENABLED` unset).
+- **Next DB phase:** safe collector design/implementation - a dedicated Node
+  collector should feed `writeMarketSnapshotIfEnabled` only after review. The
+  analytics layer remains admin-debug/context-only and the writer stays
+  disabled until separate collector approval.
 - Continue RADAR **positioning / pressure-zone / trade-readiness** context work
   (the active line of commits) — additive, context-only, fail-closed.
 - Security-review Personal Watch Phase 4 before any push/deploy, and keep
