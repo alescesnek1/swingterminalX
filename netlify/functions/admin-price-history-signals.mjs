@@ -2,10 +2,14 @@
 // helpers never write, alert, score decision gates, or affect trading/ENTRY_READY.
 //
 // `/api/orderbook` is an authenticated Deno Edge Function reached here via
-// the same-origin Node bridge in _orderbook-client.mjs. The book is best
-// effort: any failure (unauthenticated, upstream down, invalid pair) still
-// returns a normal 200 with orderbookUsed:false and a stable
-// orderbookReason — absorption always falls back to a history-only read.
+// the same-origin Node bridge in _orderbook-client.mjs. If that bridge
+// fails for any reason other than an invalid pair, a best-effort fallback
+// (_binance-orderbook-fallback.mjs) hits Binance's public depth endpoint
+// directly — same upstream, GET-only, no private/order/account calls. The
+// book is best effort either way: total failure still returns a normal 200
+// with orderbookUsed:false and a stable orderbookReason — absorption always
+// falls back to a history-only read. `orderbookSource` in the response
+// tells the caller which path (if either) actually supplied the book.
 import {
   analyzeAbsorptionFromPointsAndOrderbook,
   analyzeReclaimFromPoints,
@@ -17,6 +21,7 @@ const MAX_LIMIT = 200;
 async function loadAuth() { return await import('./_auth.mjs'); }
 async function loadPriceHistory() { return await import('./_price-history.mjs'); }
 async function loadOrderbookClient() { return await import('./_orderbook-client.mjs'); }
+async function loadBinanceDepthClient() { return await import('./_binance-orderbook-fallback.mjs'); }
 
 function headers(req) {
   const origin = req.headers.get('origin') || '*';
@@ -98,6 +103,7 @@ export async function runAdminPriceHistorySignals(req, deps = {}) {
 
   let orderbookUsed = false;
   let orderbookReason = 'ORDERBOOK_CLIENT_UNAVAILABLE';
+  let orderbookSource = null;
   let orderbook;
   if (fetchOrderbookSummary) {
     let origin = null;
@@ -119,9 +125,47 @@ export async function runAdminPriceHistorySignals(req, deps = {}) {
     if (obResult && obResult.ok) {
       orderbookUsed = true;
       orderbookReason = 'OK';
+      orderbookSource = 'api_orderbook';
       orderbook = obResult.orderbook;
     } else {
       orderbookReason = (obResult && obResult.reason) || 'ORDERBOOK_UNAVAILABLE';
+
+      // Best-effort fallback: the same-origin edge bridge failed for a
+      // reason other than an invalid pair — try Binance's PUBLIC depth
+      // endpoint directly (same upstream /api/orderbook already uses) so a
+      // Netlify Node->Edge routing hiccup doesn't silently drop live book
+      // context. Reuses the pair/market the bridge already sanitized.
+      const fallbackPair = obResult && obResult.pair;
+      const fallbackMarket = obResult && obResult.market;
+      if (fallbackPair) {
+        let fetchBinanceDepthSummary = deps.fetchBinanceDepthSummary;
+        if (!fetchBinanceDepthSummary) {
+          try {
+            const mod = await (deps.loadBinanceDepthClient || loadBinanceDepthClient)();
+            fetchBinanceDepthSummary = mod.fetchBinanceDepthSummary;
+          } catch {
+            fetchBinanceDepthSummary = null;
+          }
+        }
+        if (fetchBinanceDepthSummary) {
+          let fbResult;
+          try {
+            fbResult = await fetchBinanceDepthSummary({
+              pair: fallbackPair,
+              market: fallbackMarket,
+              fetchImpl: deps.binanceFetchImpl,
+            });
+          } catch {
+            fbResult = { ok: false, reason: 'ORDERBOOK_BINANCE_FETCH_FAILED' };
+          }
+          if (fbResult && fbResult.ok) {
+            orderbookUsed = true;
+            orderbookReason = 'OK';
+            orderbookSource = 'binance_direct';
+            orderbook = fbResult.orderbook;
+          }
+        }
+      }
     }
   }
 
@@ -134,6 +178,7 @@ export async function runAdminPriceHistorySignals(req, deps = {}) {
     points: history.points.length,
     orderbookUsed,
     orderbookReason,
+    orderbookSource,
     reclaim,
     absorption,
   });

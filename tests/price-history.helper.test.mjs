@@ -147,6 +147,71 @@ test('normalizePricePoint supports known field aliases', () => {
   assert.equal(byBinanceAliases.volume24hUsd, 999);
 });
 
+// Regression test for the production bug where every /api/markets row
+// normalized to a NULL price_usd: shapeFromCoingecko/_makeBinanceSpotRow
+// (apps/edge/netlify/edge-functions/markets.js) emit current_price,
+// price_change_percentage_24h, total_volume, market_cap, and
+// market_cap_rank — field names that were previously absent from
+// normalizePricePoint's alias lists, so real collector rows silently
+// wrote NULL for every numeric column except symbol/name.
+test('normalizePricePoint maps the actual /api/markets row shape (current_price, price_change_percentage_24h, total_volume, market_cap, market_cap_rank)', () => {
+  const marketsRow = {
+    id: 'bitcoin',
+    symbol: 'BTC',
+    name: 'Bitcoin',
+    pair: 'BTCUSDT',
+    quote: 'USDT',
+    exchange: 'BIN',
+    current_price: 65000.5,
+    price_change_percentage_24h: 3.2,
+    high_24h: 66000,
+    low_24h: 64000,
+    total_volume: 1_000_000,
+    base_volume: 15.5,
+    market_cap: 1_200_000_000_000,
+    market_cap_rank: 1,
+    _c1: 0.1,
+    _c4: 0.4,
+    _c12: 1.2,
+    _c24: 3.2,
+    _c7d: 5.5,
+  };
+  const point = normalizePricePoint(marketsRow, new Date(), 'admin_price_history_collect');
+  assert.equal(point.symbol, 'BTC');
+  assert.equal(point.priceUsd, 65000.5, 'current_price must resolve to a valid price_usd, never null');
+  assert.equal(point.change24hPct, 3.2);
+  assert.equal(point.volume24hUsd, 1_000_000);
+  assert.equal(point.marketCapUsd, 1_200_000_000_000);
+  assert.equal(point.rank, 1);
+  assert.equal(point.change1hPct, 0.1);
+  assert.equal(point.change7dPct, 5.5);
+});
+
+test('normalizePricePoint maps a Binance-only spot row from /api/markets (_makeBinanceSpotRow shape, market_cap:0)', () => {
+  const binanceOnlyRow = {
+    id: 'someusdt',
+    symbol: 'SOMEUSDT'.replace('USDT', ''),
+    name: 'SOME',
+    pair: 'SOMEUSDT',
+    quote: 'USDT',
+    exchange: 'BIN',
+    current_price: 1.23,
+    price_change_percentage_24h: -2.1,
+    total_volume: 45000,
+    market_cap: 0,
+    market_cap_rank: 0,
+  };
+  const point = normalizePricePoint(binanceOnlyRow, new Date(), 'admin_price_history_collect');
+  assert.equal(point.priceUsd, 1.23);
+  assert.equal(point.change24hPct, -2.1);
+  assert.equal(point.volume24hUsd, 45000);
+  // market_cap:0 / market_cap_rank:0 are real "unranked" values from the
+  // Binance-only append path, not missing data — 0 must not be null, and
+  // rank stays null only because rank<=0 is explicitly treated as unranked.
+  assert.equal(point.marketCapUsd, 0);
+  assert.equal(point.rank, null);
+});
+
 test('normalizePricePoint normalizes sampledAt safely when given an invalid date', () => {
   const point = normalizePricePoint({ symbol: 'btc' }, new Date('not-a-date'), 'test');
   assert.ok(point.sampledAt instanceof Date && !Number.isNaN(point.sampledAt.getTime()));

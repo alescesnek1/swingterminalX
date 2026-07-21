@@ -137,14 +137,19 @@ export function normalizePricePoint(row, sampledAt, source) {
   const rawName = firstDefined(row, ['name', 'coinName']);
   const name = typeof rawName === 'string' && rawName.trim() ? truncate(rawName.trim(), MAX_TEXT_FIELD_CHARS) : null;
 
-  const priceUsd = toSafeNumber(firstDefined(row, ['price', 'priceUsd', 'price_usd', 'lastPrice']));
-  const change1hPct = toSafeNumber(firstDefined(row, ['change1h', 'change_1h_pct', 'pct1h']));
-  const change24hPct = toSafeNumber(firstDefined(row, ['change24h', 'change_24h_pct', 'priceChangePercent', 'pct24h']));
-  const change7dPct = toSafeNumber(firstDefined(row, ['change7d', 'change_7d_pct', 'pct7d']));
-  const volume24hUsd = toSafeNumber(firstDefined(row, ['volume24h', 'quoteVolume', 'volume_24h_usd']));
-  const marketCapUsd = toSafeNumber(firstDefined(row, ['marketCap', 'market_cap_usd']));
+  // Field-alias lists must cover the ACTUAL /api/markets row shape
+  // (apps/edge/netlify/edge-functions/markets.js shapeFromCoingecko /
+  // _makeBinanceSpotRow) — current_price, price_change_percentage_24h,
+  // total_volume, market_cap, market_cap_rank — plus the Binance-ticker
+  // and generic aliases already supported for other/future sources.
+  const priceUsd = toSafeNumber(firstDefined(row, ['price', 'priceUsd', 'price_usd', 'lastPrice', 'current_price']));
+  const change1hPct = toSafeNumber(firstDefined(row, ['change1h', 'change_1h_pct', 'pct1h', '_c1']));
+  const change24hPct = toSafeNumber(firstDefined(row, ['change24h', 'change_24h_pct', 'priceChangePercent', 'pct24h', 'price_change_percentage_24h', '_c24']));
+  const change7dPct = toSafeNumber(firstDefined(row, ['change7d', 'change_7d_pct', 'pct7d', '_c7d']));
+  const volume24hUsd = toSafeNumber(firstDefined(row, ['volume24h', 'quoteVolume', 'volume_24h_usd', 'total_volume']));
+  const marketCapUsd = toSafeNumber(firstDefined(row, ['marketCap', 'market_cap_usd', 'market_cap']));
 
-  const rawRank = toSafeInt(firstDefined(row, ['rank', 'marketCapRank']));
+  const rawRank = toSafeInt(firstDefined(row, ['rank', 'marketCapRank', 'market_cap_rank']));
   const rank = rawRank !== null && rawRank > 0 ? rawRank : null;
 
   const sourceTag = typeof source === 'string' && source.trim() ? truncate(source.trim(), MAX_TEXT_FIELD_CHARS) : null;

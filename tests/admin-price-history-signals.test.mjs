@@ -10,12 +10,14 @@ const POINTS = [110, 108, 106, 104, 104, 104.2, 104.4, 104.6].map((price_usd, i)
 
 function req(method, query = 'symbol=btc', headers = {}) { return new Request(`${URL}?${query}`, { method, headers }); }
 
-// deps.fetchOrderbookSummary defaults to a stub that reports unavailable so
-// tests never trigger a real module load / network fetch unless a case
-// wants to exercise that path explicitly.
+// deps.fetchOrderbookSummary and deps.fetchBinanceDepthSummary both default
+// to stubs that report unavailable so tests never trigger a real module
+// load / network fetch (edge bridge OR the Binance-direct fallback) unless
+// a case wants to exercise that path explicitly.
 function call(method, {
   identity = ADMIN, isAdmin = (id) => id === ADMIN || id === UNVERIFIED_ADMIN, reads, query, headers,
   fetchOrderbookSummary = async () => ({ ok: false, reason: 'ORDERBOOK_UNAVAILABLE' }),
+  fetchBinanceDepthSummary = async () => ({ ok: false, reason: 'ORDERBOOK_BINANCE_FETCH_FAILED' }),
   ...extra
 } = {}) {
   return runAdminPriceHistorySignals(req(method, query, headers), {
@@ -23,6 +25,7 @@ function call(method, {
     isAdmin,
     reads: reads || { listRecentPricePoints: async () => ({ ok: true, points: POINTS }) },
     fetchOrderbookSummary,
+    fetchBinanceDepthSummary,
     ...extra,
   });
 }
@@ -52,45 +55,107 @@ test('success without orderbook still works, bounds input, and reports a stable 
   const body = await res.json();
   assert.equal(body.symbol, 'BTC'); assert.equal(body.points, POINTS.length);
   assert.equal(body.orderbookUsed, false); assert.equal(body.orderbookReason, 'ORDERBOOK_UNAVAILABLE');
+  assert.equal(body.orderbookSource, null);
   assert.ok(body.reclaim); assert.ok(body.absorption);
 });
 
-test('successful orderbook fetch makes orderbookUsed:true and orderbookReason:OK, alongside reclaim/absorption', async () => {
+test('successful orderbook fetch makes orderbookUsed:true, orderbookReason:OK, and orderbookSource:api_orderbook, alongside reclaim/absorption', async () => {
   const summary = { best_bid: 100, best_ask: 100.1, spread_bps: 10, imbalance: 0.35, cumulative_bid_qty: 5, cumulative_ask_qty: 3 };
   let captured;
+  let fallbackCalled = false;
   const res = await call('GET', {
     fetchOrderbookSummary: async (args) => { captured = args; return { ok: true, orderbook: summary, pair: 'BTCUSDT', market: 'spot', source: 'api_orderbook' }; },
+    fetchBinanceDepthSummary: async () => { fallbackCalled = true; return { ok: false, reason: 'ORDERBOOK_BINANCE_FETCH_FAILED' }; },
   });
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.ok, true);
   assert.equal(body.orderbookUsed, true);
   assert.equal(body.orderbookReason, 'OK');
+  assert.equal(body.orderbookSource, 'api_orderbook');
   assert.ok(body.reclaim);
   assert.ok(body.absorption);
   assert.equal(body.absorption.orderbookUsed, true);
   assert.equal(captured.symbol, 'BTC');
+  // The bridge already succeeded — the Binance-direct fallback must never
+  // be attempted when the primary path already delivered a live book.
+  assert.equal(fallbackCalled, false);
 });
 
-test('orderbook auth failure still returns endpoint ok:true with orderbookUsed:false, falling back to history-only absorption', async () => {
-  const res = await call('GET', { fetchOrderbookSummary: async () => ({ ok: false, reason: 'ORDERBOOK_AUTH_REQUIRED', pair: 'BTCUSDT', market: 'spot' }) });
+test('orderbook auth failure still returns endpoint ok:true with orderbookUsed:false when the fallback also fails, falling back to history-only absorption', async () => {
+  const res = await call('GET', {
+    fetchOrderbookSummary: async () => ({ ok: false, reason: 'ORDERBOOK_AUTH_REQUIRED', pair: 'BTCUSDT', market: 'spot' }),
+  });
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.ok, true);
   assert.equal(body.orderbookUsed, false);
   assert.equal(body.orderbookReason, 'ORDERBOOK_AUTH_REQUIRED');
+  assert.equal(body.orderbookSource, null);
   assert.ok(body.reclaim);
   assert.ok(body.absorption);
   assert.equal(body.absorption.orderbookUsed, false);
 });
 
-test('invalid pair returns a stable orderbook reason but does not crash the endpoint', async () => {
-  const res = await call('GET', { query: 'symbol=btc&pair=not-valid!!', fetchOrderbookSummary: async () => ({ ok: false, reason: 'INVALID_ORDERBOOK_PAIR' }) });
+test('when the edge bridge fails, the Binance-direct fallback is tried with the bridge-sanitized pair/market and used on success', async () => {
+  const summary = { best_bid: 200, best_ask: 200.2, spread_bps: 10, imbalance: -0.1, cumulative_bid_qty: 4, cumulative_ask_qty: 5 };
+  let fallbackArgs;
+  const res = await call('GET', {
+    fetchOrderbookSummary: async () => ({ ok: false, reason: 'ORDERBOOK_HTTP_502', pair: 'BTCUSDT', market: 'spot' }),
+    fetchBinanceDepthSummary: async (args) => { fallbackArgs = args; return { ok: true, orderbook: summary, pair: 'BTCUSDT', market: 'spot', source: 'binance_direct' }; },
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.orderbookUsed, true);
+  assert.equal(body.orderbookReason, 'OK');
+  assert.equal(body.orderbookSource, 'binance_direct');
+  assert.equal(body.absorption.orderbookUsed, true);
+  assert.deepEqual({ pair: fallbackArgs.pair, market: fallbackArgs.market }, { pair: 'BTCUSDT', market: 'spot' });
+});
+
+test('when both the edge bridge and the Binance-direct fallback fail, the endpoint still degrades safely with the bridge reason and no source', async () => {
+  const res = await call('GET', {
+    fetchOrderbookSummary: async () => ({ ok: false, reason: 'ORDERBOOK_HTTP_502', pair: 'BTCUSDT', market: 'spot' }),
+    fetchBinanceDepthSummary: async () => ({ ok: false, reason: 'ORDERBOOK_BINANCE_HTTP_503' }),
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.orderbookUsed, false);
+  assert.equal(body.orderbookReason, 'ORDERBOOK_HTTP_502');
+  assert.equal(body.orderbookSource, null);
+});
+
+test('a fallback that throws still degrades the endpoint safely instead of crashing', async () => {
+  const res = await call('GET', {
+    fetchOrderbookSummary: async () => ({ ok: false, reason: 'ORDERBOOK_FETCH_FAILED', pair: 'BTCUSDT', market: 'spot' }),
+    fetchBinanceDepthSummary: async () => { throw new Error('simulated Binance fallback failure'); },
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.orderbookUsed, false);
+  assert.equal(body.orderbookReason, 'ORDERBOOK_FETCH_FAILED');
+  assert.equal(body.orderbookSource, null);
+  assert.equal(JSON.stringify(body).includes('simulated Binance fallback failure'), false);
+});
+
+test('invalid pair returns a stable orderbook reason and never attempts the Binance-direct fallback', async () => {
+  let fallbackCalled = false;
+  const res = await call('GET', {
+    query: 'symbol=btc&pair=not-valid!!',
+    fetchOrderbookSummary: async () => ({ ok: false, reason: 'INVALID_ORDERBOOK_PAIR' }),
+    fetchBinanceDepthSummary: async () => { fallbackCalled = true; return { ok: false, reason: 'ORDERBOOK_BINANCE_FETCH_FAILED' }; },
+  });
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.ok, true);
   assert.equal(body.orderbookUsed, false);
   assert.equal(body.orderbookReason, 'INVALID_ORDERBOOK_PAIR');
+  assert.equal(body.orderbookSource, null);
+  // INVALID_ORDERBOOK_PAIR carries no pair/market — the fallback has
+  // nothing sanitized to reuse and must not run.
+  assert.equal(fallbackCalled, false);
 });
 
 test('orderbook client throwing still degrades to a safe history-only response', async () => {

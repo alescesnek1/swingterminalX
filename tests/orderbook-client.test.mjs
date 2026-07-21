@@ -85,18 +85,50 @@ test('upstream 401/403 map to ORDERBOOK_AUTH_REQUIRED', async () => {
   }
 });
 
-test('upstream 502 or thrown fetch error maps to ORDERBOOK_UNAVAILABLE', async () => {
-  const res502 = await fetchOrderbookSummary({
-    origin: ORIGIN, pair: 'BTCUSDT',
-    fetchImpl: async () => ({ ok: false, status: 502, json: async () => ({ error: 'Order book upstream failed', detail: 'connect ECONNREFUSED 1.2.3.4' }) }),
-  });
-  assert.deepEqual(res502, { ok: false, reason: 'ORDERBOOK_UNAVAILABLE', pair: 'BTCUSDT', market: 'spot' });
+test('upstream non-2xx HTTP status maps to a granular ORDERBOOK_HTTP_<status> reason, never the raw body', async () => {
+  for (const status of [500, 502, 503]) {
+    const res = await fetchOrderbookSummary({
+      origin: ORIGIN, pair: 'BTCUSDT',
+      fetchImpl: async () => ({ ok: false, status, json: async () => ({ error: 'Order book upstream failed', detail: 'connect ECONNREFUSED 1.2.3.4' }) }),
+    });
+    assert.deepEqual(res, { ok: false, reason: `ORDERBOOK_HTTP_${status}`, pair: 'BTCUSDT', market: 'spot' });
+    assert.equal(JSON.stringify(res).includes('ECONNREFUSED'), false);
+  }
+});
 
-  const resThrow = await fetchOrderbookSummary({
+test('a thrown fetch error maps to ORDERBOOK_FETCH_FAILED, never the raw error message', async () => {
+  const res = await fetchOrderbookSummary({
     origin: ORIGIN, pair: 'BTCUSDT',
     fetchImpl: async () => { throw new Error('simulated network detail'); },
   });
-  assert.deepEqual(resThrow, { ok: false, reason: 'ORDERBOOK_UNAVAILABLE', pair: 'BTCUSDT', market: 'spot' });
+  assert.deepEqual(res, { ok: false, reason: 'ORDERBOOK_FETCH_FAILED', pair: 'BTCUSDT', market: 'spot' });
+});
+
+test('a 2xx response with unusable JSON/shape maps to ORDERBOOK_INVALID_RESPONSE', async () => {
+  const badJson = await fetchOrderbookSummary({
+    origin: ORIGIN, pair: 'BTCUSDT',
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => { throw new Error('bad json'); } }),
+  });
+  assert.deepEqual(badJson, { ok: false, reason: 'ORDERBOOK_INVALID_RESPONSE', pair: 'BTCUSDT', market: 'spot' });
+
+  const missingOrderbook = await fetchOrderbookSummary({
+    origin: ORIGIN, pair: 'BTCUSDT',
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ pair: 'BTCUSDT' }) }),
+  });
+  assert.deepEqual(missingOrderbook, { ok: false, reason: 'ORDERBOOK_INVALID_RESPONSE', pair: 'BTCUSDT', market: 'spot' });
+});
+
+test('a slow upstream is aborted after the timeout and mapped to ORDERBOOK_FETCH_FAILED instead of hanging', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const fetchPromise = fetchOrderbookSummary({
+    origin: ORIGIN, pair: 'BTCUSDT',
+    fetchImpl: (u, init) => new Promise((resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(new Error('aborted')));
+    }),
+  });
+  t.mock.timers.tick(5000);
+  const res = await fetchPromise;
+  assert.deepEqual(res, { ok: false, reason: 'ORDERBOOK_FETCH_FAILED', pair: 'BTCUSDT', market: 'spot' });
 });
 
 test('success returns the summarized orderbook and source tag', async () => {

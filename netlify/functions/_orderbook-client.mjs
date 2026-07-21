@@ -15,7 +15,16 @@
 //     other header are dropped. Neither value is ever logged or appears
 //     in any returned object.
 //   - Upstream errors collapse to stable reason codes; the raw upstream
-//     body/message is never surfaced.
+//     body/message is never surfaced. 401/403 stay ORDERBOOK_AUTH_REQUIRED;
+//     any other non-2xx is ORDERBOOK_HTTP_<status> so a caller can tell a
+//     rejected request (403) apart from an upstream outage (502/503)
+//     without ever seeing the raw response body. A network-level failure
+//     (thrown fetch, timeout) is ORDERBOOK_FETCH_FAILED; an unusable 2xx
+//     body (bad JSON, missing orderbook shape) is ORDERBOOK_INVALID_RESPONSE.
+//   - Bounded by a request timeout so a hung upstream can never stall the
+//     caller indefinitely.
+
+const FETCH_TIMEOUT_MS = 5000;
 
 export function normalizeOrderbookPair(input) {
   const pair = typeof input === 'string' ? input.trim().toUpperCase() : '';
@@ -69,29 +78,33 @@ export async function fetchOrderbookSummary({ origin, pair, symbol, market, fetc
   if (authorization) outgoingHeaders.Authorization = authorization;
 
   const doFetch = fetchImpl || globalThis.fetch;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
   let res;
   try {
-    res = await doFetch(url.toString(), { headers: outgoingHeaders });
+    res = await doFetch(url.toString(), { headers: outgoingHeaders, signal: ctrl.signal });
   } catch {
-    return { ok: false, reason: 'ORDERBOOK_UNAVAILABLE', pair: normalizedPair, market: normalizedMarket };
+    return { ok: false, reason: 'ORDERBOOK_FETCH_FAILED', pair: normalizedPair, market: normalizedMarket };
+  } finally {
+    clearTimeout(timer);
   }
 
   if (res.status === 401 || res.status === 403) {
     return { ok: false, reason: 'ORDERBOOK_AUTH_REQUIRED', pair: normalizedPair, market: normalizedMarket };
   }
   if (!res.ok) {
-    return { ok: false, reason: 'ORDERBOOK_UNAVAILABLE', pair: normalizedPair, market: normalizedMarket };
+    return { ok: false, reason: `ORDERBOOK_HTTP_${res.status}`, pair: normalizedPair, market: normalizedMarket };
   }
 
   let body;
   try {
     body = await res.json();
   } catch {
-    return { ok: false, reason: 'ORDERBOOK_UNAVAILABLE', pair: normalizedPair, market: normalizedMarket };
+    return { ok: false, reason: 'ORDERBOOK_INVALID_RESPONSE', pair: normalizedPair, market: normalizedMarket };
   }
 
   if (!body || typeof body !== 'object' || !body.orderbook || typeof body.orderbook !== 'object') {
-    return { ok: false, reason: 'ORDERBOOK_UNAVAILABLE', pair: normalizedPair, market: normalizedMarket };
+    return { ok: false, reason: 'ORDERBOOK_INVALID_RESPONSE', pair: normalizedPair, market: normalizedMarket };
   }
 
   return { ok: true, orderbook: body.orderbook, pair: normalizedPair, market: normalizedMarket, source: 'api_orderbook' };
