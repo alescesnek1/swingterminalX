@@ -20,6 +20,19 @@
 //                            was attempted, else 'ORDERBOOK_UNAVAILABLE'
 // Both failure paths are also console.warn'd with stable codes only — never
 // a raw upstream body, header, or token.
+//
+// KNOWN PRODUCTION CONSTRAINT — this endpoint is history-first by design.
+// Netlify's Node runtime cannot obtain a Binance book at all: the Node->Edge
+// bridge answers ORDERBOOK_HTTP_502, and a direct public-depth call answers
+// ORDERBOOK_BINANCE_HTTP_451 (Binance geo-blocks the cloud egress IP). The
+// same /api/orderbook route works fine from the BROWSER, which egresses from
+// the user's own network. So the server no longer pretends it can supply a
+// book: when it cannot, it reports serverOrderbookAvailable:false and
+// orderbookMode:'external_browser_required', and the client is expected to
+// GET /api/orderbook itself and merge the result via the browser-safe helper
+// in apps/edge/public/js/price-history-orderbook.js. Reclaim is unaffected —
+// it is pure history. Absorption degrades to a history-only read server-side
+// and is enriched client-side when a browser book is available.
 import {
   analyzeAbsorptionFromPointsAndOrderbook,
   analyzeReclaimFromPoints,
@@ -228,6 +241,8 @@ export async function runAdminPriceHistorySignals(req, deps = {}) {
     orderbookBridgeReason,
     orderbookFallbackReason,
     orderbookSource,
+    serverOrderbookAvailable: orderbookUsed,
+    orderbookMode: orderbookUsed ? 'server' : 'external_browser_required',
     reclaim,
     absorption,
   });

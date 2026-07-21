@@ -263,6 +263,36 @@ test('response never contains a raw orderbook dump, raw_meta, or a secret-shaped
   }
 });
 
+// Netlify Node cannot reach a Binance book (bridge 502 / direct 451), so the
+// endpoint must say so explicitly rather than implying it tried and the data
+// simply does not exist — the client uses this to decide whether to fetch
+// /api/orderbook itself.
+test('a server that cannot obtain a book advertises orderbookMode:external_browser_required', async () => {
+  const res = await call('GET', {
+    fetchOrderbookSummary: async () => ({ ok: false, reason: 'ORDERBOOK_HTTP_502', pair: 'BTCUSDT', market: 'spot' }),
+    fetchBinanceDepthSummary: async () => ({ ok: false, reason: 'ORDERBOOK_BINANCE_HTTP_451' }),
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.serverOrderbookAvailable, false);
+  assert.equal(body.orderbookMode, 'external_browser_required');
+  assert.equal(body.orderbookBridgeReason, 'ORDERBOOK_HTTP_502');
+  assert.equal(body.orderbookFallbackReason, 'ORDERBOOK_BINANCE_HTTP_451');
+  // Reclaim is pure history and must remain fully usable server-side.
+  assert.ok(body.reclaim);
+});
+
+test('a server that did obtain a book advertises orderbookMode:server', async () => {
+  const summary = { best_bid: 100, best_ask: 100.1, spread_bps: 10, imbalance: 0.35, cumulative_bid_qty: 5, cumulative_ask_qty: 3 };
+  const res = await call('GET', {
+    fetchOrderbookSummary: async () => ({ ok: true, orderbook: summary, pair: 'BTCUSDT', market: 'spot', source: 'api_orderbook' }),
+  });
+  const body = await res.json();
+  assert.equal(body.serverOrderbookAvailable, true);
+  assert.equal(body.orderbookMode, 'server');
+});
+
 test('no write call and no trading/RADAR imports in this endpoint', async () => {
   const fs = await import('node:fs/promises');
   const source = await fs.readFile(new globalThis.URL('../netlify/functions/admin-price-history-signals.mjs', import.meta.url), 'utf8');
