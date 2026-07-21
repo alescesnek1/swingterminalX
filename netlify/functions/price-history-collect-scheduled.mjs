@@ -196,6 +196,17 @@ export async function runPriceHistoryCollectScheduled(req, deps = {}) {
   const pagesAttempted = marketResult.pagesAttempted ?? null;
   const dataStatus = marketResult.status === 'partial' ? 'partial' : 'ok';
 
+  // Defense in depth: refuse to write an empty snapshot even if
+  // fetchCoinGeckoMarketRows ever mis-reports ok:true with zero rows. A
+  // zero-row snapshot would satisfy the min-spacing guard on the next run
+  // and silently suppress the next real collection — mirrors the manual
+  // admin collector's NO_MARKET_ROWS guard. Non-2xx (not the admin
+  // collector's 200) so the scheduler job goes red instead of staying
+  // green on a collection that produced nothing.
+  if (rows.length === 0) {
+    return json(req, { ok: false, collected: false, reason: 'NO_MARKET_ROWS' }, 502);
+  }
+
   const writeEnabled = env[PRICE_HISTORY_WRITE_ENV_FLAG] === 'true';
   if (!writeEnabled) {
     return json(req, {

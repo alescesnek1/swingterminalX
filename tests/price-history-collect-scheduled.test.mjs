@@ -247,6 +247,57 @@ test('CoinGecko rate-limited failure returns 429 and never writes', async () => 
   assert.equal(writeCalled, false);
 });
 
+// C1/C2 fix (defense in depth on the collector side): zero fetched rows
+// must never reach the writer, even if the source module mis-reports
+// ok:true with an empty rows array. A zero-row snapshot would satisfy the
+// min-spacing guard and silently suppress the next real collection.
+test('zero fetched rows returns a non-2xx NO_MARKET_ROWS response and never calls the writer', async () => {
+  let writeCalled = false;
+  const deps = baseDeps({
+    env: { ...AUTHED_ENV, PRICE_HISTORY_SCHEDULE_ENABLED: 'true', PRICE_HISTORY_COLLECT_ENABLED: 'true', PRICE_HISTORY_WRITE_ENABLED: 'true' },
+    fetchCoinGeckoMarketRows: async () => ({ ok: true, rows: [], pagesOk: 1, pagesAttempted: 1, status: 'ok' }),
+    writeMarketPriceSnapshot: async () => { writeCalled = true; return { ok: true, snapshotId: 1, inserted: 0, dropped: 0, duplicates: 0 }; },
+  });
+  const res = await call('POST', deps);
+  assert.notEqual(res.status, 200);
+  assert.ok(res.status >= 400 && res.status < 600, `expected a non-2xx status, got ${res.status}`);
+  assert.deepEqual(await res.json(), { ok: false, collected: false, reason: 'NO_MARKET_ROWS' });
+  assert.equal(writeCalled, false);
+});
+
+test('zero fetched rows refuses to write even when the WRITE flag is disabled (fetch-quality problem, not a write-disabled skip)', async () => {
+  let writeCalled = false;
+  const deps = baseDeps({
+    env: { ...AUTHED_ENV, PRICE_HISTORY_SCHEDULE_ENABLED: 'true', PRICE_HISTORY_COLLECT_ENABLED: 'true' }, // WRITE flag absent
+    fetchCoinGeckoMarketRows: async () => ({ ok: true, rows: [], pagesOk: 1, pagesAttempted: 1, status: 'ok' }),
+    writeMarketPriceSnapshot: async () => { writeCalled = true; return { ok: true }; },
+  });
+  const res = await call('POST', deps);
+  assert.notEqual(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: false, collected: false, reason: 'NO_MARKET_ROWS' });
+  assert.equal(writeCalled, false);
+});
+
+test('a non-array rows field from the source module is treated as zero rows and refused', async () => {
+  const deps = baseDeps({
+    env: { ...AUTHED_ENV, PRICE_HISTORY_SCHEDULE_ENABLED: 'true', PRICE_HISTORY_COLLECT_ENABLED: 'true', PRICE_HISTORY_WRITE_ENABLED: 'true' },
+    fetchCoinGeckoMarketRows: async () => ({ ok: true, rows: 'not-an-array', pagesOk: 1, pagesAttempted: 1, status: 'ok' }),
+  });
+  const res = await call('POST', deps);
+  assert.notEqual(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: false, collected: false, reason: 'NO_MARKET_ROWS' });
+});
+
+test('the zero-rows-refused response contains only counts/codes — no rows, no symbols', async () => {
+  const deps = baseDeps({
+    env: { ...AUTHED_ENV, PRICE_HISTORY_SCHEDULE_ENABLED: 'true', PRICE_HISTORY_COLLECT_ENABLED: 'true', PRICE_HISTORY_WRITE_ENABLED: 'true' },
+    fetchCoinGeckoMarketRows: async () => ({ ok: true, rows: [], pagesOk: 1, pagesAttempted: 1, status: 'ok' }),
+  });
+  const res = await call('POST', deps);
+  const body = await res.json();
+  assert.deepEqual(Object.keys(body).sort(), ['collected', 'ok', 'reason']);
+});
+
 test('a partial CoinGecko fetch still proceeds to write with dataStatus:"partial" and the true row/page counts', async () => {
   let capturedWriteArgs = null;
   const deps = baseDeps({

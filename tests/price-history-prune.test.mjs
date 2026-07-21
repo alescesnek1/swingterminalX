@@ -83,14 +83,18 @@ test('PRUNE_ENABLED flag disabled deletes nothing and returns 200 PRUNE_DISABLED
   }
 });
 
-test('missing, zero, negative, or non-numeric retention deletes nothing', async () => {
+// C3 fix: prune enabled + unusable retention must be a non-2xx status, not
+// 200 — a 200 here would let a misconfigured PRICE_HISTORY_RETENTION_DAYS
+// leave the scheduler's CI job green while pruning silently never ran.
+test('missing, zero, negative, or non-numeric retention returns a non-2xx PRUNE_INVALID_RETENTION and deletes nothing', async () => {
   for (const days of [undefined, '0', '-5', 'not-a-number', '']) {
     let pruneCalled = false;
     const env = { ...AUTHED_ENV, PRICE_HISTORY_PRUNE_ENABLED: 'true' };
     if (days !== undefined) env.PRICE_HISTORY_RETENTION_DAYS = days;
     const deps = baseDeps({ env, pruneSnapshotsOlderThan: async () => { pruneCalled = true; return { ok: true, prunedSnapshots: 5 }; } });
     const res = await call('POST', deps);
-    assert.equal(res.status, 200);
+    assert.notEqual(res.status, 200, `days="${days}" must not report a green (200) status`);
+    assert.ok(res.status >= 400 && res.status < 600, `expected a non-2xx status for days="${days}", got ${res.status}`);
     assert.deepEqual(await res.json(), { ok: false, pruned: false, prunedSnapshots: 0, reason: 'PRUNE_INVALID_RETENTION' });
     assert.equal(pruneCalled, false, `days="${days}" must not trigger a delete`);
   }

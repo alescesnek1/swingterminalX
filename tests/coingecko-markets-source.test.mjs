@@ -51,7 +51,7 @@ test('module exports the expected function and constants', () => {
 test('falls back to globalThis.fetch when fetchImpl is not provided', async () => {
   const originalFetch = globalThis.fetch;
   let called = false;
-  globalThis.fetch = async () => { called = true; return { ok: true, status: 200, json: async () => [] }; };
+  globalThis.fetch = async () => { called = true; return { ok: true, status: 200, json: async () => makeRows(5, 0) }; };
   try {
     const res = await fetchCoinGeckoMarketRows({ maxCoins: 10 });
     assert.equal(called, true);
@@ -106,12 +106,39 @@ test('a short page (fewer than 250 rows) stops further page fetches — natural 
   assert.equal(page3Called, false);
 });
 
-test('an empty-but-ok page counts as a successful fetch and stops pagination', async () => {
+// C1 fix: an empty array on the very first page (zero rows collected so
+// far) must NEVER be reported as a successful, complete fetch — this was
+// the bug where the collector could write an empty snapshot as if it were
+// a real one, then have that empty snapshot suppress the next collection
+// via the min-spacing guard.
+test('an empty first page (zero rows collected so far) is a failure, never ok:true', async () => {
   const spec = { 1: { rows: [] } };
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  let res;
+  try {
+    res = await fetchCoinGeckoMarketRows({ maxCoins: 1000, fetchImpl: fakeFetch(spec) });
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(res.ok, false);
+  assert.equal(res.reason, 'MARKET_EMPTY_ROWS');
+  assert.equal(res.rows.length, 0);
+  assert.equal(res.pagesOk, 0);
+});
+
+// An empty array page is only ever a legitimate "end of pagination" signal
+// once a PRIOR page already contributed real rows.
+test('an empty array page AFTER a page with real rows is a legitimate end of pagination', async () => {
+  // Page 1 must return a FULL page (250 rows) so the loop continues to
+  // page 2 at all — a short page already triggers natural end-of-data on
+  // its own, which would make this fixture accidentally never reach page 2.
+  const spec = { 1: { rows: makeRows(250, 0) }, 2: { rows: [] } };
   const res = await fetchCoinGeckoMarketRows({ maxCoins: 1000, fetchImpl: fakeFetch(spec) });
   assert.equal(res.ok, true);
-  assert.equal(res.pagesOk, 1);
-  assert.equal(res.rows.length, 0);
+  assert.equal(res.rows.length, 250);
+  assert.equal(res.pagesOk, 2);
+  assert.equal(res.pagesAttempted, 2);
 });
 
 test('maxCoins caps the row count and the number of pages fetched', async () => {
@@ -285,11 +312,87 @@ test('a response.json() parse failure is treated as a page failure, not a thrown
   assert.equal(res.rows.length, 10);
 });
 
-test('a non-array JSON body is treated as an empty page, never throws', async () => {
+// C1 fix: a non-array JSON body (malformed payload, or CoinGecko's own
+// { status: { error_code, error_message } } error envelope) must be a
+// FAILED page — never silently coerced into an empty-but-"ok" page.
+test('a non-array JSON body is a failed page, never coerced into an empty success', async () => {
   const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ not: 'an array' }) });
-  const res = await fetchCoinGeckoMarketRows({ maxCoins: 500, fetchImpl });
-  assert.equal(res.ok, true);
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  let res;
+  try {
+    res = await fetchCoinGeckoMarketRows({ maxCoins: 500, fetchImpl });
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(res.ok, false);
+  assert.equal(res.reason, 'MARKET_INVALID_PAYLOAD');
   assert.equal(res.rows.length, 0);
+});
+
+// CoinGecko's documented error envelope shape: an object (not an array)
+// carrying a status.error_code, sometimes delivered with HTTP 200. A 200
+// status must never be trusted as success by itself.
+test('an HTTP 200 CoinGecko error envelope ({status:{error_code}}) is a failed page, not success', async () => {
+  const fetchImpl = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ status: { error_code: 429, error_message: 'You have exceeded the Rate Limit.' } }),
+  });
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  let res;
+  try {
+    res = await fetchCoinGeckoMarketRows({ maxCoins: 500, fetchImpl });
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(res.ok, false);
+  assert.equal(res.reason, 'MARKET_INVALID_PAYLOAD');
+  assert.equal(res.rows.length, 0);
+});
+
+// Partial: one page returns a genuine error envelope, another page
+// (real HTTP-level success) returns real rows — overall result must still
+// be ok:true/status:'partial' with the good rows kept.
+test('one error-envelope page plus one genuinely good page yields ok:true, status partial, with the good rows kept', async () => {
+  let call = 0;
+  const fetchImpl = async () => {
+    call += 1;
+    if (call === 1) return { ok: true, status: 200, json: async () => ({ status: { error_code: 500 } }) };
+    return { ok: true, status: 200, json: async () => makeRows(80, 0) };
+  };
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  let res;
+  try {
+    res = await fetchCoinGeckoMarketRows({ maxCoins: 500, fetchImpl });
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(res.ok, true);
+  assert.equal(res.status, 'partial');
+  assert.equal(res.rows.length, 80);
+  assert.equal(res.pagesOk, 1);
+  assert.equal(res.pagesAttempted, 2);
+});
+
+test('an error-envelope page never logs the raw error_message, only a numeric error_code', async () => {
+  const fetchImpl = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ status: { error_code: 429, error_message: 'a message that must never be logged' } }),
+  });
+  const calls = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => { calls.push(args); };
+  try {
+    await fetchCoinGeckoMarketRows({ maxCoins: 500, fetchImpl });
+  } finally {
+    console.warn = originalWarn;
+  }
+  const serialized = JSON.stringify(calls);
+  assert.equal(serialized.includes('a message that must never be logged'), false);
 });
 
 test('failure logs never include the raw upstream response body', async () => {

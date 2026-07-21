@@ -52,10 +52,15 @@ export async function runPriceHistoryPruneScheduled(req, deps = {}) {
     return json(req, { ok: true, skipped: true, pruned: false, prunedSnapshots: 0, reason: 'PRUNE_DISABLED' });
   }
 
+  // C3 fix: prune is enabled but retention is unusable. This must be a
+  // non-2xx status — returning 200 here let a misconfigured
+  // PRICE_HISTORY_RETENTION_DAYS leave the scheduler's GitHub Actions job
+  // green while pruning silently never ran, so storage could grow
+  // unbounded with no visible failure signal. Deletes nothing either way.
   const daysRaw = env[PRICE_HISTORY_RETENTION_DAYS_ENV_FLAG];
   const days = Number(daysRaw);
   if (!Number.isFinite(days) || days <= 0) {
-    return json(req, { ok: false, pruned: false, prunedSnapshots: 0, reason: 'PRUNE_INVALID_RETENTION' });
+    return json(req, { ok: false, pruned: false, prunedSnapshots: 0, reason: 'PRUNE_INVALID_RETENTION' }, 400);
   }
 
   let pruneSnapshotsOlderThan = deps.pruneSnapshotsOlderThan;

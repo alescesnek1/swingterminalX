@@ -555,15 +555,20 @@ email allowlist (§9), not a billing tier.
       `schedule:` triggers are present but **commented out** (rollout
       requires the owner to uncomment them deliberately after the flag-by-flag
       enablement sequence in `docs/price-history-scheduler.md`).
-    - **Known pre-enablement blockers (not reachable while flags are
-      unset, but MUST be fixed before the specific flag below each gates):**
-      an empty/non-array CoinGecko page currently writes an empty snapshot
-      as if it were a success, which also suppresses the next real
-      collection — fix before `PRICE_HISTORY_WRITE_ENABLED=true`; invalid
-      retention on the pruner returns HTTP 200 instead of failing the CI
-      job — fix before `PRICE_HISTORY_PRUNE_ENABLED=true`. Full detail in
-      `docs/price-history-scheduler.md`'s "Known issues that MUST be fixed
-      before enablement" section — read it before touching either flag.
+    - **Pre-enablement blockers C1/C3 — fixed (branch
+      `fix/price-history-scheduler-preenablement-blockers`, LOCAL,
+      UNPUSHED).** Neither was ever reachable in production (every flag
+      still unset). C1: an empty/non-array/error-envelope CoinGecko page
+      could write an empty snapshot as if it were a success and suppress
+      the next real collection — fixed in both
+      `_coingecko-markets-source.mjs` (non-array and premature-empty pages
+      are now failed pages, never a silent success) and
+      `price-history-collect-scheduled.mjs` (independent zero-rows refusal
+      before any write, defense in depth). C3: invalid retention on the
+      pruner returned HTTP 200 instead of failing the CI job — now returns
+      400. C2 (a unique-constraint hit surfacing as `DB_UNAVAILABLE`) is
+      still open, optional polish only. Full detail and test coverage in
+      `docs/price-history-scheduler.md`'s "Known issues — status" section.
     - No RADAR/ENTRY_READY/trading/alert/Telegram/UI behavior changed. See
       `docs/price-history-scheduler.md` for the full rollout/rollback plan
       and env-flag reference.

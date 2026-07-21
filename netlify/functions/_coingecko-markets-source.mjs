@@ -28,6 +28,15 @@
 //     CoinGecko quota, so hammering it further would degrade the product.
 //   - Failures log a stable code + page number only — never the raw
 //     response body, never a header, never a token.
+//   - A non-array JSON body (including CoinGecko's `{status:{error_code,
+//     error_message}}` error envelope, which CoinGecko can send with HTTP
+//     200 — a 200 status alone never means success) is a FAILED page, never
+//     a silent "no more data" signal. An empty ARRAY response is only ever
+//     treated as the legitimate end of pagination once at least one prior
+//     page already contributed real rows; an empty array on the very first
+//     productive page (zero rows collected so far) is instead a failed page
+//     (MARKET_EMPTY_ROWS). Net effect: this function can never return
+//     `ok:true`/`status:'ok'` with zero total rows.
 
 const COINGECKO_MARKETS_BASE_URL = 'https://api.coingecko.com/api/v3/coins/markets';
 const PER_PAGE = 250;
@@ -95,21 +104,49 @@ export async function fetchCoinGeckoMarketRows({ maxCoins, fetchImpl } = {}) {
         continue;
       }
 
-      let pageRows;
+      let json;
       try {
-        const json = await res.json();
-        pageRows = Array.isArray(json) ? json : [];
+        json = await res.json();
       } catch (err) {
         lastFailureReason = 'MARKET_FETCH_FAILED';
         logWarn('page_parse_failed', { page, name: err?.name || 'Error' });
         continue;
       }
 
+      // A 200 status never means success by itself — CoinGecko can (and
+      // does) send an error envelope, e.g. { status: { error_code: 429,
+      // error_message: '...' } }, with an HTTP 200. Any non-array body is
+      // therefore a FAILED page, never a "no more data" signal — this is
+      // the fix for the case a naive `Array.isArray(json) ? json : []`
+      // silently turned an error envelope into an empty-but-"ok" page.
+      if (!Array.isArray(json)) {
+        lastFailureReason = 'MARKET_INVALID_PAYLOAD';
+        const errorCode = json && typeof json === 'object' && json.status && typeof json.status === 'object'
+          ? json.status.error_code
+          : undefined;
+        logWarn('page_invalid_payload', {
+          page,
+          errorCode: (typeof errorCode === 'number' || typeof errorCode === 'string') ? errorCode : null,
+        });
+        continue;
+      }
+
+      const pageRows = json;
+
       if (!pageRows.length) {
-        // Empty-but-ok page means CoinGecko has no more rows to give us —
-        // this page still counts as a successful fetch, just the last one.
-        pagesOk += 1;
-        break;
+        if (rows.length > 0) {
+          // Legitimate end of pagination: we already have real rows from an
+          // earlier page, and this page is a genuinely empty (but
+          // array-typed) response — CoinGecko has no more data to give us.
+          pagesOk += 1;
+          break;
+        }
+        // Zero rows collected so far AND this page came back as an empty
+        // array — do not treat this as a successful, complete fetch. A
+        // page failure, not a data-exhaustion signal.
+        lastFailureReason = 'MARKET_EMPTY_ROWS';
+        logWarn('page_empty_rows', { page });
+        continue;
       }
 
       pagesOk += 1;
@@ -119,7 +156,10 @@ export async function fetchCoinGeckoMarketRows({ maxCoins, fetchImpl } = {}) {
 
     const boundedRows = rows.slice(0, cap);
 
-    if (pagesOk === 0) {
+    // Zero total rows must never be reported as ok:true/status:'ok', even
+    // as a defense-in-depth check against the loop logic above — a caller
+    // must never write an empty snapshot believing the fetch succeeded.
+    if (pagesOk === 0 || boundedRows.length === 0) {
       return {
         ok: false,
         rows: [],
