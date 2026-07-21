@@ -172,10 +172,70 @@ test('response never contains the raw market payload or a secret-shaped key', as
   }
 });
 
-test('collect enabled builds the markets URL from trusted origin only, forwarding no query string or auth header', async () => {
+test('collect enabled builds the markets URL from trusted origin only, forwarding no query string', async () => {
   let capturedUrl = null;
+  const req = new Request(`${URL}?foo=bar&token=leak`, { method: 'POST' });
+  const res = await runAdminPriceHistoryCollect(req, {
+    getIdentity: async () => ADMIN,
+    isAdmin: () => true,
+    env: ENABLED,
+    fetchImpl: async (u) => { capturedUrl = u; return { ok: true, status: 200, json: async () => MARKET_ROWS }; },
+    writeMarketSnapshotIfEnabled: async () => ({ ok: true, skipped: false, written: true }),
+  });
+  assert.equal(res.status, 200);
+  assert.equal(capturedUrl, 'https://swingterminalx.netlify.app/api/markets');
+});
+
+// /api/markets enforces checkOrigin() then verifyAuth() (Deno Edge Function,
+// apps/edge/netlify/edge-functions/lib/security.js) — the same-origin bridge
+// must forward Origin or every call is rejected before auth is even checked.
+// It must also forward the incoming admin Authorization so verifyAuth can
+// succeed, while never forwarding cookies or any other incoming header.
+test('collect forwards only Authorization, Origin, and Accept to /api/markets — no cookies or arbitrary headers', async () => {
   let capturedHeaders = null;
-  const req = new Request(`${URL}?foo=bar&token=leak`, {
+  const req = new Request(URL, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer super-secret-admin-token',
+      cookie: 'session=abc',
+      'x-forwarded-for': '1.2.3.4',
+    },
+  });
+  const res = await runAdminPriceHistoryCollect(req, {
+    getIdentity: async () => ADMIN,
+    isAdmin: () => true,
+    env: ENABLED,
+    fetchImpl: async (u, init) => { capturedHeaders = init && init.headers; return { ok: true, status: 200, json: async () => MARKET_ROWS }; },
+    writeMarketSnapshotIfEnabled: async () => ({ ok: true, skipped: false, written: true }),
+  });
+  assert.equal(res.status, 200);
+  assert.equal(capturedHeaders.Authorization, 'Bearer super-secret-admin-token');
+  assert.equal(capturedHeaders.Origin, 'https://swingterminalx.netlify.app');
+  assert.equal(capturedHeaders.Accept, 'application/json');
+  assert.equal(capturedHeaders.cookie, undefined);
+  assert.equal(capturedHeaders.Cookie, undefined);
+  assert.equal(capturedHeaders['x-forwarded-for'], undefined);
+  assert.equal(Object.keys(capturedHeaders).length, 3);
+});
+
+test('collect without an incoming Authorization header still fetches with Origin and Accept only', async () => {
+  let capturedHeaders = null;
+  const req = new Request(URL, { method: 'POST' });
+  const res = await runAdminPriceHistoryCollect(req, {
+    getIdentity: async () => ADMIN,
+    isAdmin: () => true,
+    env: ENABLED,
+    fetchImpl: async (u, init) => { capturedHeaders = init && init.headers; return { ok: true, status: 200, json: async () => MARKET_ROWS }; },
+    writeMarketSnapshotIfEnabled: async () => ({ ok: true, skipped: false, written: true }),
+  });
+  assert.equal(res.status, 200);
+  assert.equal(capturedHeaders.Authorization, undefined);
+  assert.equal(capturedHeaders.Origin, 'https://swingterminalx.netlify.app');
+  assert.equal(capturedHeaders.Accept, 'application/json');
+});
+
+test('response never echoes the incoming Authorization header value', async () => {
+  const req = new Request(URL, {
     method: 'POST',
     headers: { authorization: 'Bearer super-secret-admin-token' },
   });
@@ -183,11 +243,9 @@ test('collect enabled builds the markets URL from trusted origin only, forwardin
     getIdentity: async () => ADMIN,
     isAdmin: () => true,
     env: ENABLED,
-    fetchImpl: async (u, init) => { capturedUrl = u; capturedHeaders = init && init.headers; return { ok: true, status: 200, json: async () => MARKET_ROWS }; },
+    fetchImpl: fakeFetch(),
     writeMarketSnapshotIfEnabled: async () => ({ ok: true, skipped: false, written: true }),
   });
-  assert.equal(res.status, 200);
-  assert.equal(capturedUrl, 'https://swingterminalx.netlify.app/api/markets');
-  assert.equal(capturedHeaders && capturedHeaders.Authorization, undefined);
-  assert.equal(capturedHeaders && capturedHeaders.authorization, undefined);
+  const raw = await res.text();
+  assert.equal(raw.includes('super-secret-admin-token'), false);
 });

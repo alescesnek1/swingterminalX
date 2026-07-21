@@ -8,10 +8,12 @@
 //   - Only ever calls the trusted origin's static /api/orderbook path with
 //     a sanitized pair/market — never forwards req.url or arbitrary query
 //     strings.
-//   - /api/orderbook is auth-protected, so the caller's Authorization
-//     header is the only header ever forwarded, and only when explicitly
-//     passed in — cookies and every other header are dropped. The header
-//     value is never logged and never appears in any returned object.
+//   - /api/orderbook enforces an origin allowlist before auth, so this
+//     same-origin request's Origin header is always forwarded. The
+//     caller's Authorization header is the only other header ever
+//     forwarded, and only when explicitly passed in — cookies and every
+//     other header are dropped. Neither value is ever logged or appears
+//     in any returned object.
 //   - Upstream errors collapse to stable reason codes; the raw upstream
 //     body/message is never surfaced.
 
@@ -56,9 +58,13 @@ export async function fetchOrderbookSummary({ origin, pair, symbol, market, fetc
   url.searchParams.set('pair', normalizedPair);
   url.searchParams.set('market', normalizedMarket);
 
-  // Only the caller-supplied Authorization value is ever forwarded; no
-  // cookies, no other headers, never logged.
-  const outgoingHeaders = { Accept: 'application/json' };
+  // /api/orderbook enforces checkOrigin() then verifyAuth() (see
+  // apps/edge/netlify/edge-functions/lib/security.js), so Origin must be
+  // forwarded or every call is rejected before auth is even checked. The
+  // caller-supplied Authorization value is the only other header ever
+  // forwarded, and only when explicitly passed in — no cookies, no other
+  // headers, never logged.
+  const outgoingHeaders = { Accept: 'application/json', Origin: url.origin };
   const authorization = headers && typeof headers.authorization === 'string' ? headers.authorization : null;
   if (authorization) outgoingHeaders.Authorization = authorization;
 

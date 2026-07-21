@@ -104,6 +104,21 @@ test('success returns the summarized orderbook and source tag', async () => {
   assert.deepEqual(res, { ok: true, orderbook: SUMMARY, pair: 'BTCUSDT', market: 'spot', source: 'api_orderbook' });
 });
 
+// /api/orderbook enforces checkOrigin() before verifyAuth() (Deno Edge
+// Function, apps/edge/netlify/edge-functions/lib/security.js) — without an
+// Origin header every same-origin call is rejected before auth is even
+// checked, regardless of Authorization.
+test('Origin header is always forwarded so /api/orderbook origin-lockdown passes', async () => {
+  let capturedHeaders = null;
+  await fetchOrderbookSummary({
+    origin: ORIGIN, pair: 'BTCUSDT',
+    fetchImpl: async (u, init) => { capturedHeaders = init.headers; return { ok: true, status: 200, json: async () => ({ orderbook: SUMMARY }) }; },
+  });
+  assert.equal(capturedHeaders.Origin, ORIGIN);
+  assert.equal(capturedHeaders.Accept, 'application/json');
+  assert.equal(capturedHeaders.Authorization, undefined);
+});
+
 test('Authorization header is forwarded but never logged or echoed back', async () => {
   const originalWarn = console.warn;
   const originalError = console.error;

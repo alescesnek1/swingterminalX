@@ -108,9 +108,18 @@ export async function runAdminPriceHistoryCollect(req, deps = {}) {
   }
   const marketsUrl = `${origin}/api/markets`;
 
+  // /api/markets enforces checkOrigin() then verifyAuth() (see
+  // apps/edge/netlify/edge-functions/lib/security.js) — forward only the
+  // minimum safe context: the incoming admin Authorization (if present),
+  // this same-origin Origin, and Accept. Never cookies, never arbitrary
+  // headers, never logged.
+  const outgoingHeaders = { Accept: 'application/json', Origin: origin };
+  const authorization = req.headers.get('authorization');
+  if (authorization) outgoingHeaders.Authorization = authorization;
+
   let payload;
   try {
-    const res = await fetchImpl(marketsUrl, { headers: { Accept: 'application/json' } });
+    const res = await fetchImpl(marketsUrl, { headers: outgoingHeaders });
     if (!res.ok) {
       console.warn('[ADMIN_PRICE_HISTORY_COLLECT] markets_fetch_failed', { status: res.status });
       return json(req, { ok: false, collected: false, reason: 'MARKET_FETCH_FAILED' }, 502);
