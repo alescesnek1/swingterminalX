@@ -555,6 +555,15 @@ email allowlist (§9), not a billing tier.
       `schedule:` triggers are present but **commented out** (rollout
       requires the owner to uncomment them deliberately after the flag-by-flag
       enablement sequence in `docs/price-history-scheduler.md`).
+    - **Known pre-enablement blockers (not reachable while flags are
+      unset, but MUST be fixed before the specific flag below each gates):**
+      an empty/non-array CoinGecko page currently writes an empty snapshot
+      as if it were a success, which also suppresses the next real
+      collection — fix before `PRICE_HISTORY_WRITE_ENABLED=true`; invalid
+      retention on the pruner returns HTTP 200 instead of failing the CI
+      job — fix before `PRICE_HISTORY_PRUNE_ENABLED=true`. Full detail in
+      `docs/price-history-scheduler.md`'s "Known issues that MUST be fixed
+      before enablement" section — read it before touching either flag.
     - No RADAR/ENTRY_READY/trading/alert/Telegram/UI behavior changed. See
       `docs/price-history-scheduler.md` for the full rollout/rollback plan
       and env-flag reference.

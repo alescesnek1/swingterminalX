@@ -84,6 +84,42 @@ never trusts a request body field (including `next_run`) as authentication.
 | `PRICE_HISTORY_PRUNE_ENABLED` | unset | `!== 'true'` → pruner returns `200 PRUNE_DISABLED`, deletes nothing. |
 | `PRICE_HISTORY_RETENTION_DAYS` | unset | Missing/invalid/≤0 → pruner deletes nothing (`PRUNE_INVALID_RETENTION`). When valid, snapshots (and their cascaded points) older than this many days are deleted in bounded batches. |
 
+## Known issues that MUST be fixed before enablement
+
+These were found in post-implementation review. They are **not** reachable
+today because every flag defaults off, but each one gates a specific
+enablement step below — do not cross that step until the fix lands.
+
+**C1 — fix before setting `PRICE_HISTORY_WRITE_ENABLED=true` (blocks
+rollout step 7).**
+`_coingecko-markets-source.mjs` currently treats an empty or non-array
+upstream page as a successful, complete fetch (`ok:true`, `status:'ok'`,
+zero rows). The collector then writes an **empty** snapshot with
+`coin_count:0`, reports it as a successful write, and that empty snapshot
+then satisfies the min-spacing guard — silently suppressing the next real
+collection for the entire spacing window. CoinGecko is known to return an
+error envelope with HTTP 200, so this is reachable in normal operation, not
+just a theoretical edge case. Required fix: treat an empty/non-array page
+as a failed page, and have the collector refuse to write a zero-row
+snapshot (mirror the admin collector's `NO_MARKET_ROWS` behavior).
+
+**C3 — fix before setting `PRICE_HISTORY_PRUNE_ENABLED=true` (blocks
+rollout step 11).**
+`price-history-prune-scheduled.mjs` returns HTTP 200 for
+`PRUNE_INVALID_RETENTION`. If `PRICE_HISTORY_RETENTION_DAYS` is
+misconfigured once pruning is enabled, the GitHub Actions job stays green
+while pruning silently never runs, and storage grows unbounded. Required
+fix: return a non-2xx status when prune is enabled but retention is
+unusable.
+
+**C2 — optional polish, not a gate.**
+A unique-constraint violation from the schedule guard (the partial index
+above) currently surfaces as reason `DB_UNAVAILABLE` / HTTP 503, so the
+guard doing its job correctly looks identical to a database outage in the
+response. The Postgres SQLSTATE (`23505`) is visible in Netlify function
+logs via `err.code`, which is how to tell the two apart today; a future
+polish pass could return a distinct reason code instead.
+
 ## Rollout (each step is a separate, owner-executed action)
 
 1. Push/deploy this branch after the usual review. Every flag above stays
@@ -102,19 +138,19 @@ never trusts a request body field (including `next_run`) as authentication.
 6. Set `PRICE_HISTORY_COLLECT_ENABLED=true`. Run `workflow_dispatch` again.
    Expect a real CoinGecko fetch with `write:{skipped:true,reason:'DISABLED'}`
    — **this is also the timing rehearsal**; note the wall-clock duration.
-7. Set `PRICE_HISTORY_WRITE_ENABLED=true`. Run `workflow_dispatch` — this is
-   the **first real write**. Verify via `/api/admin-price-history` that a
-   new `scheduled_price_history` snapshot exists with a plausible
-   `coin_count`.
+7. **Fix C1 before this step.** Set `PRICE_HISTORY_WRITE_ENABLED=true`. Run
+   `workflow_dispatch` — this is the **first real write**. Verify via
+   `/api/admin-price-history` that a new `scheduled_price_history` snapshot
+   exists with a plausible `coin_count`.
 8. Run `workflow_dispatch` a **second time immediately**. It must return
    `MIN_SPACING` and create no new snapshot — this is the idempotency proof.
 9. Uncomment the `schedule:` block in `price-history-collect.yml` at
    `*/30 * * * *`. Soak 24h: confirm evenly-spaced, duplicate-free
    snapshots and no non-2xx runs.
 10. Tighten to `*/15 * * * *`. Soak another 24h.
-11. Only once history has accumulated past the intended retention window: set
-    `PRICE_HISTORY_RETENTION_DAYS` (14 recommended to start) and
-    `PRICE_HISTORY_PRUNE_ENABLED=true`, then run
+11. **Fix C3 before this step.** Only once history has accumulated past the
+    intended retention window: set `PRICE_HISTORY_RETENTION_DAYS` (14
+    recommended to start) and `PRICE_HISTORY_PRUNE_ENABLED=true`, then run
     `price-history-prune.yml` once via `workflow_dispatch` and confirm only
     snapshots older than the window were removed. Uncomment its `schedule:`
     only after that manual run looks correct.
