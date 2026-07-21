@@ -101,21 +101,29 @@ test('a thrown fetch error maps to ORDERBOOK_BINANCE_FETCH_FAILED, never the raw
   assert.deepEqual(res, { ok: false, reason: 'ORDERBOOK_BINANCE_FETCH_FAILED', pair: 'BTCUSDT', market: 'spot' });
 });
 
-test('bad JSON or an empty/invalid depth payload maps to ORDERBOOK_BINANCE_INVALID_RESPONSE', async () => {
-  const badJson = await fetchBinanceDepthSummary({
+// A parse failure and a structurally unusable book are different upstream
+// problems and must not collapse into one code.
+test('a 2xx body that is not valid JSON maps to ORDERBOOK_BINANCE_PARSE_FAILED', async () => {
+  const res = await fetchBinanceDepthSummary({
     pair: 'BTCUSDT',
     fetchImpl: async () => ({ ok: true, status: 200, json: async () => { throw new Error('bad json'); } }),
   });
-  assert.deepEqual(badJson, { ok: false, reason: 'ORDERBOOK_BINANCE_INVALID_RESPONSE', pair: 'BTCUSDT', market: 'spot' });
-
-  const emptyBook = await fetchBinanceDepthSummary({
-    pair: 'BTCUSDT',
-    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ bids: [], asks: [] }) }),
-  });
-  assert.deepEqual(emptyBook, { ok: false, reason: 'ORDERBOOK_BINANCE_INVALID_RESPONSE', pair: 'BTCUSDT', market: 'spot' });
+  assert.deepEqual(res, { ok: false, reason: 'ORDERBOOK_BINANCE_PARSE_FAILED', pair: 'BTCUSDT', market: 'spot' });
 });
 
-test('a slow upstream is aborted after the timeout instead of hanging', async (t) => {
+test('valid JSON with an empty or malformed book maps to ORDERBOOK_BINANCE_INVALID_PAYLOAD', async () => {
+  for (const payload of [{ bids: [], asks: [] }, { bids: 'nope', asks: 'nope' }, {}, { bids: [['1', '1']] }]) {
+    const res = await fetchBinanceDepthSummary({
+      pair: 'BTCUSDT',
+      fetchImpl: async () => ({ ok: true, status: 200, json: async () => payload }),
+    });
+    assert.deepEqual(res, { ok: false, reason: 'ORDERBOOK_BINANCE_INVALID_PAYLOAD', pair: 'BTCUSDT', market: 'spot' });
+  }
+});
+
+// A timeout (upstream slow) and a transport failure (egress blocked) are
+// separately actionable, so they carry separate codes.
+test('a slow upstream is aborted after the timeout and reported as ORDERBOOK_BINANCE_TIMEOUT', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const resultPromise = fetchBinanceDepthSummary({
     pair: 'BTCUSDT',
@@ -125,5 +133,19 @@ test('a slow upstream is aborted after the timeout instead of hanging', async (t
   });
   t.mock.timers.tick(4500);
   const res = await resultPromise;
-  assert.deepEqual(res, { ok: false, reason: 'ORDERBOOK_BINANCE_FETCH_FAILED', pair: 'BTCUSDT', market: 'spot' });
+  assert.deepEqual(res, { ok: false, reason: 'ORDERBOOK_BINANCE_TIMEOUT', pair: 'BTCUSDT', market: 'spot' });
+});
+
+// Binance commonly answers a blocked cloud/datacenter egress with a plain
+// status rather than a network error — the status must survive, the body
+// must not.
+test('a geo/rate block status (451/403/418/429) is reported as a status-specific reason with no body', async () => {
+  for (const status of [451, 403, 418, 429]) {
+    const res = await fetchBinanceDepthSummary({
+      pair: 'BTCUSDT',
+      fetchImpl: async () => ({ ok: false, status, json: async () => ({ code: -1, msg: 'Service unavailable from a restricted location.' }) }),
+    });
+    assert.deepEqual(res, { ok: false, reason: `ORDERBOOK_BINANCE_HTTP_${status}`, pair: 'BTCUSDT', market: 'spot' });
+    assert.equal(JSON.stringify(res).includes('restricted location'), false);
+  }
 });

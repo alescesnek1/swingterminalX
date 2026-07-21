@@ -56,6 +56,10 @@ test('success without orderbook still works, bounds input, and reports a stable 
   assert.equal(body.symbol, 'BTC'); assert.equal(body.points, POINTS.length);
   assert.equal(body.orderbookUsed, false); assert.equal(body.orderbookReason, 'ORDERBOOK_UNAVAILABLE');
   assert.equal(body.orderbookSource, null);
+  assert.equal(body.orderbookBridgeReason, 'ORDERBOOK_UNAVAILABLE');
+  // No pair came back from the bridge, so the fallback had nothing sanitized
+  // to reuse and was never attempted.
+  assert.equal(body.orderbookFallbackReason, null);
   assert.ok(body.reclaim); assert.ok(body.absorption);
 });
 
@@ -73,6 +77,8 @@ test('successful orderbook fetch makes orderbookUsed:true, orderbookReason:OK, a
   assert.equal(body.orderbookUsed, true);
   assert.equal(body.orderbookReason, 'OK');
   assert.equal(body.orderbookSource, 'api_orderbook');
+  assert.equal(body.orderbookBridgeReason, 'OK');
+  assert.equal(body.orderbookFallbackReason, null);
   assert.ok(body.reclaim);
   assert.ok(body.absorption);
   assert.equal(body.absorption.orderbookUsed, true);
@@ -82,22 +88,33 @@ test('successful orderbook fetch makes orderbookUsed:true, orderbookReason:OK, a
   assert.equal(fallbackCalled, false);
 });
 
-test('orderbook auth failure still returns endpoint ok:true with orderbookUsed:false when the fallback also fails, falling back to history-only absorption', async () => {
+// A different upstream cannot repair an authorization/origin rejection, so
+// the fallback must not run and the specific, safe auth reason must survive
+// rather than being flattened into a generic unavailable.
+test('an auth/origin bridge failure keeps its specific reason and never attempts the Binance-direct fallback', async () => {
+  let fallbackCalled = false;
   const res = await call('GET', {
     fetchOrderbookSummary: async () => ({ ok: false, reason: 'ORDERBOOK_AUTH_REQUIRED', pair: 'BTCUSDT', market: 'spot' }),
+    fetchBinanceDepthSummary: async () => { fallbackCalled = true; return { ok: true, orderbook: { best_bid: 1, best_ask: 2, imbalance: 0 } }; },
   });
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.ok, true);
   assert.equal(body.orderbookUsed, false);
   assert.equal(body.orderbookReason, 'ORDERBOOK_AUTH_REQUIRED');
+  assert.equal(body.orderbookBridgeReason, 'ORDERBOOK_AUTH_REQUIRED');
+  assert.equal(body.orderbookFallbackReason, null);
   assert.equal(body.orderbookSource, null);
+  assert.equal(fallbackCalled, false, 'an auth failure must never be retried against Binance directly');
   assert.ok(body.reclaim);
   assert.ok(body.absorption);
   assert.equal(body.absorption.orderbookUsed, false);
 });
 
-test('when the edge bridge fails, the Binance-direct fallback is tried with the bridge-sanitized pair/market and used on success', async () => {
+// CASE A — reproduces the production symptom (bridge 502) and asserts the
+// fallback actually rescues it, rather than the endpoint reporting the stale
+// bridge reason with orderbookSource:null.
+test('CASE A: bridge ORDERBOOK_HTTP_502 + fallback success yields orderbookUsed:true, source binance_direct, and no lingering 502 as the final reason', async () => {
   const summary = { best_bid: 200, best_ask: 200.2, spread_bps: 10, imbalance: -0.1, cumulative_bid_qty: 4, cumulative_ask_qty: 5 };
   let fallbackArgs;
   const res = await call('GET', {
@@ -108,26 +125,41 @@ test('when the edge bridge fails, the Binance-direct fallback is tried with the 
   const body = await res.json();
   assert.equal(body.ok, true);
   assert.equal(body.orderbookUsed, true);
-  assert.equal(body.orderbookReason, 'OK');
   assert.equal(body.orderbookSource, 'binance_direct');
+  assert.equal(body.orderbookReason, 'OK');
+  assert.notEqual(body.orderbookReason, 'ORDERBOOK_HTTP_502');
+  // The bridge's own failure is still reported for diagnosis, without
+  // masking the fact that a live book was ultimately obtained.
+  assert.equal(body.orderbookBridgeReason, 'ORDERBOOK_HTTP_502');
+  assert.equal(body.orderbookFallbackReason, 'OK');
   assert.equal(body.absorption.orderbookUsed, true);
   assert.deepEqual({ pair: fallbackArgs.pair, market: fallbackArgs.market }, { pair: 'BTCUSDT', market: 'spot' });
 });
 
-test('when both the edge bridge and the Binance-direct fallback fail, the endpoint still degrades safely with the bridge reason and no source', async () => {
+// CASE B — the exact bug this change fixes: previously the fallback's own
+// failure reason was swallowed, so a dead bridge and a dead bridge PLUS a
+// dead fallback were indistinguishable in production.
+test('CASE B: bridge 502 + fallback failure reports both reasons precisely instead of swallowing the fallback error', async () => {
   const res = await call('GET', {
     fetchOrderbookSummary: async () => ({ ok: false, reason: 'ORDERBOOK_HTTP_502', pair: 'BTCUSDT', market: 'spot' }),
-    fetchBinanceDepthSummary: async () => ({ ok: false, reason: 'ORDERBOOK_BINANCE_HTTP_503' }),
+    fetchBinanceDepthSummary: async () => ({ ok: false, reason: 'ORDERBOOK_BINANCE_HTTP_451' }),
   });
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.ok, true);
   assert.equal(body.orderbookUsed, false);
-  assert.equal(body.orderbookReason, 'ORDERBOOK_HTTP_502');
   assert.equal(body.orderbookSource, null);
+  assert.equal(body.orderbookReason, 'ORDERBOOK_UNAVAILABLE');
+  assert.equal(body.orderbookBridgeReason, 'ORDERBOOK_HTTP_502');
+  assert.equal(body.orderbookFallbackReason, 'ORDERBOOK_BINANCE_HTTP_451');
+  // History-only signals still come back on a 200 — orderbook failure never
+  // fails the endpoint hard.
+  assert.ok(body.reclaim);
+  assert.ok(body.absorption);
+  assert.equal(body.absorption.orderbookUsed, false);
 });
 
-test('a fallback that throws still degrades the endpoint safely instead of crashing', async () => {
+test('CASE B: a fallback that throws is reported as a stable fallback reason, never a raw error message', async () => {
   const res = await call('GET', {
     fetchOrderbookSummary: async () => ({ ok: false, reason: 'ORDERBOOK_FETCH_FAILED', pair: 'BTCUSDT', market: 'spot' }),
     fetchBinanceDepthSummary: async () => { throw new Error('simulated Binance fallback failure'); },
@@ -135,12 +167,33 @@ test('a fallback that throws still degrades the endpoint safely instead of crash
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.orderbookUsed, false);
-  assert.equal(body.orderbookReason, 'ORDERBOOK_FETCH_FAILED');
   assert.equal(body.orderbookSource, null);
+  assert.equal(body.orderbookReason, 'ORDERBOOK_UNAVAILABLE');
+  assert.equal(body.orderbookBridgeReason, 'ORDERBOOK_FETCH_FAILED');
+  assert.equal(body.orderbookFallbackReason, 'ORDERBOOK_BINANCE_FETCH_FAILED');
   assert.equal(JSON.stringify(body).includes('simulated Binance fallback failure'), false);
 });
 
-test('invalid pair returns a stable orderbook reason and never attempts the Binance-direct fallback', async () => {
+test('CASE B: an unloadable fallback module is reported rather than silently ignored', async () => {
+  const res = await call('GET', {
+    fetchOrderbookSummary: async () => ({ ok: false, reason: 'ORDERBOOK_HTTP_502', pair: 'BTCUSDT', market: 'spot' }),
+    // null (not undefined) so the helper's default stub does not apply and
+    // the real module-load path is exercised.
+    fetchBinanceDepthSummary: null,
+    loadBinanceDepthClient: async () => { throw new Error('module load failed'); },
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.orderbookUsed, false);
+  assert.equal(body.orderbookReason, 'ORDERBOOK_UNAVAILABLE');
+  assert.equal(body.orderbookBridgeReason, 'ORDERBOOK_HTTP_502');
+  assert.equal(body.orderbookFallbackReason, 'ORDERBOOK_FALLBACK_CLIENT_UNAVAILABLE');
+  assert.equal(JSON.stringify(body).includes('module load failed'), false);
+});
+
+// CASE C — an unusable pair must never be handed to the fallback, so no
+// Binance URL can be built from unsanitized input.
+test('CASE C: invalid pair keeps its specific reason and never reaches the Binance-direct fallback', async () => {
   let fallbackCalled = false;
   const res = await call('GET', {
     query: 'symbol=btc&pair=not-valid!!',
@@ -152,10 +205,33 @@ test('invalid pair returns a stable orderbook reason and never attempts the Bina
   assert.equal(body.ok, true);
   assert.equal(body.orderbookUsed, false);
   assert.equal(body.orderbookReason, 'INVALID_ORDERBOOK_PAIR');
+  assert.equal(body.orderbookBridgeReason, 'INVALID_ORDERBOOK_PAIR');
+  assert.equal(body.orderbookFallbackReason, null);
   assert.equal(body.orderbookSource, null);
-  // INVALID_ORDERBOOK_PAIR carries no pair/market — the fallback has
-  // nothing sanitized to reuse and must not run.
+  // INVALID_ORDERBOOK_PAIR carries no pair/market, and is additionally on the
+  // no-fallback list — the fallback must not run under any circumstance.
   assert.equal(fallbackCalled, false);
+});
+
+test('orderbook failures are logged with stable codes only — never a token, header, or raw upstream body', async () => {
+  const originalWarn = console.warn;
+  const logged = [];
+  console.warn = (...args) => logged.push(args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '));
+  try {
+    await call('GET', {
+      headers: { authorization: 'Bearer super-secret-admin-token' },
+      fetchOrderbookSummary: async () => ({ ok: false, reason: 'ORDERBOOK_HTTP_502', pair: 'BTCUSDT', market: 'spot' }),
+      fetchBinanceDepthSummary: async () => ({ ok: false, reason: 'ORDERBOOK_BINANCE_HTTP_451' }),
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
+  const all = logged.join(' | ');
+  assert.ok(all.includes('ORDERBOOK_HTTP_502'), 'the bridge failure must be logged');
+  assert.ok(all.includes('ORDERBOOK_BINANCE_HTTP_451'), 'the fallback failure must be logged, not swallowed');
+  for (const forbidden of ['super-secret-admin-token', 'authorization', 'bearer', 'cookie']) {
+    assert.equal(all.toLowerCase().includes(forbidden), false, forbidden);
+  }
 });
 
 test('orderbook client throwing still degrades to a safe history-only response', async () => {

@@ -19,7 +19,14 @@
 //   - Never throws; every path resolves to { ok:true, orderbook, pair,
 //     market, source:'binance_direct' } or { ok:false, reason, pair?,
 //     market? }. Reason codes are stable strings — no raw upstream body or
-//     error message is ever surfaced.
+//     error message is ever surfaced. Each failure mode is distinguishable:
+//       ORDERBOOK_BINANCE_HTTP_<status>   non-2xx (incl. 451/403/418/429 geo
+//                                         or rate blocks from a cloud egress)
+//       ORDERBOOK_BINANCE_TIMEOUT         aborted by the local timeout
+//       ORDERBOOK_BINANCE_FETCH_FAILED    transport/DNS/egress failure
+//       ORDERBOOK_BINANCE_PARSE_FAILED    2xx body was not valid JSON
+//       ORDERBOOK_BINANCE_INVALID_PAYLOAD valid JSON, unusable book shape
+//       INVALID_ORDERBOOK_PAIR            pair rejected before any fetch
 //   - Returns only the summarized fields the reclaim/absorption analysis
 //     (_price-history-signals.mjs parseOrderbook) actually reads — no raw
 //     depth levels, no wall detection — intentionally smaller than the
@@ -92,11 +99,17 @@ export async function fetchBinanceDepthSummary({ pair, market, fetchImpl, timeou
   try {
     res = await doFetch(url, { signal: ctrl.signal, headers: { Accept: 'application/json' } });
   } catch {
-    return { ok: false, reason: 'ORDERBOOK_BINANCE_FETCH_FAILED', pair: normalizedPair, market: normalizedMarket };
+    // A timeout and a transport-level failure are different operational
+    // problems (upstream slow vs. egress blocked/unreachable) — the caller
+    // must be able to tell them apart from the reason code alone.
+    const reason = ctrl.signal.aborted ? 'ORDERBOOK_BINANCE_TIMEOUT' : 'ORDERBOOK_BINANCE_FETCH_FAILED';
+    return { ok: false, reason, pair: normalizedPair, market: normalizedMarket };
   } finally {
     clearTimeout(timer);
   }
 
+  // A geo/IP block from a cloud runtime surfaces here as a plain status
+  // (commonly 451/403/418/429) — the status is reported, the body never is.
   if (!res.ok) {
     return { ok: false, reason: `ORDERBOOK_BINANCE_HTTP_${res.status}`, pair: normalizedPair, market: normalizedMarket };
   }
@@ -105,12 +118,14 @@ export async function fetchBinanceDepthSummary({ pair, market, fetchImpl, timeou
   try {
     depth = await res.json();
   } catch {
-    return { ok: false, reason: 'ORDERBOOK_BINANCE_INVALID_RESPONSE', pair: normalizedPair, market: normalizedMarket };
+    return { ok: false, reason: 'ORDERBOOK_BINANCE_PARSE_FAILED', pair: normalizedPair, market: normalizedMarket };
   }
 
+  // Parsed fine but the book is unusable (missing/empty sides, bad levels) —
+  // distinct from a parse failure so a shape change upstream is diagnosable.
   const orderbook = summarize(depth);
   if (!orderbook) {
-    return { ok: false, reason: 'ORDERBOOK_BINANCE_INVALID_RESPONSE', pair: normalizedPair, market: normalizedMarket };
+    return { ok: false, reason: 'ORDERBOOK_BINANCE_INVALID_PAYLOAD', pair: normalizedPair, market: normalizedMarket };
   }
 
   return { ok: true, orderbook, pair: normalizedPair, market: normalizedMarket, source: 'binance_direct' };

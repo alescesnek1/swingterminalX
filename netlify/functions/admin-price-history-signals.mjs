@@ -3,13 +3,23 @@
 //
 // `/api/orderbook` is an authenticated Deno Edge Function reached here via
 // the same-origin Node bridge in _orderbook-client.mjs. If that bridge
-// fails for any reason other than an invalid pair, a best-effort fallback
+// fails for a NON-auth reason, a best-effort fallback
 // (_binance-orderbook-fallback.mjs) hits Binance's public depth endpoint
-// directly — same upstream, GET-only, no private/order/account calls. The
-// book is best effort either way: total failure still returns a normal 200
-// with orderbookUsed:false and a stable orderbookReason — absorption always
-// falls back to a history-only read. `orderbookSource` in the response
-// tells the caller which path (if either) actually supplied the book.
+// directly — same upstream, GET-only, no private/order/account calls.
+//
+// The book is best effort either way: total failure still returns a normal
+// 200 with orderbookUsed:false — absorption always degrades to a
+// history-only read. Four response fields make the outcome unambiguous,
+// because a swallowed fallback error previously made a dead bridge and a
+// dead fallback look identical in production:
+//   orderbookUsed          — did we get a live book at all
+//   orderbookSource        — 'api_orderbook' | 'binance_direct' | null
+//   orderbookBridgeReason  — the edge bridge's own stable code ('OK' on success)
+//   orderbookFallbackReason— the Binance-direct code, or null if not attempted
+//   orderbookReason        — 'OK', the specific bridge reason when no fallback
+//                            was attempted, else 'ORDERBOOK_UNAVAILABLE'
+// Both failure paths are also console.warn'd with stable codes only — never
+// a raw upstream body, header, or token.
 import {
   analyzeAbsorptionFromPointsAndOrderbook,
   analyzeReclaimFromPoints,
@@ -17,6 +27,15 @@ import {
 
 const DEFAULT_LIMIT = 120;
 const MAX_LIMIT = 200;
+
+// Bridge failures the Binance-direct fallback must NOT retry: a different
+// upstream cannot fix an authorization/origin rejection or an unusable pair,
+// and flattening those into a generic "unavailable" would hide the real,
+// actionable reason from the operator.
+const NO_FALLBACK_BRIDGE_REASONS = new Set([
+  'ORDERBOOK_AUTH_REQUIRED',
+  'INVALID_ORDERBOOK_PAIR',
+]);
 
 async function loadAuth() { return await import('./_auth.mjs'); }
 async function loadPriceHistory() { return await import('./_price-history.mjs'); }
@@ -103,6 +122,8 @@ export async function runAdminPriceHistorySignals(req, deps = {}) {
 
   let orderbookUsed = false;
   let orderbookReason = 'ORDERBOOK_CLIENT_UNAVAILABLE';
+  let orderbookBridgeReason = null;
+  let orderbookFallbackReason = null;
   let orderbookSource = null;
   let orderbook;
   if (fetchOrderbookSummary) {
@@ -125,19 +146,28 @@ export async function runAdminPriceHistorySignals(req, deps = {}) {
     if (obResult && obResult.ok) {
       orderbookUsed = true;
       orderbookReason = 'OK';
+      orderbookBridgeReason = 'OK';
       orderbookSource = 'api_orderbook';
       orderbook = obResult.orderbook;
     } else {
-      orderbookReason = (obResult && obResult.reason) || 'ORDERBOOK_UNAVAILABLE';
+      orderbookBridgeReason = (obResult && obResult.reason) || 'ORDERBOOK_UNAVAILABLE';
+      orderbookReason = orderbookBridgeReason;
+      console.warn('[ADMIN_PRICE_HISTORY_SIGNALS] orderbook_bridge_failed', { reason: orderbookBridgeReason });
 
-      // Best-effort fallback: the same-origin edge bridge failed for a
-      // reason other than an invalid pair — try Binance's PUBLIC depth
-      // endpoint directly (same upstream /api/orderbook already uses) so a
-      // Netlify Node->Edge routing hiccup doesn't silently drop live book
-      // context. Reuses the pair/market the bridge already sanitized.
+      // Best-effort fallback: try Binance's PUBLIC depth endpoint directly
+      // (the same upstream /api/orderbook itself calls) so a Netlify
+      // Node->Edge routing failure doesn't silently drop live book context.
+      // Reuses the pair/market the bridge already sanitized.
+      //
+      // Deliberately NOT retried when the bridge rejected the caller
+      // (auth/origin) or the pair was invalid: a different upstream cannot
+      // repair an authorization problem, and the specific, safe reason must
+      // survive rather than being flattened into a generic unavailable.
       const fallbackPair = obResult && obResult.pair;
       const fallbackMarket = obResult && obResult.market;
-      if (fallbackPair) {
+      const fallbackAllowed = !!fallbackPair && !NO_FALLBACK_BRIDGE_REASONS.has(orderbookBridgeReason);
+
+      if (fallbackAllowed) {
         let fetchBinanceDepthSummary = deps.fetchBinanceDepthSummary;
         if (!fetchBinanceDepthSummary) {
           try {
@@ -147,7 +177,10 @@ export async function runAdminPriceHistorySignals(req, deps = {}) {
             fetchBinanceDepthSummary = null;
           }
         }
-        if (fetchBinanceDepthSummary) {
+
+        if (!fetchBinanceDepthSummary) {
+          orderbookFallbackReason = 'ORDERBOOK_FALLBACK_CLIENT_UNAVAILABLE';
+        } else {
           let fbResult;
           try {
             fbResult = await fetchBinanceDepthSummary({
@@ -161,9 +194,23 @@ export async function runAdminPriceHistorySignals(req, deps = {}) {
           if (fbResult && fbResult.ok) {
             orderbookUsed = true;
             orderbookReason = 'OK';
+            orderbookFallbackReason = 'OK';
             orderbookSource = 'binance_direct';
             orderbook = fbResult.orderbook;
+          } else {
+            orderbookFallbackReason = (fbResult && fbResult.reason) || 'ORDERBOOK_BINANCE_FETCH_FAILED';
           }
+        }
+
+        // Both paths failed. Report a generic top-level reason and keep the
+        // two specific codes side by side, so "bridge broke AND the direct
+        // book also broke" is never mistaken for a single bridge hiccup.
+        if (!orderbookUsed) {
+          orderbookReason = 'ORDERBOOK_UNAVAILABLE';
+          console.warn('[ADMIN_PRICE_HISTORY_SIGNALS] orderbook_fallback_failed', {
+            bridge: orderbookBridgeReason,
+            fallback: orderbookFallbackReason,
+          });
         }
       }
     }
@@ -178,6 +225,8 @@ export async function runAdminPriceHistorySignals(req, deps = {}) {
     points: history.points.length,
     orderbookUsed,
     orderbookReason,
+    orderbookBridgeReason,
+    orderbookFallbackReason,
     orderbookSource,
     reclaim,
     absorption,
