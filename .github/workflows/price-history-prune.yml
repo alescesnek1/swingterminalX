@@ -1,0 +1,77 @@
+name: Price History Prune Scheduler
+
+# External authenticated scheduler for
+# netlify/functions/price-history-prune-scheduled.mjs.
+#
+# Same rationale and secret/header as price-history-collect.yml —
+# price-history-prune-scheduled.mjs requires the
+# x-price-history-scheduler-secret header (same secret as the collector;
+# never personal-alerts.mjs's own scheduler secret) and never trusts
+# `next_run` as authentication.
+#
+# This workflow does NOT enable pruning by itself. PRICE_HISTORY_PRUNE_ENABLED
+# and PRICE_HISTORY_RETENTION_DAYS both stay unset in Netlify env until the
+# owner turns pruning on deliberately (docs/price-history-scheduler.md,
+# rollout step 16 — only after the collector has soaked at 15-minute cadence
+# for at least the intended retention window). While disabled or
+# misconfigured, every invocation below returns a clean JSON response and
+# deletes nothing.
+#
+# If the PRICE_HISTORY_SCHEDULER_SECRET GitHub secret is not configured,
+# this workflow no-ops safely (exits 0 without calling the endpoint).
+#
+# ROLLOUT NOTE: the `schedule:` trigger below starts commented out. The
+# owner uncomments it (daily cadence) only once pruning has been verified
+# once via workflow_dispatch.
+
+on:
+  workflow_dispatch: {}
+  # schedule:
+  #   - cron: "17 3 * * *"   # once daily, off-peak — enable only after a manual verify run
+
+concurrency:
+  group: price-history-prune
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  price-history-prune:
+    name: Invoke price history prune
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Call price-history-prune-scheduled with scheduler secret
+        env:
+          PRICE_HISTORY_SCHEDULER_SECRET: ${{ secrets.PRICE_HISTORY_SCHEDULER_SECRET }}
+          PRICE_HISTORY_PRUNE_URL: https://swingterminalx.netlify.app/api/price-history-prune-scheduled
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${PRICE_HISTORY_SCHEDULER_SECRET:-}" ]; then
+            echo "price-history-prune: scheduler secret not configured; skipping (no-op)."
+            exit 0
+          fi
+
+          tmp="$(mktemp)"
+          status="$(
+            curl -sS -o "$tmp" -w "%{http_code}" \
+              -X POST "$PRICE_HISTORY_PRUNE_URL" \
+              -H "content-type: application/json" \
+              -H "x-price-history-scheduler-secret: ${PRICE_HISTORY_SCHEDULER_SECRET}" \
+              --data '{}'
+          )"
+
+          # Status + response body only. The response body is a safe
+          # aggregate (counts and codes only — see
+          # price-history-prune-scheduled.mjs); the secret itself is never
+          # echoed or printed anywhere in this step.
+          echo "price-history-prune status=${status}"
+          cat "$tmp"
+
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+            echo "price-history-prune: non-2xx response" >&2
+            exit 1
+          fi

@@ -29,6 +29,33 @@ Do not rediscover the whole repo from scratch unless these are clearly stale.
 - **No new external fetch and no new scheduler/cron** without an explicit,
   reviewed reason (see the microstructure "451" story). Production microstructure
   default is `MARKET_DATA_PROVIDER=none`.
+- **Approved exception — scheduled price-history collection
+  (`feat/price-history-scheduler`):** a direct, public, unauthenticated
+  fetch of CoinGecko's `/coins/markets` from
+  `netlify/functions/_coingecko-markets-source.mjs` is approved, reviewed,
+  and implemented — this is the same public upstream `/api/markets` itself
+  calls, GET-only, no key, no auth. It exists because `/api/markets`
+  requires a cryptographically verified Supabase user JWT
+  (`apps/edge/netlify/edge-functions/lib/security.js` `verifyAuth`), which
+  an unattended scheduler can never present without storing a live user
+  credential or a service-role key — both rejected. The two new scheduled
+  functions (`price-history-collect-scheduled.mjs`,
+  `price-history-prune-scheduled.mjs`) follow the same external-scheduler
+  doctrine as `personal-alerts.mjs` below: **own secret, own header**
+  (`PRICE_HISTORY_SCHEDULER_SECRET` / `x-price-history-scheduler-secret`,
+  timing-safe compare) — never `personal-alerts.mjs`'s
+  `PERSONAL_ALERTS_SCHEDULER_SECRET` / `x-terminal-scheduler-secret`, and
+  never Netlify's native `config.schedule` trigger (same reason: it cannot
+  attach an unforgeable header, and a `next_run` body field is never
+  authentication). Every gate flag
+  (`PRICE_HISTORY_SCHEDULE_ENABLED`, `PRICE_HISTORY_COLLECT_ENABLED`,
+  `PRICE_HISTORY_WRITE_ENABLED`, `PRICE_HISTORY_PRUNE_ENABLED`) defaults
+  off, and both GitHub Actions workflows
+  (`.github/workflows/price-history-collect.yml`,
+  `price-history-prune.yml`) ship with their `schedule:` trigger commented
+  out — see `docs/price-history-scheduler.md` for the full rollout order.
+  No RADAR/ENTRY_READY/trading/alert/Telegram/UI behavior is touched by any
+  of this.
 - **Telegram** may only be sent from `netlify/functions/cron-alerts.mjs`
   (global confirmed RADAR `ENTRY_READY`), `morning-briefing.mjs`,
   `netlify/functions/personal-alerts.mjs` (personal confirmed RADAR

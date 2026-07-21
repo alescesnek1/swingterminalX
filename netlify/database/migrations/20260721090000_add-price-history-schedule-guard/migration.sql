@@ -1,0 +1,28 @@
+-- Phase: scheduled price-history collection — duplicate-snapshot guard only.
+-- No new tables, no destructive change to market_price_snapshots /
+-- market_price_points (see 20260720130902_add-market-price-history).
+--
+-- WHY: a spacing-guard SELECT-then-fetch-then-INSERT in application code
+-- (price-history-collect-scheduled.mjs) is NOT atomic — a GitHub Actions
+-- cron re-fire, an overlapping workflow_dispatch, or a retried request could
+-- still race past the SELECT and write two snapshots for the same source
+-- within the same minute. This unique index makes that structurally
+-- impossible at the database level rather than merely unlikely.
+--
+-- date_trunc(text, timestamptz) is STABLE, not IMMUTABLE (its result can
+-- depend on the session TimeZone setting), so it cannot be used directly in
+-- a functional index. Converting through `AT TIME ZONE 'UTC'` first fixes
+-- the zone to a literal constant, producing a plain `timestamp` value whose
+-- truncation no longer depends on any session setting — that composed
+-- expression is IMMUTABLE and is what Postgres requires for an index.
+--
+-- Safe against existing data: this repo currently has exactly two
+-- snapshots, both written by the existing manual admin collector (source
+-- 'admin_price_history_collect'), collected at two clearly distinct times
+-- — neither shares a source with the new scheduled path
+-- ('scheduled_price_history'), and they do not fall in the same UTC minute
+-- as each other. CREATE UNIQUE INDEX IF NOT EXISTS is a no-op if the index
+-- already exists, and only fails at apply time if two existing rows
+-- collide, which is not the case here.
+CREATE UNIQUE INDEX IF NOT EXISTS market_price_snapshots_source_minute_uniq_idx
+  ON market_price_snapshots (source, date_trunc('minute', sampled_at AT TIME ZONE 'UTC'));

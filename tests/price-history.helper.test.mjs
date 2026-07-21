@@ -21,6 +21,8 @@ import {
   writeMarketPriceSnapshot,
   listRecentPricePoints,
   listRecentSnapshots,
+  getLatestSnapshotAt,
+  pruneSnapshotsOlderThan,
   ALLOWED_SNAPSHOT_STATUSES,
 } from '../netlify/functions/_price-history.mjs';
 
@@ -32,6 +34,8 @@ test('module exports the expected functions with no import-time DB query', () =>
   assert.equal(typeof writeMarketPriceSnapshot, 'function');
   assert.equal(typeof listRecentPricePoints, 'function');
   assert.equal(typeof listRecentSnapshots, 'function');
+  assert.equal(typeof getLatestSnapshotAt, 'function');
+  assert.equal(typeof pruneSnapshotsOlderThan, 'function');
   assert.deepEqual([...ALLOWED_SNAPSHOT_STATUSES].sort(), ['failed', 'ok', 'partial']);
 });
 
@@ -300,6 +304,150 @@ test('listRecentSnapshots returns a stable DB_UNAVAILABLE reason when the DB can
   const fakeGetDb = () => { throw new Error('simulated'); };
   const res = await listRecentSnapshots({}, { getDbImpl: fakeGetDb });
   assert.deepEqual(res, { ok: false, reason: 'DB_UNAVAILABLE' });
+});
+
+// ── Group 1b: batch insert + storeRawMeta via a fake pool/client ────────
+// No real DB needed — these exercise writeMarketPriceSnapshot's SQL shape
+// and chunking behavior directly against a fake `db.pool.connect()` client,
+// so they run (and prove the batch-insert regression fix) even when no
+// local dev DB is reachable, unlike the Group 2 tests below.
+
+const POINT_PARAMS_PER_ROW = 13; // snapshot_id..raw_meta — see POINT_INSERT_COLUMNS
+
+function makeFakeClient({ snapshotId = 101 } = {}) {
+  const calls = [];
+  return {
+    calls,
+    query: async (sql, params = []) => {
+      calls.push({ sql, params });
+      if (sql.startsWith('BEGIN') || sql.startsWith('COMMIT') || sql.startsWith('ROLLBACK')) return {};
+      if (sql.includes('INSERT INTO market_price_snapshots')) return { rows: [{ id: snapshotId }] };
+      if (sql.includes('INSERT INTO market_price_points')) {
+        return { rowCount: params.length / POINT_PARAMS_PER_ROW };
+      }
+      return {};
+    },
+    release: () => {},
+  };
+}
+
+function makeFakeDb(client) {
+  return { pool: { connect: async () => client } };
+}
+
+function makeUniqueRows(count) {
+  return Array.from({ length: count }, (_, i) => ({ symbol: `sym${i}`, price: i + 1 }));
+}
+
+test('writeMarketPriceSnapshot batches point inserts (200/chunk) instead of one query per row', async () => {
+  const client = makeFakeClient();
+  const rows = makeUniqueRows(250);
+  const res = await writeMarketPriceSnapshot({ source: 'tests/batch', rows }, { getDbImpl: () => makeFakeDb(client) });
+
+  assert.equal(res.ok, true);
+  assert.equal(res.inserted, 250);
+  assert.equal(res.dropped, 0);
+  assert.equal(res.duplicates, 0);
+
+  const pointInsertCalls = client.calls.filter((c) => c.sql.includes('INSERT INTO market_price_points'));
+  assert.equal(pointInsertCalls.length, 2, 'a 250-row write must batch into 2 queries, never 250 per-row queries');
+  assert.equal(pointInsertCalls[0].params.length / POINT_PARAMS_PER_ROW, 200);
+  assert.equal(pointInsertCalls[1].params.length / POINT_PARAMS_PER_ROW, 50);
+  for (const call of pointInsertCalls) {
+    assert.match(call.sql, /ON CONFLICT \(snapshot_id, symbol\) DO NOTHING/);
+  }
+});
+
+test('writeMarketPriceSnapshot issues exactly one point-insert query when rows fit in a single chunk', async () => {
+  const client = makeFakeClient();
+  const rows = makeUniqueRows(5);
+  const res = await writeMarketPriceSnapshot({ source: 'tests/batch', rows }, { getDbImpl: () => makeFakeDb(client) });
+  assert.equal(res.ok, true);
+  assert.equal(res.inserted, 5);
+  const pointInsertCalls = client.calls.filter((c) => c.sql.includes('INSERT INTO market_price_points'));
+  assert.equal(pointInsertCalls.length, 1);
+});
+
+test('writeMarketPriceSnapshot chunks an exact multiple of the batch size into separate full-size queries', async () => {
+  const client = makeFakeClient();
+  const rows = makeUniqueRows(400);
+  const res = await writeMarketPriceSnapshot({ source: 'tests/batch', rows }, { getDbImpl: () => makeFakeDb(client) });
+  assert.equal(res.ok, true);
+  assert.equal(res.inserted, 400);
+  const pointInsertCalls = client.calls.filter((c) => c.sql.includes('INSERT INTO market_price_points'));
+  assert.equal(pointInsertCalls.length, 2);
+  assert.equal(pointInsertCalls[0].params.length / POINT_PARAMS_PER_ROW, 200);
+  assert.equal(pointInsertCalls[1].params.length / POINT_PARAMS_PER_ROW, 200);
+});
+
+test('writeMarketPriceSnapshot issues no point-insert query at all when every row is deduped/invalid', async () => {
+  const client = makeFakeClient();
+  const res = await writeMarketPriceSnapshot({ source: 'tests/batch', rows: [] }, { getDbImpl: () => makeFakeDb(client) });
+  assert.equal(res.ok, true);
+  assert.equal(res.inserted, 0);
+  const pointInsertCalls = client.calls.filter((c) => c.sql.includes('INSERT INTO market_price_points'));
+  assert.equal(pointInsertCalls.length, 0);
+});
+
+test('storeRawMeta omitted (default) keeps the existing sanitized raw_meta behavior', async () => {
+  const client = makeFakeClient();
+  const rows = [{ symbol: 'btc', price: 1, extra: 'some-detail' }];
+  await writeMarketPriceSnapshot({ source: 'tests/batch', rows }, { getDbImpl: () => makeFakeDb(client) });
+  const pointInsertCall = client.calls.find((c) => c.sql.includes('INSERT INTO market_price_points'));
+  const rawMetaParam = pointInsertCall.params[12];
+  const parsed = JSON.parse(rawMetaParam);
+  assert.equal(parsed.extra, 'some-detail');
+});
+
+test('storeRawMeta:true explicitly keeps the same sanitized raw_meta behavior as the default', async () => {
+  const client = makeFakeClient();
+  const rows = [{ symbol: 'btc', price: 1, extra: 'some-detail' }];
+  await writeMarketPriceSnapshot({ source: 'tests/batch', rows, storeRawMeta: true }, { getDbImpl: () => makeFakeDb(client) });
+  const pointInsertCall = client.calls.find((c) => c.sql.includes('INSERT INTO market_price_points'));
+  const parsed = JSON.parse(pointInsertCall.params[12]);
+  assert.equal(parsed.extra, 'some-detail');
+});
+
+test('storeRawMeta:false stores {} for every row instead of the sanitized row, regardless of row content', async () => {
+  const client = makeFakeClient();
+  const rows = [
+    { symbol: 'btc', price: 1, extra: 'some-detail' },
+    { symbol: 'eth', price: 2, token: 'should-be-stripped-anyway-but-must-not-even-be-attempted' },
+  ];
+  await writeMarketPriceSnapshot({ source: 'tests/batch', rows, storeRawMeta: false }, { getDbImpl: () => makeFakeDb(client) });
+  const pointInsertCall = client.calls.find((c) => c.sql.includes('INSERT INTO market_price_points'));
+  const rawMetaParams = [
+    pointInsertCall.params[12],
+    pointInsertCall.params[12 + POINT_PARAMS_PER_ROW],
+  ];
+  for (const p of rawMetaParams) assert.equal(p, '{}');
+});
+
+test('batch insert never throws when the DB connection breaks mid-transaction and rolls back', async () => {
+  const client = {
+    calls: [],
+    query: async (sql) => {
+      client.calls.push(sql);
+      if (sql.startsWith('BEGIN')) return {};
+      if (sql.includes('INSERT INTO market_price_snapshots')) return { rows: [{ id: 1 }] };
+      if (sql.includes('INSERT INTO market_price_points')) throw new Error('simulated: postgres://user:pw@host/db');
+      if (sql.startsWith('ROLLBACK')) return {};
+      return {};
+    },
+    release: () => {},
+  };
+  const originalWarn = console.warn;
+  const warnCalls = [];
+  console.warn = (...args) => { warnCalls.push(args); };
+  let res;
+  try {
+    res = await writeMarketPriceSnapshot({ source: 'tests/batch', rows: makeUniqueRows(5) }, { getDbImpl: () => makeFakeDb(client) });
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.deepEqual(res, { ok: false, reason: 'DB_UNAVAILABLE' });
+  assert.ok(client.calls.some((c) => c.startsWith('ROLLBACK')));
+  assert.equal(JSON.stringify(warnCalls).includes('postgres://'), false);
 });
 
 // ── Group 2: DB-backed — skip gracefully without a local dev DB ─────────

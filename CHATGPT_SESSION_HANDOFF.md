@@ -496,11 +496,79 @@ email allowlist (§9), not a billing tier.
       returns 200 with `orderbookUsed:false` and a stable reason, falling
       back to a history-only read.
     - No trading, RADAR, alert, Telegram, or Supabase-auth behavior changed.
+  - **Scheduled price-history collection (LOCAL, UNPUSHED, branch
+    `feat/price-history-scheduler`) — production-risk-reviewed, not yet
+    enabled:**
+    - **Why a second collector:** `admin-price-history-collect.mjs` forwards
+      the caller's Supabase JWT to `/api/markets`, which requires a
+      cryptographically verified user session
+      (`apps/edge/netlify/edge-functions/lib/security.js` `verifyAuth`) — an
+      unattended scheduler can never present one without storing a live user
+      credential or a service-role key, both rejected as unacceptable. The
+      scheduled path instead fetches CoinGecko's public `/coins/markets`
+      pages directly (`netlify/functions/_coingecko-markets-source.mjs`,
+      approved for this implementation) — no auth, no key, same public
+      upstream `/api/markets` itself calls.
+    - `netlify/functions/price-history-collect-scheduled.mjs`
+      (`/api/price-history-collect-scheduled`, POST-only) — own scheduler
+      secret/header (`x-price-history-scheduler-secret` /
+      `PRICE_HISTORY_SCHEDULER_SECRET`, timing-safe compare, never
+      personal-alerts' secret, never `next_run`-as-auth). Gates in order:
+      auth → `PRICE_HISTORY_SCHEDULE_ENABLED` → `PRICE_HISTORY_COLLECT_ENABLED`
+      → a DB-backed min-spacing guard (`getLatestSnapshotAt`, default 540s,
+      never 0) → the CoinGecko fetch → `PRICE_HISTORY_WRITE_ENABLED`. All
+      flags are unset in this phase, so nothing fetches or writes. Unlike the
+      admin collector, a write that is attempted and fails returns a
+      **non-2xx** status (503 DB_UNAVAILABLE / 502 otherwise) so an
+      unattended GitHub Actions job goes red instead of staying green on a
+      dead DB.
+    - `netlify/functions/price-history-prune-scheduled.mjs`
+      (`/api/price-history-prune-scheduled`, POST-only) — same scheduler
+      secret; gated by `PRICE_HISTORY_PRUNE_ENABLED` +
+      `PRICE_HISTORY_RETENTION_DAYS` (missing/invalid/≤0 deletes nothing).
+      Deletes only from `market_price_snapshots` in bounded batches (points
+      cascade via the existing FK) — never an unbounded DELETE.
+    - `netlify/functions/_price-history.mjs` changed additively: point
+      inserts now batch into ~200-row multi-row `VALUES` statements instead
+      of one query per row (a 975-coin write was ~975 sequential
+      round-trips, close to certain to exceed Netlify's function timeout —
+      this was the blocking finding of the risk review); new optional
+      `storeRawMeta:false` (scheduled path's default) stores `{}` instead of
+      each row's sanitized `raw_meta`, since nothing downstream reads it; new
+      `getLatestSnapshotAt` / `pruneSnapshotsOlderThan` exports. Behavior for
+      every existing caller is unchanged.
+    - New migration `20260721090000_add-price-history-schedule-guard` adds a
+      `UNIQUE` index on `(source, date_trunc('minute', sampled_at AT TIME
+      ZONE 'UTC'))` on `market_price_snapshots` — makes a double-fire
+      duplicate snapshot structurally impossible at the DB level, on top of
+      the application-level spacing guard. Additive only; will auto-apply on
+      the next push to `main` alongside the still-pending
+      `20260720130902_add-market-price-history` migration.
+    - Two new external-scheduler GitHub Actions workflows
+      (`.github/workflows/price-history-collect.yml`,
+      `price-history-prune.yml`) — `workflow_dispatch`-only for now; their
+      `schedule:` triggers are present but **commented out** (rollout
+      requires the owner to uncomment them deliberately after the flag-by-flag
+      enablement sequence in `docs/price-history-scheduler.md`).
+    - No RADAR/ENTRY_READY/trading/alert/Telegram/UI behavior changed. See
+      `docs/price-history-scheduler.md` for the full rollout/rollback plan
+      and env-flag reference.
 
 ## 11. Known completed work / recent milestones
 
 From current git history (most recent first, condensed — see `git log` for full):
 
+- **Scheduled price-history collection (LOCAL, UNPUSHED, branch
+  `feat/price-history-scheduler`)** — production-risk review completed
+  (GO), then implemented: two new POST-only, own-scheduler-secret Node
+  functions (`price-history-collect-scheduled.mjs`,
+  `price-history-prune-scheduled.mjs`), a batched-insert + `storeRawMeta`/
+  `getLatestSnapshotAt`/`pruneSnapshotsOlderThan` update to
+  `_price-history.mjs`, a new duplicate-snapshot DB guard migration, and
+  two GitHub Actions workflows with their `schedule:` triggers commented
+  out. Every new flag defaults off; nothing fetches CoinGecko or writes to
+  the DB until the owner enables each flag in the documented order. See §10
+  and `docs/price-history-scheduler.md`.
 - **Market price-history collector + orderbook context wired (LOCAL,
   UNPUSHED)** — admin-only, POST-only `/api/admin-price-history-collect`
   fetches same-origin `/api/markets` and forwards rows to the existing
@@ -563,10 +631,13 @@ _(Grounded in git + docs; do not over-invent.)_
   market-maps polish + price-history DB foundation, §10/§11). First decision
   is the owner's push approval — that push auto-applies the price-history
   migration to production.
-- **Next DB phase:** safe collector design/implementation - a dedicated Node
-  collector should feed `writeMarketSnapshotIfEnabled` only after review. The
-  analytics layer remains admin-debug/context-only and the writer stays
-  disabled until separate collector approval.
+- **Next DB phase:** the scheduled collector/pruner (branch
+  `feat/price-history-scheduler`) is implemented and tested but **not
+  enabled** — follow `docs/price-history-scheduler.md`'s flag-by-flag
+  rollout (secret → `workflow_dispatch` disabled-checks → `SCHEDULE` →
+  `COLLECT` → `WRITE` → cron at 30min soak → 15min → prune) before any
+  `schedule:` cron is uncommented. The analytics layer remains
+  admin-debug/context-only throughout.
 - Continue RADAR **positioning / pressure-zone / trade-readiness** context work
   (the active line of commits) — additive, context-only, fail-closed.
 - Security-review Personal Watch Phase 4 before any push/deploy, and keep

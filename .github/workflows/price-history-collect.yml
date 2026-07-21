@@ -1,0 +1,80 @@
+name: Price History Collect Scheduler
+
+# External authenticated scheduler for
+# netlify/functions/price-history-collect-scheduled.mjs.
+#
+# WHY THIS EXISTS: the same reasoning as personal-alerts.yml — Netlify's
+# native scheduled-function trigger cannot attach a custom request header,
+# and price-history-collect-scheduled.mjs requires the
+# x-price-history-scheduler-secret header before it will do anything (fetch
+# CoinGecko or touch the DB). It deliberately never trusts the `next_run`
+# body field Netlify's native scheduler sends instead. See
+# docs/price-history-scheduler.md.
+#
+# This workflow does NOT enable collection by itself. Every flag
+# (PRICE_HISTORY_SCHEDULE_ENABLED, PRICE_HISTORY_COLLECT_ENABLED,
+# PRICE_HISTORY_WRITE_ENABLED) stays off in Netlify env until the owner
+# turns each on separately, per the rollout plan in
+# docs/price-history-scheduler.md. While any of those flags are off, every
+# invocation below returns a clean 200 disabled/skipped JSON response and
+# never fetches CoinGecko or writes to the DB.
+#
+# If the PRICE_HISTORY_SCHEDULER_SECRET GitHub secret is not configured,
+# this workflow no-ops safely (exits 0 without calling the endpoint).
+#
+# ROLLOUT NOTE (docs/price-history-scheduler.md step 13): the `schedule:`
+# trigger below starts commented out. The owner uncomments it at
+# "*/30 * * * *" for a 24h soak, then tightens to "*/15 * * * *" only after
+# that soak confirms healthy, evenly-spaced, duplicate-free snapshots.
+
+on:
+  workflow_dispatch: {}
+  # schedule:
+  #   - cron: "*/30 * * * *"   # initial soak cadence — tighten to */15 after 24h healthy
+
+concurrency:
+  group: price-history-collect
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  price-history-collect:
+    name: Invoke price history collect
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Call price-history-collect-scheduled with scheduler secret
+        env:
+          PRICE_HISTORY_SCHEDULER_SECRET: ${{ secrets.PRICE_HISTORY_SCHEDULER_SECRET }}
+          PRICE_HISTORY_COLLECT_URL: https://swingterminalx.netlify.app/api/price-history-collect-scheduled
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${PRICE_HISTORY_SCHEDULER_SECRET:-}" ]; then
+            echo "price-history-collect: scheduler secret not configured; skipping (no-op)."
+            exit 0
+          fi
+
+          tmp="$(mktemp)"
+          status="$(
+            curl -sS -o "$tmp" -w "%{http_code}" \
+              -X POST "$PRICE_HISTORY_COLLECT_URL" \
+              -H "content-type: application/json" \
+              -H "x-price-history-scheduler-secret: ${PRICE_HISTORY_SCHEDULER_SECRET}" \
+              --data '{}'
+          )"
+
+          # Status + response body only. The response body is a safe
+          # aggregate (counts and codes only — see
+          # price-history-collect-scheduled.mjs); the secret itself is
+          # never echoed or printed anywhere in this step.
+          echo "price-history-collect status=${status}"
+          cat "$tmp"
+
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+            echo "price-history-collect: non-2xx response" >&2
+            exit 1
+          fi
