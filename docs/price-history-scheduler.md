@@ -25,9 +25,27 @@ itself calls, no auth, no key, no cookies.
 | `netlify/functions/price-history-collect-scheduled.mjs` | `/api/price-history-collect-scheduled`, POST-only. Scheduler-secret gated; fetches + writes a snapshot. |
 | `netlify/functions/price-history-prune-scheduled.mjs` | `/api/price-history-prune-scheduled`, POST-only. Same scheduler secret; deletes snapshots older than `PRICE_HISTORY_RETENTION_DAYS`. |
 | `netlify/functions/_price-history.mjs` (modified, additive) | Batched multi-row INSERT (was one query per row — see below); new `storeRawMeta`, `getLatestSnapshotAt`, `pruneSnapshotsOlderThan`. |
-| `netlify/database/migrations/20260721090000_add-price-history-schedule-guard/` | `UNIQUE` index on `(source, minute)` — makes a duplicate snapshot impossible at the DB level. |
+| `netlify/database/migrations/20260721090000_add-price-history-schedule-guard/` | **Partial** `UNIQUE` index on `(source, minute)`, `WHERE source = 'scheduled_price_history'` — makes a duplicate *scheduled* snapshot impossible at the DB level. |
 | `.github/workflows/price-history-collect.yml` | External authenticated scheduler (cron commented out). |
 | `.github/workflows/price-history-prune.yml` | Same, for the pruner (cron commented out). |
+
+### Why the duplicate-snapshot guard is scoped, not global
+
+The migration's unique index carries `WHERE source = 'scheduled_price_history'`
+rather than applying to every source. Two consequences of that scoping:
+
+- **The manual admin collector remains completely unconstrained.** Nothing in
+  `admin-price-history-collect.mjs` (source `admin_price_history_collect`)
+  changes — an operator can still trigger it twice within the same minute
+  exactly as before this migration existed.
+- **No production collision pre-check is required before this deploys.**
+  `'scheduled_price_history'` is a source value no existing row uses, so the
+  partial index matches zero current rows by construction — it cannot
+  collide with anything already in `market_price_snapshots` regardless of
+  that data's shape. An earlier draft of this migration used an unscoped
+  `(source, minute)` index, which would have required verifying no existing
+  snapshot pair collided before every deploy; that requirement is gone with
+  the scoped version.
 
 ### Why the insert had to be batched
 

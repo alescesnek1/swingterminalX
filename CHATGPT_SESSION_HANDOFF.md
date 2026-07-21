@@ -538,12 +538,17 @@ email allowlist (§9), not a billing tier.
       `getLatestSnapshotAt` / `pruneSnapshotsOlderThan` exports. Behavior for
       every existing caller is unchanged.
     - New migration `20260721090000_add-price-history-schedule-guard` adds a
-      `UNIQUE` index on `(source, date_trunc('minute', sampled_at AT TIME
-      ZONE 'UTC'))` on `market_price_snapshots` — makes a double-fire
-      duplicate snapshot structurally impossible at the DB level, on top of
-      the application-level spacing guard. Additive only; will auto-apply on
-      the next push to `main` alongside the still-pending
-      `20260720130902_add-market-price-history` migration.
+      **partial** `UNIQUE` index on `(source, date_trunc('minute', sampled_at
+      AT TIME ZONE 'UTC'))`, scoped `WHERE source = 'scheduled_price_history'`
+      — makes a double-fire duplicate *scheduled* snapshot structurally
+      impossible at the DB level, on top of the application-level spacing
+      guard. Scoped deliberately, not global: the manual admin collector
+      (source `admin_price_history_collect`) stays completely unconstrained,
+      and because `'scheduled_price_history'` is a source value no existing
+      row uses, the index matches zero current rows by construction — no
+      production collision pre-check is needed before this deploys. Additive
+      only; will auto-apply on the next push to `main` alongside the still-
+      pending `20260720130902_add-market-price-history` migration.
     - Two new external-scheduler GitHub Actions workflows
       (`.github/workflows/price-history-collect.yml`,
       `price-history-prune.yml`) — `workflow_dispatch`-only for now; their
