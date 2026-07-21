@@ -55,7 +55,7 @@ test('success without orderbook still works, bounds input, and reports a stable 
   assert.ok(body.reclaim); assert.ok(body.absorption);
 });
 
-test('successful orderbook fetch makes orderbookUsed:true and orderbookReason:OK', async () => {
+test('successful orderbook fetch makes orderbookUsed:true and orderbookReason:OK, alongside reclaim/absorption', async () => {
   const summary = { best_bid: 100, best_ask: 100.1, spread_bps: 10, imbalance: 0.35, cumulative_bid_qty: 5, cumulative_ask_qty: 3 };
   let captured;
   const res = await call('GET', {
@@ -63,18 +63,25 @@ test('successful orderbook fetch makes orderbookUsed:true and orderbookReason:OK
   });
   assert.equal(res.status, 200);
   const body = await res.json();
+  assert.equal(body.ok, true);
   assert.equal(body.orderbookUsed, true);
   assert.equal(body.orderbookReason, 'OK');
+  assert.ok(body.reclaim);
+  assert.ok(body.absorption);
+  assert.equal(body.absorption.orderbookUsed, true);
   assert.equal(captured.symbol, 'BTC');
 });
 
-test('orderbook auth failure still returns endpoint ok:true with orderbookUsed:false', async () => {
+test('orderbook auth failure still returns endpoint ok:true with orderbookUsed:false, falling back to history-only absorption', async () => {
   const res = await call('GET', { fetchOrderbookSummary: async () => ({ ok: false, reason: 'ORDERBOOK_AUTH_REQUIRED', pair: 'BTCUSDT', market: 'spot' }) });
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.ok, true);
   assert.equal(body.orderbookUsed, false);
   assert.equal(body.orderbookReason, 'ORDERBOOK_AUTH_REQUIRED');
+  assert.ok(body.reclaim);
+  assert.ok(body.absorption);
+  assert.equal(body.absorption.orderbookUsed, false);
 });
 
 test('invalid pair returns a stable orderbook reason but does not crash the endpoint', async () => {
