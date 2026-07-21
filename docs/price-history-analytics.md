@@ -4,8 +4,32 @@
 `market_price_points`. It calls pure reclaim and absorption helpers; it does
 not write data, score RADAR, change `ENTRY_READY`, trade, or alert.
 
+## Collector: `/api/admin-price-history-collect`
+
+Admin-only, POST-only. Disabled by default behind
+`PRICE_HISTORY_COLLECT_ENABLED=true`:
+
+- Flag absent/false: no fetch, no DB — returns
+  `{ ok:true, collected:false, skipped:true, reason:'COLLECT_DISABLED' }`.
+- Flag enabled: fetches same-origin `/api/markets` (static path only, no
+  forwarded query string or auth header) and passes the rows to
+  `writeMarketSnapshotIfEnabled` (`_price-history-writer.mjs`), which still
+  requires `PRICE_HISTORY_WRITE_ENABLED=true` to actually persist.
+
+So collect-enabled + write-disabled fetches rows but never writes; both
+flags must be `true` for a DB write to happen.
+
+## Orderbook bridge: `_orderbook-client.mjs`
+
 The existing authenticated `/api/orderbook` route is a Deno Edge Function.
-This Node diagnostic does not import it or make a second upstream request, so
-normal responses honestly report `orderbookUsed:false` and
-`orderbookReason:"NOT_WIRED_THIS_PHASE"`. Wiring a safe shared reader is a
-later reviewed phase; orderbook values do not affect RADAR gates or alerts.
+`_orderbook-client.mjs` is a pure Node wrapper that calls it same-origin with
+a sanitized `pair`/`market` only (no forwarded query string), forwarding the
+caller's `Authorization` header only (never cookies or other headers, never
+logged).
+
+`admin-price-history-signals` now uses this bridge as best-effort context:
+on success `orderbookUsed:true` / `orderbookReason:'OK'` and the summarized
+book feeds `analyzeAbsorptionFromPointsAndOrderbook`; on any failure
+(unauthenticated, upstream down, invalid pair) the endpoint still returns
+200 with `orderbookUsed:false` and a stable reason, falling back to a
+history-only read. Orderbook values never affect RADAR gates or alerts.

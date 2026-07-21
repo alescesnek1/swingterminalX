@@ -14,10 +14,12 @@
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
 > _Last synced to repo state: local `main`, **ahead of pushed `origin/main`
-> (`28515fd`) by 5 unpushed local commits**. The latest is local-only
-> price-history analytics (`651c5c9`): pure reclaim/absorption diagnostics and
-> a read-only admin route; the collector remains deferred. Nothing after
-> `28515fd` is deployed. See sec. 10 and sec. 11._
+> (`28515fd`) by 6 unpushed local commits**. The latest is local-only
+> price-history collector + orderbook context wiring: an admin-only, POST-only
+> collector (`PRICE_HISTORY_COLLECT_ENABLED`, default off) and a Node bridge
+> to the existing authenticated `/api/orderbook` route used as best-effort
+> context by the read-only admin signals route. Nothing after `28515fd` is
+> deployed. See sec. 10 and sec. 11._
 
 ---
 
@@ -465,35 +467,50 @@ email allowlist (§9), not a billing tier.
       `/api/admin-observability`), read-only; bounded `limit` (max 200),
       optional `symbol` filter; no `raw_meta` in responses; 401/403/405/503
       error boundaries mirror admin-observability.
-    - **No live market write wiring exists.** Architectural decision:
-      `/api/markets` is a **Deno Edge** function while the Postgres helpers
-      are **Node** Netlify Functions — a direct DB write from `/api/markets`
-      was intentionally NOT added. The future safe collector should be a
-      dedicated Node collector / admin-triggered or scheduled job, designed
-      and reviewed separately. `bot.mjs` is also off-limits as a wiring
-      point (upstream of trading/RADAR execution).
+    - **Admin-triggered collector wired (LOCAL, UNPUSHED):**
+      `/api/admin-price-history-collect` (`admin-price-history-collect.mjs`)
+      is the dedicated Node collector — POST-only, verified-admin-only,
+      **disabled by default** behind `PRICE_HISTORY_COLLECT_ENABLED === 'true'`
+      (exact string; flag is NOT set anywhere). Disabled → no fetch, no DB,
+      `{ ok:true, collected:false, skipped:true, reason:'COLLECT_DISABLED' }`.
+      Enabled → fetches same-origin `/api/markets` (static path, no forwarded
+      query string or auth header) and hands the rows to
+      `writeMarketSnapshotIfEnabled`, which still needs
+      `PRICE_HISTORY_WRITE_ENABLED === 'true'` to persist — so both flags
+      must be on for a real write. `/api/markets` stays Deno Edge and
+      untouched; `bot.mjs` remains off-limits as a wiring point.
     - `netlify/functions/_price-history-signals.mjs` now provides pure,
       context-only reclaim and absorption classification over stored points.
       It is not imported by trading, RADAR, `ENTRY_READY`, alerts, or Telegram.
+    - **Orderbook bridge wired (LOCAL, UNPUSHED):**
+      `netlify/functions/_orderbook-client.mjs` is a pure Node wrapper that
+      calls the existing authenticated `/api/orderbook` Deno Edge route
+      same-origin with a sanitized `pair`/`market` only — no forwarded query
+      string, and only the caller's `Authorization` header is forwarded
+      (never cookies/other headers, never logged).
     - `/api/admin-price-history-signals` is GET-only, verified-admin-only, and
       read-only. It returns derived summaries only; it never returns `raw_meta`
-      or an orderbook dump. Its Node runtime does not reuse the authenticated
-      Deno orderbook route, so it honestly reports `NOT_WIRED_THIS_PHASE`.
-    - Collector/write wiring remains deferred. No trading, RADAR, alert,
-      Telegram, or Supabase-auth behavior changed.
+      or an orderbook dump. It now calls the orderbook bridge as best-effort
+      context: success → `orderbookUsed:true`, `orderbookReason:'OK'`; any
+      failure (unauth, upstream down, invalid pair) → the endpoint still
+      returns 200 with `orderbookUsed:false` and a stable reason, falling
+      back to a history-only read.
+    - No trading, RADAR, alert, Telegram, or Supabase-auth behavior changed.
 
 ## 11. Known completed work / recent milestones
 
 From current git history (most recent first, condensed — see `git log` for full):
 
-- **Market price-history foundation + local analytics (LOCAL, UNPUSHED)** - the
-  price-history migration/read-write foundation remains disabled for writes.
-  Pure reclaim/absorption helpers and the read-only verified-admin route
-  `/api/admin-price-history-signals` add context-only diagnostics. Normal
-  responses use `NOT_WIRED_THIS_PHASE` for orderbook because the authenticated
-  Deno Edge route is not safely reusable from Node. No trading, RADAR gates,
-  ENTRY_READY, alerts, Telegram, or Supabase auth behavior changed. Collector
-  wiring remains deferred; a push still auto-applies the pending migration.
+- **Market price-history collector + orderbook context wired (LOCAL,
+  UNPUSHED)** — admin-only, POST-only `/api/admin-price-history-collect`
+  fetches same-origin `/api/markets` and forwards rows to the existing
+  writer; both `PRICE_HISTORY_COLLECT_ENABLED` and `PRICE_HISTORY_WRITE_ENABLED`
+  default off, so nothing fetches or persists without both flags set. A new
+  `_orderbook-client.mjs` Node bridge lets `/api/admin-price-history-signals`
+  use the authenticated `/api/orderbook` Deno route as best-effort context
+  (`orderbookUsed`/`orderbookReason` degrade safely on any failure). No
+  trading, RADAR gates, ENTRY_READY, alerts, Telegram, or Supabase auth
+  behavior changed. A push still auto-applies the pending migration.
 - **Cockpit market maps overhaul/polish (LOCAL, UNPUSHED — `…bd0306f`)** —
   interactive market panels/maps UI work; bubbles-overlap + heatmap design
   polish intentionally deferred.

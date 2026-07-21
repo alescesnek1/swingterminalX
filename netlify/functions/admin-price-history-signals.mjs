@@ -1,9 +1,11 @@
 // Admin-only, read-only debug endpoint for price-history analytics. The pure
 // helpers never write, alert, score decision gates, or affect trading/ENTRY_READY.
 //
-// `/api/orderbook` is an authenticated Deno Edge Function. There is no safe
-// Node reuse in this phase, so normal calls report NOT_WIRED_THIS_PHASE rather
-// than making a duplicate upstream request. `deps.orderbook` is test-only.
+// `/api/orderbook` is an authenticated Deno Edge Function reached here via
+// the same-origin Node bridge in _orderbook-client.mjs. The book is best
+// effort: any failure (unauthenticated, upstream down, invalid pair) still
+// returns a normal 200 with orderbookUsed:false and a stable
+// orderbookReason — absorption always falls back to a history-only read.
 import {
   analyzeAbsorptionFromPointsAndOrderbook,
   analyzeReclaimFromPoints,
@@ -14,6 +16,7 @@ const MAX_LIMIT = 200;
 
 async function loadAuth() { return await import('./_auth.mjs'); }
 async function loadPriceHistory() { return await import('./_price-history.mjs'); }
+async function loadOrderbookClient() { return await import('./_orderbook-client.mjs'); }
 
 function headers(req) {
   const origin = req.headers.get('origin') || '*';
@@ -70,6 +73,8 @@ export async function runAdminPriceHistorySignals(req, deps = {}) {
   const limit = boundedInt(url.searchParams.get('limit'), DEFAULT_LIMIT, 8, MAX_LIMIT);
   const lookback = boundedInt(url.searchParams.get('lookback'), 20, 5, 200);
   const confirmations = boundedInt(url.searchParams.get('confirmations'), 2, 1, 10);
+  const pairParam = url.searchParams.get('pair');
+  const marketParam = url.searchParams.get('market');
 
   let reads = deps.reads;
   if (!reads) {
@@ -79,15 +84,56 @@ export async function runAdminPriceHistorySignals(req, deps = {}) {
   try { history = await reads.listRecentPricePoints({ symbol, limit }); } catch { return json(req, { ok: false, reason: 'DB_UNAVAILABLE' }, 503); }
   if (!history?.ok || !Array.isArray(history.points)) return json(req, { ok: false, reason: 'DB_UNAVAILABLE' }, 503);
 
+  // Orderbook is best-effort context only — any failure here still lets the
+  // endpoint succeed with a history-only read (see module header).
+  let fetchOrderbookSummary = deps.fetchOrderbookSummary;
+  if (!fetchOrderbookSummary) {
+    try {
+      const mod = await (deps.loadOrderbookClient || loadOrderbookClient)();
+      fetchOrderbookSummary = mod.fetchOrderbookSummary;
+    } catch {
+      fetchOrderbookSummary = null;
+    }
+  }
+
+  let orderbookUsed = false;
+  let orderbookReason = 'ORDERBOOK_CLIENT_UNAVAILABLE';
+  let orderbook;
+  if (fetchOrderbookSummary) {
+    let origin = null;
+    try { origin = new URL(req.url).origin; } catch { origin = null; }
+    const authorization = req.headers.get('authorization') || null;
+    let obResult;
+    try {
+      obResult = await fetchOrderbookSummary({
+        origin,
+        pair: pairParam,
+        symbol,
+        market: marketParam,
+        fetchImpl: deps.orderbookFetchImpl,
+        headers: authorization ? { authorization } : undefined,
+      });
+    } catch {
+      obResult = { ok: false, reason: 'ORDERBOOK_UNAVAILABLE' };
+    }
+    if (obResult && obResult.ok) {
+      orderbookUsed = true;
+      orderbookReason = 'OK';
+      orderbook = obResult.orderbook;
+    } else {
+      orderbookReason = (obResult && obResult.reason) || 'ORDERBOOK_UNAVAILABLE';
+    }
+  }
+
   const options = { lookback, confirmations };
   const reclaim = analyzeReclaimFromPoints({ symbol, points: history.points, options });
-  const absorption = analyzeAbsorptionFromPointsAndOrderbook({ symbol, points: history.points, orderbook: deps.orderbook, options });
+  const absorption = analyzeAbsorptionFromPointsAndOrderbook({ symbol, points: history.points, orderbook, options });
   return json(req, {
     ok: true,
     symbol,
     points: history.points.length,
-    orderbookUsed: absorption.orderbookUsed,
-    orderbookReason: absorption.orderbookUsed && deps.orderbook !== undefined ? 'INJECTED_TEST_ORDERBOOK' : 'NOT_WIRED_THIS_PHASE',
+    orderbookUsed,
+    orderbookReason,
     reclaim,
     absorption,
   });
