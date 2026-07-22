@@ -3683,7 +3683,7 @@ function sv(v, el) {
     try { refreshFleet(); _startFleetPoll(); renderTradingRadarPanel(); window.__lastRadarContextPush = null; pushScannerContextToRadar(); } catch (e) { console.warn('[Trading RADAR] init failed:', e && e.message); }
   });
   if (activeViewName === 'cockpit') requestAnimationFrame(() => {
-    try { renderCockpit(); refreshPersonalWatchSettings(); refreshPersonalWatchList(); } catch (e) { console.warn('[Cockpit] render failed:', e && e.message); }
+    try { renderCockpit(); refreshPersonalWatchSettings(); refreshPersonalWatchList(); refreshAdminPriceHistorySignals(); } catch (e) { console.warn('[Cockpit] render failed:', e && e.message); }
   });
   if (activeViewName === 'gecko') requestAnimationFrame(() => {
     try {
@@ -5353,6 +5353,12 @@ function _cpRefreshSymbolList() {
 const PERSONAL_WATCH_ENDPOINT = '/api/cockpit-personal-watch-settings';
 const PERSONAL_WATCH_LIST_ENDPOINT = '/api/cockpit-personal-watch-list';
 const PERSONAL_WATCH_DIAGNOSTIC_ENDPOINT = '/api/cockpit-personal-watch-diagnostic-target';
+// ADMIN PRICE-HISTORY SIGNALS — Phase 1 read-only diagnostics (BTC/ETH
+// only). GET-only, admin-only. See price-history-signals-panel.js and
+// netlify/functions/admin-price-history-signals.mjs. No trading, alert, or
+// write side effects of any kind.
+const ADMIN_PRICE_HISTORY_SIGNALS_ENDPOINT = '/api/admin-price-history-signals';
+const ADMIN_PRICE_HISTORY_SYMBOLS = ['BTC', 'ETH'];
 let PersonalWatch = { model: null, busy: false, watchModel: null, watchBusy: false };
 
 function _pwHelpers() { return window.__personalWatch || null; }
@@ -5503,6 +5509,72 @@ async function copyPersonalWatchDiagnosticTarget() {
     button.disabled = false;
   }
 }
+
+// ── ADMIN PRICE-HISTORY SIGNALS — Phase 1 read-only diagnostics ──
+// BTC/ETH only. GET-only, fetched only when the Cockpit tab opens (see
+// sv()), never on a poll timer. window.__isAdmin only gates whether the
+// client bothers rendering — the server's getIdentity/isAdmin check in
+// _auth.mjs is the real, authoritative gate; a 401/403 here is treated as
+// authoritative and shown honestly, never silently hidden.
+function _phsHelpers() { return window.__priceHistorySignalsPanel || null; }
+
+function _renderAdminPriceHistoryRow(model) {
+  const helpers = _phsHelpers();
+  const m = model || (helpers ? helpers.errorModel('No data.') : null);
+  if (!m) return '';
+  const rc = m.reclaim || {};
+  const ab = m.absorption || {};
+  return '<div style="margin-bottom:10px;border-bottom:1px solid rgba(255,255,255,0.05);padding-bottom:8px">'
+    + '<b style="color:#fff">' + _esc(m.symbol || '—') + '</b> '
+    + '<span style="color:#667788">' + _esc(m.statusText || '') + '</span><br>'
+    + '<span style="color:#667788">Reclaim:</span> <span style="color:#fff">' + _esc(rc.signal || 'UNKNOWN') + '</span>'
+    + ' <span style="color:#667788">(' + _esc(rc.status || 'UNKNOWN') + (rc.reason ? ' — ' + _esc(rc.reason) : '') + ')</span><br>'
+    + '<span style="color:#667788">Absorption:</span> <span style="color:#fff">' + _esc(ab.signal || 'UNKNOWN') + '</span>'
+    + ' <span style="color:#667788">(' + _esc(ab.status || 'UNKNOWN') + (ab.reason ? ' — ' + _esc(ab.reason) : '') + ')</span><br>'
+    + '<span style="color:#667788">Orderbook:</span> <span style="color:#fff">' + _esc(m.orderbookModeText || 'Unknown')
+    + (m.orderbookReasonText ? ' (' + _esc(m.orderbookReasonText) + ')' : '') + '</span>'
+    + '</div>';
+}
+
+async function refreshAdminPriceHistorySignals() {
+  if (!window.__isAdmin) return;
+  const helpers = _phsHelpers();
+  const card = document.getElementById('cockpit-admin-price-history');
+  const body = document.getElementById('cockpit-admin-price-history-body');
+  if (!helpers || !card || !body) return;
+  card.hidden = false;
+  try {
+    const authHeaders = await _getAuthHeaders();
+    if (!authHeaders.Authorization) {
+      body.innerHTML = _renderAdminPriceHistoryRow(helpers.signedOutModel());
+      return;
+    }
+    const rows = [];
+    for (const symbol of ADMIN_PRICE_HISTORY_SYMBOLS) {
+      try {
+        const r = await fetch(ADMIN_PRICE_HISTORY_SIGNALS_ENDPOINT + '?symbol=' + encodeURIComponent(symbol), {
+          headers: { 'Accept': 'application/json', ...authHeaders },
+        });
+        if (r.status === 401 || r.status === 403) {
+          rows.push(_renderAdminPriceHistoryRow(helpers.errorModel('Not authorized for admin diagnostics.')));
+          continue;
+        }
+        if (!r.ok) {
+          rows.push(_renderAdminPriceHistoryRow(helpers.errorModel('Could not load ' + symbol + ' signals.')));
+          continue;
+        }
+        const json = await r.json();
+        rows.push(_renderAdminPriceHistoryRow(helpers.toRenderModel(json, symbol)));
+      } catch {
+        rows.push(_renderAdminPriceHistoryRow(helpers.errorModel('Could not load ' + symbol + ' signals.')));
+      }
+    }
+    body.innerHTML = rows.join('');
+  } catch {
+    body.innerHTML = _renderAdminPriceHistoryRow(helpers.errorModel('Could not load price-history diagnostics.'));
+  }
+}
+
 // ── Symbol watch-list — selected symbols only, no frontend sending ──
 // Same discipline as the chat-id panel: GET on tab open, POST/DELETE on user
 // action via the shared auth header. It handles symbols only (never a chat id)

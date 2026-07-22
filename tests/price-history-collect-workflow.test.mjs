@@ -18,15 +18,18 @@ test('price-history-collect scheduler workflow file exists', () => {
   assert.ok(fs.existsSync(WORKFLOW_PATH), 'expected .github/workflows/price-history-collect.yml to exist');
 });
 
-test('workflow declares workflow_dispatch and does NOT have an active schedule trigger yet', () => {
+test('workflow declares workflow_dispatch and an active 30-minute schedule trigger (Stage 7 soak)', () => {
   const source = readWorkflow();
   assert.match(source, /workflow_dispatch/);
-  // The schedule trigger must exist only as a comment at this rollout
-  // stage — an active (uncommented) `schedule:` key would start firing on
-  // its own before the owner has walked through the enablement flags.
-  assert.doesNotMatch(source, /^\s*schedule:\s*$/m);
-  assert.match(source, /#\s*schedule:/);
-  assert.match(source, /#\s*-\s*cron:\s*["']\*\/30 \* \* \* \*["']/);
+  // Stage 7 (commit ed1357c) deliberately enabled the schedule trigger for
+  // a 24h soak at a 30-minute cadence. An active (uncommented) `schedule:`
+  // key is now the correct, intended production state — not a regression.
+  // The cron must be exactly */30 * * * * (not */15 or any other cadence)
+  // until a later, separately reviewed stage tightens it.
+  assert.match(source, /^\s*schedule:\s*$/m);
+  assert.doesNotMatch(source, /^\s*#\s*schedule:/m);
+  assert.match(source, /^\s*-\s*cron:\s*["']\*\/30 \* \* \* \*["']/m);
+  assert.doesNotMatch(source, /^\s*-\s*cron:\s*["']\*\/15 \* \* \* \*["']/m);
 });
 
 test('workflow references both the initial 30-minute soak cadence and the eventual 15-minute target', () => {

@@ -379,6 +379,16 @@
           </div>
         </div>
 
+        <!-- ADMIN PRICE-HISTORY SIGNALS — Phase 1 read-only diagnostics.
+             BTC/ETH only, admin-only, GET-only. Never rendered for
+             non-admins (see refreshAdminPriceHistorySignals in terminal.js);
+             hidden until that check confirms admin status. No trading
+             decision, no alert, no write of any kind. -->
+        <details id="cockpit-admin-price-history" hidden>
+          <summary style="cursor:pointer;color:#8899aa;font-size:11px;letter-spacing:.03em">ADMIN &middot; PRICE HISTORY SIGNALS (BTC/ETH)</summary>
+          <div id="cockpit-admin-price-history-body" style="font-size:11px;font-family:monospace;padding:8px 0"></div>
+        </details>
+
         <datalist id="cockpit-symbol-list"></datalist>
 
         <!-- ONBOARDING CONTROL CENTER — the empty-state hero. Hidden once a
@@ -932,6 +942,7 @@
   <script type="module" src="/js/gecko-layout.js?v=6h8"></script>
   <script type="module" src="/js/change-digest.js?v=6h8"></script>
   <script type="module" src="/js/personal-watch.js?v=6h8"></script>
+  <script type="module" src="/js/price-history-signals-panel.js?v=6h8"></script>
   <script src="js/terminal.js?v=6h8"></script>
 </body>
 </html>
