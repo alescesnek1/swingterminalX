@@ -13,13 +13,12 @@
 > `/reply` or `/admin_summary` support system** here. If you find yourself
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
-> _Last synced to repo state: local `main`, **ahead of pushed `origin/main`
-> (`28515fd`) by 3 unpushed local commits**. The latest is local-only bounded
-> price-history RADAR corroboration: it reads only the first-pass top five,
-> permits at most +3 setup support under strict conditions, and preserves
-> first-pass Telegram eligibility. Nothing after `28515fd` is deployed. See
-> sec. 10 and sec. 11._
-
+> _Current local state after this documentation correction:_ HEAD `handoff correction`
+> is **ahead of `origin/main` (`28515fd`) by `0 4`**. The three runtime commits
+> are `c26652a` (advisory frontend overlay), `3d75047` (bounded top-five backend
+> context), and `d6e047e` (max +3 setup support); `handoff correction` is the handoff-only
+> correction. Runtime safety review passed; no push or deploy occurred.
+> `stash@{0}` is preserved. The owner's next step is push approval, not code.
 ---
 
 ## 1. How ChatGPT should behave
@@ -74,10 +73,10 @@ Defaults:
   unchanged, Supabase holds no product data.
 - **Local repo path (owner machine):**
   `C:\Users\Ales\Desktop\Bots\terminal crypto\terminal-X`
-- **Current `main` at time of writing:** pushed `origin/main` is `28515fd`
-  (`feat(observability): wire safe runtime events`); local `main` is 2
-  unpushed commits ahead, including bounded price-history RADAR corroboration
-  (see §10/§11). **Do not assume local commits are live.**
+- **Current local state:** `origin/main...HEAD = 0 4` at HEAD `handoff correction`.
+  The three unpushed runtime commits are `c26652a`, `3d75047`, and `d6e047e`;
+  `handoff correction` is the handoff-only correction. **Do not assume any local commit
+  is live.**
 - **Read-first docs** (see §4).
 
 ## 4. Mandatory repo read order for new coding-agent sessions
@@ -493,7 +492,8 @@ email allowlist (§9), not a billing tier.
     - Authenticated RADAR wiring remains visible and cached per focused base pair;
       `DB_UNAVAILABLE` renders as an explicit degraded/unavailable status with
       unknown signal lines, while HTTP 200 `NO_HISTORY` / `INSUFFICIENT_HISTORY`
-      remain waiting states. Generic HTTP/network failures remain `FETCH_ERROR`.  - **Scheduled price-history collection (LOCAL, UNPUSHED, branch
+      remain waiting states. Generic HTTP/network failures remain `FETCH_ERROR`.
+  - **Scheduled price-history collection (LOCAL, UNPUSHED, branch
     `feat/price-history-scheduler`) — production-risk-reviewed, not yet
     enabled:**
     - **Why a second collector:** `admin-price-history-collect.mjs` forwards
@@ -573,8 +573,7 @@ email allowlist (§9), not a billing tier.
 ## 11. Known completed work / recent milestones
 
 From current git history (most recent first, condensed — see `git log` for full):
-- **Bounded price-history RADAR corroboration (LOCAL, UNPUSHED — `3d75047` + follow-up)** — `bot.mjs` ranks first, reads only the top five stored histories, then re-evaluates matched rows. An `OK` history result can contribute no more than +3 to setup scoring, never to execution; unknown/degraded results contribute zero. Flow/OI/Funding, safety, failed reclaim, strict rolling absorption, and every existing gate remain required. Telegram eligibility stays exactly at first-pass baseline. No new fetch, scheduler, credentials, private endpoint, orderbook input, trading path, or alert sender.
-
+- **Price-history RADAR chain (LOCAL, UNPUSHED — `c26652a` → `3d75047` → `d6e047e`)** — advisory frontend readiness overlay; bounded top-five backend context; then a max +3 setup-only score support. Unknown/degraded context is zero; Flow/OI/Funding, safety, failed reclaim, strict rolling absorption, all existing gates, and baseline Telegram eligibility remain required/unchanged. Runtime safety review passed; no fetch, scheduler, credential, private endpoint, orderbook input, trading path, or alert sender was added.
 - **Scheduled price-history collection (LOCAL, UNPUSHED, branch
   `feat/price-history-scheduler`)** — production-risk review completed
   (GO), then implemented: two new POST-only, own-scheduler-secret Node
@@ -644,10 +643,10 @@ _(Grounded in git + docs; do not over-invent.)_
 
 - Keep this handoff **and** `AGENTS.md` / `docs/` synchronized after behavior
   changes (§16).
-- **Current local state: 3+ commits ahead of `origin/main`, unpushed** (UI
-  market-maps polish + price-history DB foundation, §10/§11). First decision
-  is the owner's push approval — that push auto-applies the price-history
-  migration to production.
+- **Current local state:** `origin/main...HEAD = 0 4` at `handoff correction`; the
+  runtime safety review passed; the handoff-only correction is complete. Next step is
+  owner push approval — a push auto-applies the pending price-history migration
+  to production.
 - **Next DB phase:** the scheduled collector/pruner (branch
   `feat/price-history-scheduler`) is implemented and tested but **not
   enabled** — follow `docs/price-history-scheduler.md`'s flag-by-flag
