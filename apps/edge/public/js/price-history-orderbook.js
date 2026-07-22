@@ -32,9 +32,13 @@
 //   against the server helper over a matrix of inputs so the two cannot
 //   silently drift apart.
 //
-//   NOT wired into the UI: terminal.js is a classic <script>, so consuming
-//   this ESM module would require a <script type="module"> change. That is
-//   intentionally left for a separate, reviewed UI change.
+//   WIRED INTO RADAR: terminal.js is a classic <script>, so it cannot
+//   `import` this ESM module directly. It is loaded as its own
+//   <script type="module"> in index.html and exposes its pure functions on
+//   window.__priceHistoryOrderbook — the same global-exposure pattern the
+//   admin diagnostics panel module already uses for its own window global
+//   (see that module's own file for the mirrored convention). terminal.js's
+//   _radarPhEnrichWithBrowserOrderbook() is the only caller.
 
 const CONFIDENCE = ['low', 'medium', 'high'];
 
@@ -211,5 +215,14 @@ export function combinePriceHistorySignalsWithOrderbook({ signals, orderbook, op
     orderbookReason: 'OK',
     reclaim: base.reclaim,
     absorption,
+  };
+}
+
+if (typeof window !== 'undefined') {
+  window.__priceHistoryOrderbook = {
+    summarizeBrowserOrderbook,
+    orderbookSupportFrom,
+    gradeAbsorptionConfidence,
+    combine: combinePriceHistorySignalsWithOrderbook,
   };
 }

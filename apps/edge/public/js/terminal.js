@@ -5727,11 +5727,48 @@ function _radarPhSetResult(base, model) {
   }
 }
 
+// Browser-side orderbook enrichment for the RADAR price-history section.
+// The Netlify Node runtime cannot reach a Binance book itself (see
+// admin-price-history-signals.mjs's "KNOWN PRODUCTION CONSTRAINT" header):
+// the Node->Edge bridge and the Binance-direct fallback both fail from
+// Netlify's cloud egress. The SAME /api/orderbook route this file's own
+// loadOrderbook() already uses for the detail-panel book works fine from
+// the browser (the user's own network), so this fetches that route with
+// the RADAR candidate's raw PAIR symbol (e.g. "BTCUSDT", not the base) and
+// merges via the pure, unit-tested window.__priceHistoryOrderbook.combine
+// helper (apps/edge/public/js/price-history-orderbook.js, cross-checked
+// against the server's own grading in
+// tests/price-history-orderbook-browser.test.mjs). Never invents a signal
+// or confidence beyond what the server would have computed with a live
+// book; on ANY failure (no pair, module unavailable, signed out, non-2xx,
+// unparseable body, thrown error) the input `json` is returned completely
+// untouched so the caller's existing history-only render is the fallback.
+async function _radarPhEnrichWithBrowserOrderbook(json, pair) {
+  const normalizedPair = typeof pair === 'string' ? pair.trim().toUpperCase() : '';
+  if (!normalizedPair) return json;
+  const helpers = window.__priceHistoryOrderbook;
+  if (!helpers || typeof helpers.combine !== 'function') return json;
+  try {
+    const authHeaders = await _getAuthHeaders();
+    if (!authHeaders.Authorization) return json;
+    const url = `/api/orderbook?pair=${encodeURIComponent(normalizedPair)}&market=spot`;
+    const r = await fetch(url, { headers: { 'Accept': 'application/json', ...authHeaders } });
+    if (!r.ok) return json;
+    let body;
+    try { body = await r.json(); } catch { return json; }
+    return helpers.combine({ signals: json, orderbook: body });
+  } catch (err) {
+    console.warn('[RADAR] browser orderbook enrichment failed:', err && err.name ? err.name : 'network error');
+    return json;
+  }
+}
+
 async function _refreshRadarPriceHistorySignals() {
   if (!window.__isAdmin) return;
   const slot = document.getElementById('radar-ph-signals-slot');
   if (!slot) return;
   const base = slot.getAttribute('data-ph-base') || '';
+  const pair = slot.getAttribute('data-ph-pair') || '';
   if (!base) {
     slot.setAttribute('data-ph-status', 'waiting');
     slot.innerHTML = _radarPhInnerHtml(base);
@@ -5774,6 +5811,14 @@ async function _refreshRadarPriceHistorySignals() {
     }
     let json;
     try { json = await r.json(); } catch { _radarPhSetResult(base, helpers.radarErrorModel('Malformed response for ' + base + '.', 'MALFORMED_RESPONSE')); return; }
+    // Browser-side orderbook enrichment: only attempted when the server has
+    // a real OK-status result to enrich (NO_HISTORY/INSUFFICIENT_HISTORY have
+    // no absorption signal for a book to sharpen, so skip the extra round
+    // trip). Any failure here leaves `json` untouched — the render stays the
+    // server's own honest history-only result.
+    if (json && json.ok === true && json.status === 'OK' && json.orderbookMode === 'external_browser_required') {
+      json = await _radarPhEnrichWithBrowserOrderbook(json, pair);
+    }
     _radarPhSetResult(base, helpers.toRadarRenderModel(json, base));
   } catch (err) {
     console.warn('[RADAR] price-history fetch failed:', err && err.name ? err.name : 'network error');
