@@ -24,7 +24,7 @@
 // ─────────────────────────────────────────────────────────────
 
 import { checkOrigin, pickAllowOrigin, verifyAuth } from './lib/security.js';
-import { normalizeBinanceSymbol, fetchOrderbook } from './lib/binance.js';
+import { normalizeBinanceSymbol, resolveOrderbook } from './lib/binance.js';
 import { logWarn } from './lib/log.js';
 
 // Tiny per-isolate cache so clicking around the same coin (or several
@@ -93,17 +93,25 @@ export default async function handler(request) {
       });
     }
 
-    // 5. Fetch the book server-side. On failure: log + return a clear,
-    //    visible error (502) — never a silent empty book.
+    // 5. Fetch the book server-side. resolveOrderbook honors the requested
+    //    market but transparently falls back to the other Binance market when
+    //    the symbol is only listed there (e.g. a futures-only ALPHA coin asked
+    //    for as spot). On failure: log + return a clear, visible, and HONEST
+    //    error — a symbol that is on neither venue is 404 "not listed" (not the
+    //    misleading "upstream failed"); a real upstream fault stays 502.
     try {
-      const orderbook = await fetchOrderbook({ pair: norm.pair, market });
+      const resolved = await resolveOrderbook({ pair: norm.pair, market });
       const body = JSON.stringify({
         pair: norm.pair,
-        market,
-        exchange: market === 'futures' ? 'ALPHA' : 'BIN',
+        // The market that actually served the book (may differ from the
+        // requested one when a fallback resolved it).
+        market: resolved.market,
+        requested_market: market,
+        market_fallback: resolved.fallback === true,
+        exchange: resolved.market === 'futures' ? 'ALPHA' : 'BIN',
         source: 'binance',
         fetched_at: new Date().toISOString(),
-        orderbook,
+        orderbook: resolved.book,
       });
       _cache.set(cacheKey, { at: now, body });
       return new Response(body, {
@@ -111,13 +119,27 @@ export default async function handler(request) {
         headers: { 'Content-Type': 'application/json', 'X-Cache-Layer': 'miss', ...corsHeaders(request) },
       });
     } catch (e) {
+      const kind = e?.kind || 'UPSTREAM_ERROR';
       logWarn?.({
         location: 'orderbook/fetch',
         message: String(e?.message || e),
-        payload: { pair: norm.pair, market },
+        payload: { pair: norm.pair, market, kind },
       });
+      if (kind === 'SYMBOL_NOT_ON_BINANCE') {
+        // Not an outage — an expected answer for DEX / not-yet-listed coins.
+        // 404 + a specific reason so the UI can say "not on Binance" instead
+        // of implying Binance itself failed.
+        return json(request, {
+          error: 'Symbol not listed on Binance',
+          reason: 'SYMBOL_NOT_ON_BINANCE',
+          detail: String(e?.message || e),
+          pair: norm.pair,
+          requested_market: market,
+        }, 404);
+      }
       return json(request, {
         error: 'Order book upstream failed',
+        reason: 'UPSTREAM_ERROR',
         detail: String(e?.message || e),
         pair: norm.pair,
         market,

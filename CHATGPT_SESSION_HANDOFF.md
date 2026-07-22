@@ -13,6 +13,22 @@
 > `/reply` or `/admin_summary` support system** here. If you find yourself
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
+> _Orderbook 502 audit (2026-07-22, local-only fix on top of `13dd749`):_ the
+> `/api/orderbook` 502s were **NOT** infra/egress — `/api/orderbook` is the Deno
+> **Edge** function (`apps/edge/netlify/edge-functions/orderbook.js` →
+> `lib/binance.js`) and BTCUSDT/ETHUSDT return real books on spot AND futures.
+> Root cause: (B) market selection — LITUSDT has an empty spot book but a live
+> futures book, callers ask spot; and (D) unsupported symbol — ANSEMUSDT is on
+> neither Binance market (400 -1121 Invalid symbol) but was reported as generic
+> "upstream failed". Fix (Edge-only, no frontend change): new `resolveOrderbook`
+> does a bounded spot↔futures fallback so futures-only coins return their real
+> book, and the route now answers **404 `SYMBOL_NOT_ON_BINANCE`** (honest "not
+> listed") vs **502 `UPSTREAM_ERROR`** (genuine fault) instead of one blanket
+> 502. Success response adds `requested_market` / `market_fallback` / resolved
+> `market` (extra fields; existing callers read only `orderbook`, unaffected).
+> Full suite green (1624 pass / 0 fail / 26 skipped). Runtime smoke needs a
+> deploy (Edge runs server-side; not verifiable locally). No push, no deploy.
+>
 > _Current local state:_ the four price-history runtime/doc commits
 > (`c26652a` advisory frontend overlay, `3d75047` bounded top-five backend
 > context, `d6e047e` max +3 setup support, `d4baac1` handoff) are pushed —

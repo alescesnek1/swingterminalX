@@ -136,6 +136,30 @@ function summarizeOrderbook(depth) {
   };
 }
 
+// Typed depth error so the /api/orderbook route can tell "this symbol is not
+// listed on this Binance market" (a valid, expected answer for futures-only /
+// DEX coins) apart from a genuine upstream failure (timeout / 451 geo-block /
+// 5xx / rate limit) that must NOT be masked. kind ∈
+//   'INVALID_SYMBOL'        — Binance replied 400 -1121 "Invalid symbol"
+//   'EMPTY_BOOK'            — 200 but no usable bids/asks
+//   'UPSTREAM_ERROR'       — timeout / 451 / 5xx / rate limit / anything else
+//   'SYMBOL_NOT_ON_BINANCE'— neither spot nor futures lists the symbol
+function depthError(kind, message) {
+  const e = new Error(message);
+  e.kind = kind;
+  return e;
+}
+
+// Classify a raw fetchJson depth error message. Binance answers a symbol that
+// is not listed on the queried market with HTTP 400 + code -1121 "Invalid
+// symbol"; EVERYTHING else (abort/timeout, 429/418 rate limit, 451 geo-block,
+// 5xx) is a real upstream failure we must never mislabel as "not listed".
+export function classifyDepthFailure(message) {
+  const msg = String(message || '');
+  if (/HTTP 400\b/i.test(msg) && (/-1121/.test(msg) || /invalid symbol/i.test(msg))) return 'INVALID_SYMBOL';
+  return 'UPSTREAM_ERROR';
+}
+
 /**
  * Lightweight order-book-only fetch for the /api/orderbook edge endpoint.
  * Unlike fetchBinanceSnapshot (which pulls ticker + klines + funding + OI
@@ -144,18 +168,66 @@ function summarizeOrderbook(depth) {
  * futures so ALPHA (perp-only) listings get a real book instead of the
  * old "Spot only" dead-end.
  *
- * Throws on any upstream failure (non-200, empty/invalid book) so the
- * caller can surface a visible error AND log it — never a silent null.
+ * Throws a TYPED depth error (see depthError) on any failure so the caller
+ * can distinguish "not on this market" from a real upstream failure — never a
+ * silent null.
  */
 export async function fetchOrderbook({ pair, market = 'spot' }) {
-  if (!pair) throw new Error('fetchOrderbook: missing pair');
+  if (!pair) throw depthError('UPSTREAM_ERROR', 'fetchOrderbook: missing pair');
   const base = market === 'futures' ? FUT_BASE : SPOT_BASE;
   const path = market === 'futures' ? '/fapi/v1/depth' : '/api/v3/depth';
   const url = `${base}${path}?symbol=${pair}&limit=${ORDERBOOK_DEPTH}`;
-  const depth = await fetchJson(url, `${market}-depth/${pair}`);
+  let depth;
+  try {
+    depth = await fetchJson(url, `${market}-depth/${pair}`);
+  } catch (e) {
+    const msg = String(e?.message || e);
+    throw depthError(classifyDepthFailure(msg), msg);
+  }
   const book = summarizeOrderbook(depth);
-  if (!book) throw new Error(`empty or invalid ${market} depth for ${pair}`);
+  if (!book) throw depthError('EMPTY_BOOK', `empty or invalid ${market} depth for ${pair}`);
   return book;
+}
+
+/**
+ * Fetch a live book for `pair`, honoring the requested market but falling back
+ * to the OTHER Binance market when the symbol simply isn't listed on the
+ * requested one (INVALID_SYMBOL) or its book is empty (EMPTY_BOOK). This makes
+ * a futures-only (ALPHA/perp) coin like LITUSDT — which has no usable spot
+ * book but a live futures book — return its real book instead of the
+ * misleading "Order book upstream failed" the single-market path produced.
+ *
+ * A genuine upstream failure (timeout / 451 geo-block / 5xx / rate limit) is
+ * NEVER hidden behind a fallback: it is surfaced as UPSTREAM_ERROR. When the
+ * symbol is listed on neither market, a SYMBOL_NOT_ON_BINANCE error is thrown
+ * so the route can honestly say "not listed on Binance" — not "upstream
+ * failed". Returns { book, market, fallback }.
+ */
+export async function resolveOrderbook({ pair, market = 'spot' }) {
+  const primary = market === 'futures' ? 'futures' : 'spot';
+  const secondary = primary === 'spot' ? 'futures' : 'spot';
+  try {
+    const book = await fetchOrderbook({ pair, market: primary });
+    return { book, market: primary, fallback: false };
+  } catch (e) {
+    const kind = e?.kind || 'UPSTREAM_ERROR';
+    // Only a "not here" answer justifies trying the other venue. A real
+    // upstream failure must surface as-is, never trigger a second hammer that
+    // could mask an outage as a missing symbol.
+    if (kind !== 'INVALID_SYMBOL' && kind !== 'EMPTY_BOOK') throw e;
+  }
+  try {
+    const book = await fetchOrderbook({ pair, market: secondary });
+    return { book, market: secondary, fallback: true };
+  } catch (e2) {
+    const kind2 = e2?.kind || 'UPSTREAM_ERROR';
+    // Both venues answered "not here" → the symbol is genuinely not on Binance.
+    if (kind2 === 'INVALID_SYMBOL' || kind2 === 'EMPTY_BOOK') {
+      throw depthError('SYMBOL_NOT_ON_BINANCE', `${pair} is not listed on Binance spot or futures`);
+    }
+    // The fallback venue hit a real upstream failure — surface it honestly.
+    throw e2;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
