@@ -4,6 +4,17 @@
 `market_price_points`. It calls pure reclaim and absorption helpers; it does
 not write data, score RADAR, change `ENTRY_READY`, trade, or alert.
 
+## Bounded RADAR backend context
+
+The backend refresh enriches only its already-ranked top five RADAR candidates
+with `priceHistoryContext`, read from `market_price_points`. The context carries
+price-history reclaim and explicitly `history_only` absorption proxy results.
+It never reads a browser orderbook and does not claim flow, open interest,
+funding, or strict rolling absorption.
+
+This context is output-only: it does not alter setup/execution scores,
+`ENTRY_READY`, strict absorption, or Telegram eligibility. DB unavailable, no
+history, and insufficient history remain explicit UNKNOWN contexts.
 ## Collector: `/api/admin-price-history-collect`
 
 Admin-only, POST-only. Disabled by default behind

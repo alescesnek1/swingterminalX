@@ -481,7 +481,11 @@ email allowlist (§9), not a billing tier.
       untouched; `bot.mjs` remains off-limits as a wiring point.
     - `netlify/functions/_price-history-signals.mjs` now provides pure,
       context-only reclaim and absorption classification over stored points.
-      It is not imported by trading, RADAR, `ENTRY_READY`, alerts, or Telegram.
+      It is consumed only after RADAR evaluation to attach bounded (top-five)
+      backend candidate context. It does not change scoring, `ENTRY_READY`,
+      strict rolling absorption, alerts, or Telegram; history-only absorption
+      stays explicitly proxy-labeled and DB/no-history/insufficient states stay
+      UNKNOWN.
     - **Orderbook bridge wired (LOCAL, UNPUSHED):**
       `netlify/functions/_orderbook-client.mjs` is a pure Node wrapper that
       calls the existing authenticated `/api/orderbook` Deno Edge route
