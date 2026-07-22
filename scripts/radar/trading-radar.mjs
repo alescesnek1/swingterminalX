@@ -640,6 +640,51 @@ export function buildPriceLevels(market, stageInfo = {}) {
   };
 }
 
+function priceHistoryScoringSupport(market) {
+  const context = market && market.priceHistoryContext;
+  const result = {
+    adjustment: 0,
+    used: false,
+    gateSupport: { reclaim: false, absorption: false },
+    gateBlockers: [],
+  };
+  if (!context || typeof context !== 'object') {
+    result.gateBlockers.push('price-history context unavailable');
+    return result;
+  }
+  if (context.status !== 'OK') {
+    result.gateBlockers.push(`price-history context ${String(context.status || 'UNKNOWN')}`);
+    return result;
+  }
+
+  const originalReclaimFailed = market.reclaimLost === true
+    || market.retestFailed === true
+    || market.reclaimRetestFailed === true
+    || market.reclaimV2?.RECLAIM_STATUS === 'RECLAIM_FAILED';
+  if (context.reclaim?.status === 'CONFIRMED' && !originalReclaimFailed) {
+    result.adjustment += 2;
+    result.used = true;
+    result.gateSupport.reclaim = true;
+  } else if (originalReclaimFailed) {
+    result.gateBlockers.push('existing reclaim is explicitly failed');
+  } else {
+    result.gateBlockers.push('price-history reclaim not confirmed');
+  }
+
+  const mediumOrHigherConfidence = context.absorption?.confidence === 'medium'
+    || context.absorption?.confidence === 'high';
+  if (context.absorption?.status === 'CONFIRMED'
+    && context.absorption?.mode === 'history_only'
+    && mediumOrHigherConfidence) {
+    result.adjustment += 1;
+    result.used = true;
+    result.gateSupport.absorption = true;
+  } else {
+    result.gateBlockers.push('price-history absorption is not a confirmed medium-confidence history-only proxy');
+  }
+
+  return result;
+}
 function radarScorePack(market, regime, stageInfo, levels, safety) {
   const s = stageInfo._signals || signalBooleans(market, regime);
   const missing = missingForMarket(market);
@@ -649,6 +694,8 @@ function radarScorePack(market, regime, stageInfo, levels, safety) {
   const tp1Distance = levels.takeProfitCheckpoints && levels.takeProfitCheckpoints[0] ? pctDistance(px, levels.takeProfitCheckpoints[0].level) : null;
   const riskPct = stopDistance == null ? null : Math.abs(stopDistance);
   const rr = riskPct > 0 && tp1Distance != null ? tp1Distance / riskPct : null;
+  // Bounded corroborating support only. It cannot supply Flow/OI/Funding or strict rolling absorption.
+  const priceHistory = priceHistoryScoringSupport(market);
 
   const dislocation = clamp(
     Math.max(Math.abs(s.c24 || 0), Math.abs(s.c12 || 0) * 1.25, Math.abs(s.c4 || 0) * 2) * 4
@@ -738,7 +785,8 @@ function radarScorePack(market, regime, stageInfo, levels, safety) {
       && !microPresent(market.flow && market.flow.takerBuySellRatio)) execMissing.push('flow');
   const execMissingPenalty = Math.min(12, execMissing.length * 3);
 
-  const setup = clamp(dislocation * 0.20 + flush * 0.20 + stabilization * 0.20 + reclaim * 0.15 + deriv * 0.10 + marketRegime * 0.15);
+  const setupBase = dislocation * 0.20 + flush * 0.20 + stabilization * 0.20 + reclaim * 0.15 + deriv * 0.10 + marketRegime * 0.15;
+  const setup = clamp(setupBase + priceHistory.adjustment);
   const execution = clamp(orderBook * 0.08 + flow * 0.08 + reclaim * 0.32 + stabilization * 0.18 + riskReward * 0.24 + marketRegime * 0.10 - execMissingPenalty);
   // UNKNOWN safety is no longer a near-free pass: an unverifiable token cannot
   // be implicitly trusted, so it carries a real confidence penalty (and blocks
@@ -756,6 +804,10 @@ function radarScorePack(market, regime, stageInfo, levels, safety) {
     DERIVATIVES_RISK_SCORE: round(deriv, 0),
     MARKET_REGIME_SCORE: round(marketRegime, 0),
     RISK_REWARD_SCORE: round(riskReward, 0),
+    PRICE_HISTORY_SCORE_ADJUSTMENT: priceHistory.adjustment,
+    PRICE_HISTORY_GATE_SUPPORT: priceHistory.gateSupport,
+    PRICE_HISTORY_GATE_BLOCKERS: priceHistory.gateBlockers,
+    PRICE_HISTORY_USED_FOR_SCORING: priceHistory.used,
     SETUP_SCORE: round(setup, 0),
     EXECUTION_SCORE: round(execution, 0),
     FINAL_CONFIDENCE: round(confidence, 0),
@@ -765,7 +817,7 @@ function radarScorePack(market, regime, stageInfo, levels, safety) {
     riskPct,
     tp1Distance,
     diagnostics: {
-      setupBreakdown: `SETUP: ${round(setup, 0)} = dislocation ${round(dislocation, 0)}×20% + flush ${round(flush, 0)}×20% + stabilization ${round(stabilization, 0)}×20% + reclaim ${round(reclaim, 0)}×15% + derivatives ${round(deriv, 0)}×10% + regime ${round(marketRegime, 0)}×15%`,
+      setupBreakdown: `SETUP: ${round(setup, 0)} = dislocation ${round(dislocation, 0)}×20% + flush ${round(flush, 0)}×20% + stabilization ${round(stabilization, 0)}×20% + reclaim ${round(reclaim, 0)}×15% + derivatives ${round(deriv, 0)}×10% + regime ${round(marketRegime, 0)}×15% + price-history ${priceHistory.adjustment}`,
       executionBreakdown: `EXECUTION: ${round(execution, 0)} = orderbook ${execMissing.includes('orderBookDepth') || execMissing.includes('spread') ? 'N/A' : round(orderBook, 0)}×8% + flow ${execMissing.includes('flow') ? 'N/A' : round(flow, 0)}×8% + reclaim ${round(reclaim, 0)}×32% + stabilization ${round(stabilization, 0)}×18% + RR ${round(riskReward, 0)}×24% + regime ${round(marketRegime, 0)}×10%${execMissingPenalty ? ` - penalty ${execMissingPenalty}` : ''}`
     }
   };
@@ -2381,7 +2433,7 @@ export function evaluateTradingRadar({
         'takerBuySellRatio', 'cumulativeDelta', 'deltaImprovementPct', 'bidDepthRebuildPct',
         'absorptionScore', 'distanceToSupportPct', 'marketBuyVolumeDominance', 'buyVolumeDominance',
         'bidAbsorption', 'aggressiveSellsFailed', 'supportRetested', 'liquidationLowRetested',
-        'depthUsd', 'structuralReclaim', 'higherLow', 'noNewLow', 'reclaimLevel', 'squeezeTrigger'
+        'depthUsd', 'structuralReclaim', 'higherLow', 'noNewLow', 'reclaimLevel', 'squeezeTrigger', 'priceHistoryContext'
       ];
       for (const k of MICRO_KEYS) {
         if (sc[k] !== undefined && overlay[k] === undefined) {
@@ -2427,7 +2479,7 @@ export function evaluateTradingRadar({
               'takerBuySellRatio', 'cumulativeDelta', 'deltaImprovementPct', 'bidDepthRebuildPct',
               'absorptionScore', 'distanceToSupportPct', 'marketBuyVolumeDominance', 'buyVolumeDominance',
               'bidAbsorption', 'aggressiveSellsFailed', 'supportRetested', 'liquidationLowRetested',
-              'depthUsd', 'structuralReclaim', 'higherLow', 'noNewLow', 'reclaimLevel', 'squeezeTrigger'
+              'depthUsd', 'structuralReclaim', 'higherLow', 'noNewLow', 'reclaimLevel', 'squeezeTrigger', 'priceHistoryContext'
             ];
             for (const k of MICRO_KEYS) {
               if (sc[k] !== undefined && newCandidate[k] === undefined) {
@@ -2625,6 +2677,10 @@ export function evaluateTradingRadar({
         contractAddress: safety.contractAddress,
         safetySource: safety.metadataSource || safety.source,
         ...v1,
+        priceHistoryScoreAdjustment: v1.PRICE_HISTORY_SCORE_ADJUSTMENT,
+        priceHistoryGateSupport: v1.PRICE_HISTORY_GATE_SUPPORT,
+        priceHistoryGateBlockers: v1.PRICE_HISTORY_GATE_BLOCKERS,
+        priceHistoryUsedForScoring: v1.PRICE_HISTORY_USED_FOR_SCORING,
         v1Status: v1.STATUS,
         v1Action: v1.ACTION,
         v1BlockedBy: v1.BLOCKED_BY,

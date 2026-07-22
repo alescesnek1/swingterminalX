@@ -14,12 +14,11 @@
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
 > _Last synced to repo state: local `main`, **ahead of pushed `origin/main`
-> (`28515fd`) by 6 unpushed local commits**. The latest is local-only
-> price-history collector + orderbook context wiring: an admin-only, POST-only
-> collector (`PRICE_HISTORY_COLLECT_ENABLED`, default off) and a Node bridge
-> to the existing authenticated `/api/orderbook` route used as best-effort
-> context by the read-only admin signals route. Nothing after `28515fd` is
-> deployed. See sec. 10 and sec. 11._
+> (`28515fd`) by 3 unpushed local commits**. The latest is local-only bounded
+> price-history RADAR corroboration: it reads only the first-pass top five,
+> permits at most +3 setup support under strict conditions, and preserves
+> first-pass Telegram eligibility. Nothing after `28515fd` is deployed. See
+> sec. 10 and sec. 11._
 
 ---
 
@@ -76,9 +75,9 @@ Defaults:
 - **Local repo path (owner machine):**
   `C:\Users\Ales\Desktop\Bots\terminal crypto\terminal-X`
 - **Current `main` at time of writing:** pushed `origin/main` is `28515fd`
-  (`feat(observability): wire safe runtime events`); local `main` is 4
-  unpushed commits ahead (cockpit market-maps polish + price-history DB
-  foundation, see §10/§11). **Do not assume the local commits are live.**
+  (`feat(observability): wire safe runtime events`); local `main` is 2
+  unpushed commits ahead, including bounded price-history RADAR corroboration
+  (see §10/§11). **Do not assume local commits are live.**
 - **Read-first docs** (see §4).
 
 ## 4. Mandatory repo read order for new coding-agent sessions
@@ -479,29 +478,22 @@ email allowlist (§9), not a billing tier.
       `PRICE_HISTORY_WRITE_ENABLED === 'true'` to persist — so both flags
       must be on for a real write. `/api/markets` stays Deno Edge and
       untouched; `bot.mjs` remains off-limits as a wiring point.
-    - `netlify/functions/_price-history-signals.mjs` now provides pure,
-      context-only reclaim and absorption classification over stored points.
-      It is consumed only after RADAR evaluation to attach bounded (top-five)
-      backend candidate context. It does not change scoring, `ENTRY_READY`,
-      strict rolling absorption, alerts, or Telegram; history-only absorption
-      stays explicitly proxy-labeled and DB/no-history/insufficient states stay
-      UNKNOWN.
-    - **Orderbook bridge wired (LOCAL, UNPUSHED):**
-      `netlify/functions/_orderbook-client.mjs` is a pure Node wrapper that
-      calls the existing authenticated `/api/orderbook` Deno Edge route
-      same-origin with a sanitized `pair`/`market` only — no forwarded query
-      string, and only the caller's `Authorization` header is forwarded
-      (never cookies/other headers, never logged).
-    - `/api/admin-price-history-signals` is GET-only, verified-admin-only, and
-      read-only. It returns derived summaries only; it never returns `raw_meta`
-      or an orderbook dump. It now calls the orderbook bridge as best-effort
-      context: success → `orderbookUsed:true`, `orderbookReason:'OK'`; any
-      failure (unauth, upstream down, invalid pair) → the endpoint still
-      returns 200 with `orderbookUsed:false` and a stable reason, falling
-      back to a history-only read.
-    - Authenticated RADAR wiring is now visible and cached per focused base pair; `DB_UNAVAILABLE` is rendered as an explicit degraded/unavailable status with unknown signal lines, while HTTP 200 `NO_HISTORY` / `INSUFFICIENT_HISTORY` remain waiting states. Generic HTTP/network failures remain `FETCH_ERROR`; no trading gates or alert paths are touched.
-    - No trading, RADAR, alert, Telegram, or Supabase-auth behavior changed.
-  - **Scheduled price-history collection (LOCAL, UNPUSHED, branch
+    - `netlify/functions/_price-history-signals.mjs` provides pure reclaim and
+      absorption classification over stored points. `bot.mjs` uses a bounded
+      two-pass RADAR refresh: rank without history, read only the first-pass top
+      five, then re-evaluate matched rows. An `OK` context can add at most +3
+      to `SETUP_SCORE` (+2 confirmed history reclaim only when existing reclaim
+      is not explicitly failed; +1 confirmed medium-or-higher confidence
+      `history_only` absorption). It never supplies execution data, Flow, OI,
+      Funding, safety, strict rolling Absorb, or a bypass for any existing gate.
+      All unavailable/unknown/non-confirmed context is explicit and scores zero.
+      `telegramEligible` is restored from the first pass, so this context cannot
+      create Telegram delivery. No browser orderbook, external fetch, scheduler,
+      credential, private endpoint, trading path, or alert sender was added.
+    - Authenticated RADAR wiring remains visible and cached per focused base pair;
+      `DB_UNAVAILABLE` renders as an explicit degraded/unavailable status with
+      unknown signal lines, while HTTP 200 `NO_HISTORY` / `INSUFFICIENT_HISTORY`
+      remain waiting states. Generic HTTP/network failures remain `FETCH_ERROR`.  - **Scheduled price-history collection (LOCAL, UNPUSHED, branch
     `feat/price-history-scheduler`) — production-risk-reviewed, not yet
     enabled:**
     - **Why a second collector:** `admin-price-history-collect.mjs` forwards
@@ -581,6 +573,7 @@ email allowlist (§9), not a billing tier.
 ## 11. Known completed work / recent milestones
 
 From current git history (most recent first, condensed — see `git log` for full):
+- **Bounded price-history RADAR corroboration (LOCAL, UNPUSHED — `3d75047` + follow-up)** — `bot.mjs` ranks first, reads only the top five stored histories, then re-evaluates matched rows. An `OK` history result can contribute no more than +3 to setup scoring, never to execution; unknown/degraded results contribute zero. Flow/OI/Funding, safety, failed reclaim, strict rolling absorption, and every existing gate remain required. Telegram eligibility stays exactly at first-pass baseline. No new fetch, scheduler, credentials, private endpoint, orderbook input, trading path, or alert sender.
 
 - **Scheduled price-history collection (LOCAL, UNPUSHED, branch
   `feat/price-history-scheduler`)** — production-risk review completed

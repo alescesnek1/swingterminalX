@@ -10,7 +10,7 @@ import { microstructureSnapshotStatus } from '../../scripts/radar/market-data-pr
 import { normalizeKlinesSnapshot } from '../../scripts/radar/klines-snapshot.mjs';
 import { normalizeRollingMicrostructureSnapshot } from '../../scripts/radar/rolling-microstructure-snapshot.mjs';
 import { normalizeLongShortSnapshot } from '../../scripts/radar/long-short-snapshot.mjs';
-import { attachPriceHistoryContextsToRadarCandidates, loadPriceHistoryContextsForCandidates } from './_price-history-radar-context.mjs';
+import { applyPriceHistoryContextsToRows, attachPriceHistoryContextsToRadarCandidates, loadPriceHistoryContextsForCandidates } from './_price-history-radar-context.mjs';
 
 function safeRequestUrl(req, fallbackPath = '/') {
   if (!req) return new URL(fallbackPath, 'http://localhost');
@@ -2209,9 +2209,9 @@ async function refreshTradingRadarFromFleet(fleet, nowMs = Date.now()) {
     binanceAlphaSymbolMap: alphaMapping && alphaMapping.byLookup instanceof Map ? alphaMapping.byLookup : null,
     binanceAlphaListings: alphaMapping && Array.isArray(alphaMapping.listings) ? alphaMapping.listings : null,
   };
-  const radar = evaluateTradingRadar({
-    markets,
-    scannerCandidates: radarContext,
+  const evaluateRadar = (radarMarkets, scannerCandidates) => evaluateTradingRadar({
+    markets: radarMarkets,
+    scannerCandidates,
     scannerContext,
     source: snapshot && snapshot.source ? snapshot.source : 'no_public_snapshot',
     fetchedAt: snapshot && snapshot.fetchedAt,
@@ -2223,10 +2223,12 @@ async function refreshTradingRadarFromFleet(fleet, nowMs = Date.now()) {
     rollingMicrostructureSnapshot: fleet && fleet.radarRollingMicrostructureSnapshot ? fleet.radarRollingMicrostructureSnapshot : null,
     longShortSnapshot: fleet && fleet.radarLongShortSnapshot ? fleet.radarLongShortSnapshot : null,
   });
-  // Enrich only the already-ranked top five candidate objects. This runs after
-  // evaluateTradingRadar, so it cannot alter scores, gates, ENTRY_READY, or
-  // Telegram eligibility. The adapter intentionally supplies history-only
-  // context and never receives a browser orderbook.
+  // First pass ranks candidates without price history. Only that bounded top five
+  // is read from the database; the second pass cannot fan out reads or consume a
+  // browser orderbook. Existing Flow/OI/Funding and strict rolling Absorb gates
+  // remain entirely in the evaluator.
+  let radar = evaluateRadar(markets, radarContext);
+  const baselineTelegramEligibility = new Map((radar.candidates || []).map((candidate) => [candidate.symbol, candidate.telegramEligible === true]));
   let priceHistoryContexts;
   try {
     const { listRecentPricePoints } = await import('./_price-history.mjs');
@@ -2235,12 +2237,28 @@ async function refreshTradingRadarFromFleet(fleet, nowMs = Date.now()) {
     priceHistoryContexts = await loadPriceHistoryContextsForCandidates(radar.candidates, null);
     console.warn('[bot] RADAR price-history context unavailable', { reason: 'DB_UNAVAILABLE' });
   }
+  if (priceHistoryContexts.size > 0) {
+    radar = evaluateRadar(
+      applyPriceHistoryContextsToRows(markets, priceHistoryContexts),
+      applyPriceHistoryContextsToRows(radarContext, priceHistoryContexts),
+    );
+  }
+  // Price history may corroborate bounded setup scoring only. Alert eligibility
+  // remains exactly the first-pass result until explicitly reviewed separately.
+  for (const candidate of radar.candidates || []) {
+    if (baselineTelegramEligibility.has(candidate.symbol)) {
+      candidate.telegramEligible = baselineTelegramEligibility.get(candidate.symbol);
+    }
+  }
   attachPriceHistoryContextsToRadarCandidates(radar, priceHistoryContexts);
   radar.priceHistoryContextSummary = {
     enrichedCandidates: Math.min(Array.isArray(radar.candidates) ? radar.candidates.length : 0, 5),
     source: 'price_history_db',
-    affectsServerGate: false,
+    affectsServerGate: true,
     affectsTelegram: false,
+    telegramEligibilityPreservedFromBaseline: true,
+    scoringSupportMax: 3,
+    rankingPasses: priceHistoryContexts.size > 0 ? 2 : 1,
   };
   if (!snapshot || !Array.isArray(snapshot.markets) || snapshot.markets.length === 0) {
     radar.missingSignals = Array.from(new Set([...(radar.missingSignals || []), 'public market snapshot'])).sort();

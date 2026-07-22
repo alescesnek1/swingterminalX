@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import {
   RADAR_PRICE_HISTORY_TOP_N,
+  applyPriceHistoryContextsToRows,
   attachPriceHistoryContextsToRadarCandidates,
   buildPriceHistoryContext,
   loadPriceHistoryContextsForCandidates,
@@ -82,7 +83,7 @@ test('history-only absorption is confirmed only as a capped proxy and never over
   assert.equal(before.telegramEligible, true);
 });
 
-test('refresh enriches after evaluation and adapter has no orderbook, worker token, POST, or private Binance dependency', async () => {
+test('refresh ranks then re-evaluates bounded context, with no orderbook, worker token, POST, or private Binance dependency', async () => {
   const [adapter, bot] = await Promise.all([
     readFile(new URL('../netlify/functions/_price-history-radar-context.mjs', import.meta.url), 'utf8'),
     readFile(new URL('../netlify/functions/bot.mjs', import.meta.url), 'utf8'),
@@ -90,8 +91,21 @@ test('refresh enriches after evaluation and adapter has no orderbook, worker tok
   assert.match(adapter, /analyzeReclaimFromPoints/);
   assert.match(adapter, /analyzeAbsorptionFromPointsAndOrderbook/);
   assert.doesNotMatch(adapter, /orderbook-client|BOT_WORKER_TOKEN|fetch\(|\.post\(|\/fapi|\/dapi|\/sapi|\/order/i);
-  const evaluatedAt = bot.indexOf('const radar = evaluateTradingRadar({');
+  const firstPassAt = bot.indexOf('let radar = evaluateRadar(markets, radarContext);');
   const enrichedAt = bot.indexOf('loadPriceHistoryContextsForCandidates(radar.candidates');
-  assert.ok(evaluatedAt !== -1 && enrichedAt > evaluatedAt, 'context must be loaded after RADAR evaluation');
+  const secondPassAt = bot.indexOf('applyPriceHistoryContextsToRows(markets, priceHistoryContexts)');
+  assert.ok(firstPassAt !== -1 && enrichedAt > firstPassAt && secondPassAt > enrichedAt, 'context must be read after ranking and before the bounded second pass');
+  assert.match(bot, /baselineTelegramEligibility/);
+  assert.match(bot, /candidate\.telegramEligible = baselineTelegramEligibility\.get\(candidate\.symbol\)/);
   assert.match(bot, /attachPriceHistoryContextsToRadarCandidates\(radar, priceHistoryContexts\)/);
+});
+test('row applicator is immutable and injects only matched contexts', () => {
+  const rows = [{ symbol: 'BTCUSDT' }, { symbol: 'ETHUSDT' }];
+  const context = { status: 'OK' };
+  const next = applyPriceHistoryContextsToRows(rows, new Map([['BTC', context]]));
+  assert.notEqual(next, rows);
+  assert.notEqual(next[0], rows[0]);
+  assert.equal(next[0].priceHistoryContext, context);
+  assert.equal(Object.hasOwn(next[1], 'priceHistoryContext'), false);
+  assert.equal(Object.hasOwn(rows[0], 'priceHistoryContext'), false);
 });

@@ -6,15 +6,22 @@ not write data, score RADAR, change `ENTRY_READY`, trade, or alert.
 
 ## Bounded RADAR backend context
 
-The backend refresh enriches only its already-ranked top five RADAR candidates
-with `priceHistoryContext`, read from `market_price_points`. The context carries
-price-history reclaim and explicitly `history_only` absorption proxy results.
-It never reads a browser orderbook and does not claim flow, open interest,
-funding, or strict rolling absorption.
+The backend refresh first ranks RADAR candidates without price history, then reads
+`market_price_points` only for that first-pass top five, and re-evaluates with the
+matched context. The read remains bounded; it never reads a browser orderbook.
 
-This context is output-only: it does not alter setup/execution scores,
-`ENTRY_READY`, strict absorption, or Telegram eligibility. DB unavailable, no
-history, and insufficient history remain explicit UNKNOWN contexts.
+Only an `OK` context can add bounded setup corroboration: +2 for a confirmed
+history reclaim when the existing reclaim is not explicitly failed, plus +1 for a
+confirmed `history_only` absorption proxy with medium-or-higher confidence. The
+maximum is +3 to `SETUP_SCORE` only; it cannot fill execution inputs or replace
+Flow, OI, Funding, safety, reclaim failure, or strict rolling absorption gates.
+
+`DB_UNAVAILABLE`, `NO_HISTORY`, `INSUFFICIENT_HISTORY`, and all other unknown or
+non-confirmed states add zero and remain explicit in candidate diagnostics. The
+second pass preserves each candidate's first-pass `telegramEligible` value, so
+price history cannot create a Telegram alert. It adds no fetch, scheduler,
+credential, private endpoint, or trading path.
+
 ## Collector: `/api/admin-price-history-collect`
 
 Admin-only, POST-only. Disabled by default behind

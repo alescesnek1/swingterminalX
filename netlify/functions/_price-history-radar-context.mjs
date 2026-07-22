@@ -1,5 +1,5 @@
 // Bounded, fail-closed price-history context for backend RADAR candidates.
-// This module never changes scores, ENTRY_READY, strict absorption, or Telegram.
+// It supplies only bounded setup corroboration; it never supplies strict absorption, Flow/OI/Funding, or Telegram eligibility.
 
 import { analyzeAbsorptionFromPointsAndOrderbook, analyzeReclaimFromPoints } from './_price-history-signals.mjs';
 
@@ -65,6 +65,8 @@ export function buildPriceHistoryContext(symbol, history) {
   const insufficient = reclaim.status === 'INSUFFICIENT_HISTORY' || absorption.status === 'INSUFFICIENT_HISTORY';
   const reclaimState = reclaimStatus(reclaim);
   const absorptionState = absorptionStatus(absorption);
+  const canSupportScoring = reclaimState === 'CONFIRMED'
+    || (absorptionState === 'CONFIRMED' && historyConfidence(absorption) === 'medium');
   const blockers = [
     'history-only absorption does not provide flow, open interest, or funding',
     'strict rolling absorption unavailable',
@@ -86,7 +88,7 @@ export function buildPriceHistoryContext(symbol, history) {
     },
     blockers: Array.from(new Set(blockers)),
     source: 'price_history_db',
-    affectsServerGate: false,
+    affectsServerGate: canSupportScoring,
     affectsTelegram: false,
   };
 }
@@ -112,6 +114,15 @@ export async function loadPriceHistoryContextsForCandidates(candidates, listRece
   return contexts;
 }
 
+export function applyPriceHistoryContextsToRows(rows, contexts) {
+  const contextMap = contexts instanceof Map ? contexts : new Map();
+  if (!Array.isArray(rows) || contextMap.size === 0) return Array.isArray(rows) ? rows : [];
+  return rows.map((row) => {
+    const symbol = radarPriceHistoryBaseSymbol(row?.symbol);
+    const context = symbol ? contextMap.get(symbol) : null;
+    return context ? { ...row, priceHistoryContext: context } : row;
+  });
+}
 export function attachPriceHistoryContextsToRadarCandidates(radar, contexts) {
   const candidates = Array.isArray(radar?.candidates) ? radar.candidates : [];
   const contextMap = contexts instanceof Map ? contexts : new Map();
