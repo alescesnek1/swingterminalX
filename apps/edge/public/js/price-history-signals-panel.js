@@ -61,6 +61,25 @@ export function priceHistorySignalRenderModel(apiResponse, symbolFallback) {
   const absorption = safeSignalBlock(r.absorption);
   const orderbookMode = typeof r.orderbookMode === 'string' && r.orderbookMode ? r.orderbookMode : 'external_browser_required';
   const orderbookReason = typeof r.orderbookReason === 'string' ? r.orderbookReason : '';
+  const orderbookUsed = r.orderbookUsed === true;
+  const orderbookSource = typeof r.orderbookSource === 'string' && r.orderbookSource ? r.orderbookSource : null;
+
+  // Honest orderbook label (display only — no analysis/confidence change).
+  // When the browser-side merge succeeds (price-history-orderbook.js sets
+  // orderbookSource:'browser_api_orderbook' + orderbookUsed:true) a REAL live
+  // book was applied, so the panel must never still read "External browser
+  // required" — that stale label plus orderbookReason:'OK' produced the
+  // misleading "External browser required (OK)". A live book is labelled as
+  // such; the "external browser required" wording is kept ONLY for the true
+  // history-only fallback where no book was used.
+  let orderbookModeText;
+  if (orderbookSource === 'browser_api_orderbook') {
+    orderbookModeText = 'Browser live book';
+  } else if (orderbookUsed) {
+    orderbookModeText = orderbookMode === 'server' || orderbookSource === 'server' ? 'Server orderbook' : 'Browser live book';
+  } else {
+    orderbookModeText = orderbookMode === 'server' ? 'Server orderbook' : 'External browser required';
+  }
 
   return {
     ok: true,
@@ -73,8 +92,8 @@ export function priceHistorySignalRenderModel(apiResponse, symbolFallback) {
         : `${points} history point${points === 1 ? '' : 's'}`,
     reclaim,
     absorption,
-    orderbookUsed: r.orderbookUsed === true,
-    orderbookModeText: orderbookMode === 'server' ? 'Server orderbook' : 'External browser required',
+    orderbookUsed,
+    orderbookModeText,
     orderbookReasonText: orderbookReason,
   };
 }

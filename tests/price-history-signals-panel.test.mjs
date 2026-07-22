@@ -40,6 +40,70 @@ test('ok:true response with healthy reclaim/absorption shapes cleanly', () => {
   assertNoTradingWords(m);
 });
 
+test('browser-orderbook merge success labels a live book, not "External browser required"', () => {
+  // Shape produced by combinePriceHistorySignalsWithOrderbook after a
+  // successful browser-side /api/orderbook merge: orderbookMode is still the
+  // server's original 'external_browser_required' (the merge spreads it
+  // through), but orderbookSource/orderbookUsed prove a real book was applied.
+  const merged = {
+    ok: true,
+    symbol: 'ERA',
+    points: 17,
+    orderbookMode: 'external_browser_required',
+    orderbookUsed: true,
+    orderbookSource: 'browser_api_orderbook',
+    orderbookReason: 'OK',
+    reclaim: { status: 'OK', signal: 'NO_RECLAIM', reason: 'below level', confidence: 'low' },
+    absorption: { status: 'OK', signal: 'BULLISH_ABSORPTION', reason: 'bid support', confidence: 'medium' },
+  };
+  const m = priceHistorySignalRenderModel(merged);
+  assert.notEqual(m.orderbookModeText, 'External browser required');
+  assert.match(m.orderbookModeText, /browser live book/i);
+  assert.equal(m.orderbookUsed, true);
+  // The reason still reads 'OK' — but paired with the live-book label the
+  // combined "Browser live book (OK)" is now honest, not misleading.
+  assert.equal(m.orderbookReasonText, 'OK');
+  assertNoTradingWords(m);
+});
+
+test('a true history-only fallback still reads "External browser required" / ORDERBOOK_UNAVAILABLE', () => {
+  // No usable browser book: combine keeps orderbookUsed:false, no source, and
+  // the baseline ORDERBOOK_UNAVAILABLE reason. The label must stay the honest
+  // "external browser required" fallback wording.
+  const historyOnly = {
+    ok: true,
+    symbol: 'LIT',
+    points: 17,
+    orderbookMode: 'external_browser_required',
+    orderbookUsed: false,
+    orderbookReason: 'ORDERBOOK_UNAVAILABLE',
+    reclaim: { status: 'OK', signal: 'NO_RECLAIM', reason: 'below level', confidence: 'low' },
+    absorption: { status: 'OK', signal: 'NO_ABSORPTION', reason: 'no book', confidence: 'low' },
+  };
+  const m = priceHistorySignalRenderModel(historyOnly);
+  assert.equal(m.orderbookModeText, 'External browser required');
+  assert.equal(m.orderbookReasonText, 'ORDERBOOK_UNAVAILABLE');
+  assert.equal(m.orderbookUsed, false);
+  assertNoTradingWords(m);
+});
+
+test('a server-side book is still labelled a server orderbook, not a browser book', () => {
+  const serverBook = {
+    ok: true,
+    symbol: 'BTC',
+    points: 20,
+    orderbookMode: 'server',
+    orderbookUsed: true,
+    orderbookSource: 'server',
+    orderbookReason: 'OK',
+    reclaim: { status: 'OK', signal: 'NO_RECLAIM', reason: '', confidence: 'low' },
+    absorption: { status: 'OK', signal: 'NO_ABSORPTION', reason: '', confidence: 'low' },
+  };
+  const m = priceHistorySignalRenderModel(serverBook);
+  assert.equal(m.orderbookModeText, 'Server orderbook');
+  assertNoTradingWords(m);
+});
+
 test('insufficient history fails closed to UNKNOWN, never a directional guess', () => {
   const api = {
     ok: true,
