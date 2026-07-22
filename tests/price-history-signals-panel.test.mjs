@@ -59,7 +59,9 @@ test('ok:false response degrades to an explicit error model, not a crash', () =>
   const m = priceHistorySignalRenderModel({ ok: false, reason: 'DB_UNAVAILABLE' });
   assert.equal(m.ok, false);
   assert.equal(m.error, true);
-  assert.equal(m.statusText, 'Insufficient history');
+  assert.equal(m.status, 'DB_UNAVAILABLE');
+  assert.equal(m.statusText, 'Unavailable');
+  assert.equal(m.reasonText, 'Price-history database unavailable in this environment.');
   assert.equal(m.reclaim.signal, 'UNKNOWN');
   assertNoTradingWords(m);
 });
@@ -108,4 +110,18 @@ test('window.__priceHistorySignalsPanel is exposed for the plain-script terminal
   } finally {
     globalThis.window = originalWindow;
   }
+});
+
+
+test('NO_HISTORY response stays successful and renders as waiting/degraded text', () => {
+  const m = priceHistorySignalRenderModel({
+    ok: true, status: 'NO_HISTORY', symbol: 'HOME', points: 0,
+    reclaim: { status: 'INSUFFICIENT_HISTORY', signal: 'UNKNOWN', reason: 'No scheduled history yet.' },
+    absorption: { status: 'INSUFFICIENT_HISTORY', signal: 'UNKNOWN', reason: 'No scheduled history yet.' },
+    orderbookUsed: false, orderbookReason: 'NO_HISTORY',
+  });
+  assert.equal(m.ok, true);
+  assert.equal(m.status, 'NO_HISTORY');
+  assert.equal(m.error, false);
+  assert.equal(m.statusText, 'No scheduled history yet.');
 });

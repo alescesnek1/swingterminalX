@@ -48,9 +48,48 @@ test('missing symbol returns 400 and database unavailable returns 503', async ()
   assert.equal(res.status, 503); assert.deepEqual(await res.json(), { ok: false, reason: 'DB_UNAVAILABLE' });
 });
 
+test('valid admin request with no stored points returns 200 NO_HISTORY without probing orderbook', async () => {
+  let orderbookCalled = false;
+  const res = await call('GET', {
+    query: 'symbol=home',
+    reads: { listRecentPricePoints: async () => ({ ok: true, points: [] }) },
+    fetchOrderbookSummary: async () => { orderbookCalled = true; return { ok: true }; },
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.symbol, 'HOME');
+  assert.equal(body.status, 'NO_HISTORY');
+  assert.equal(body.points, 0);
+  assert.equal(body.orderbookReason, 'NO_HISTORY');
+  assert.equal(body.reclaim.status, 'INSUFFICIENT_HISTORY');
+  assert.equal(body.reclaim.reason, 'No scheduled history yet.');
+  assert.equal(body.absorption.status, 'INSUFFICIENT_HISTORY');
+  assert.equal(body.absorption.reason, 'No scheduled history yet.');
+  assert.equal(orderbookCalled, false);
+});
+
+test('valid admin request with short history returns 200 INSUFFICIENT_HISTORY without probing orderbook', async () => {
+  let orderbookCalled = false;
+  const res = await call('GET', {
+    query: 'symbol=home',
+    reads: { listRecentPricePoints: async () => ({ ok: true, points: POINTS.slice(0, 2) }) },
+    fetchOrderbookSummary: async () => { orderbookCalled = true; return { ok: true }; },
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.status, 'INSUFFICIENT_HISTORY');
+  assert.equal(body.points, 2);
+  assert.equal(body.orderbookReason, 'INSUFFICIENT_HISTORY');
+  assert.equal(body.reclaim.status, 'INSUFFICIENT_HISTORY');
+  assert.equal(body.absorption.status, 'INSUFFICIENT_HISTORY');
+  assert.equal(orderbookCalled, false);
+});
+
 test('success without orderbook still works, bounds input, and reports a stable orderbookReason', async () => {
   let captured;
-  const res = await call('GET', { query: 'symbol=btc&limit=999999&lookback=999999&confirmations=999', reads: { listRecentPricePoints: async (args) => { captured = args; return { ok: true, points: POINTS }; } } });
+  const res = await call('GET', { query: 'symbol=btc&limit=999999&lookback=999999', reads: { listRecentPricePoints: async (args) => { captured = args; return { ok: true, points: POINTS }; } } });
   assert.equal(res.status, 200); assert.deepEqual(captured, { symbol: 'BTC', limit: 200 });
   const body = await res.json();
   assert.equal(body.symbol, 'BTC'); assert.equal(body.points, POINTS.length);

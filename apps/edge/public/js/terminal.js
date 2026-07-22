@@ -5560,18 +5560,226 @@ async function refreshAdminPriceHistorySignals() {
           continue;
         }
         if (!r.ok) {
-          rows.push(_renderAdminPriceHistoryRow(helpers.errorModel('Could not load ' + symbol + ' signals.')));
+          let errorBody = null;
+          try { errorBody = await r.json(); } catch { /* preserve FETCH_ERROR for a non-JSON response */ }
+          const reason = errorBody && errorBody.reason === 'DB_UNAVAILABLE' ? 'DB_UNAVAILABLE' : 'FETCH_ERROR';
+          rows.push(_renderAdminPriceHistoryRow(helpers.toRenderModel({ ok: false, reason }, symbol)));
           continue;
         }
-        const json = await r.json();
+        let json;
+        try { json = await r.json(); } catch {
+          rows.push(_renderAdminPriceHistoryRow(helpers.errorModel('Malformed response for ' + symbol + '.', 'MALFORMED_RESPONSE')));
+          continue;
+        }
         rows.push(_renderAdminPriceHistoryRow(helpers.toRenderModel(json, symbol)));
-      } catch {
-        rows.push(_renderAdminPriceHistoryRow(helpers.errorModel('Could not load ' + symbol + ' signals.')));
+      } catch (err) {
+        console.warn('[Cockpit] price-history fetch failed:', err && err.name ? err.name : 'network error');
+        rows.push(_renderAdminPriceHistoryRow(helpers.errorModel('Could not load ' + symbol + ' signals.', 'FETCH_ERROR')));
       }
     }
     body.innerHTML = rows.join('');
-  } catch {
-    body.innerHTML = _renderAdminPriceHistoryRow(helpers.errorModel('Could not load price-history diagnostics.'));
+  } catch (err) {
+    console.warn('[Cockpit] price-history diagnostics refresh failed:', err && err.name ? err.name : 'network error');
+    body.innerHTML = _renderAdminPriceHistoryRow(helpers.errorModel('Could not load price-history diagnostics.', 'FETCH_ERROR'));
+  }
+}
+
+// ── ADMIN PRICE-HISTORY SIGNALS — RADAR-facing diagnostics ──
+// An admin-only, read-only, GET-only price-history reclaim/absorption
+// section rendered INSIDE the RADAR Focus Candidate card (see
+// _radarPriceHistorySectionHtml, emitted by _renderTradingRadar). It
+// follows the currently-FOCUSED candidate — not just an explicitly-clicked
+// one — because the focus card itself is driven by
+// `_picked || radar.selected || candidates[0]`, so a symbol is in focus the
+// moment the RADAR tab has data, before any click. The earlier version keyed
+// off Fleet.radarSelectedSymbol (null until an explicit click) and so never
+// fetched on tab open — that was the zero-requests bug.
+//
+// Lifecycle: _refreshRadarPriceHistorySignals() runs at the end of every
+// renderTradingRadarPanel() (tab open, candidate click, filter change, and
+// each Fleet poll re-render). A per-base cache means it fetches ONCE per
+// focused base symbol and merely repaints from cache on subsequent
+// re-renders — so poll ticks never spam the endpoint. It only fetches when
+// the focused base changes (new focus / user selection) or on first load.
+
+// RADAR candidate symbols are venue PAIRS (e.g. "BTCUSDT"/"ERAUSDC") —
+// normalizeScannerSymbol() in scripts/radar/trading-radar.mjs adds a
+// USDT/USDC quote server-side. The price-history DB stores BASE symbols
+// ("BTC"/"ERA" — see normalizePricePoint in
+// netlify/functions/_price-history.mjs). Querying with the raw pair would
+// silently return an empty result for nearly every coin, so the quote
+// suffix is stripped here. If no known quote suffix is present the symbol is
+// already a base (many DEX-listed assets), so it is used as-is not dropped.
+// Canonical pair->base mapping lives in the pure, unit-tested module
+// (window.__priceHistorySignalsPanel.baseSymbolFromPair). This wrapper uses it
+// when available and keeps a minimal inline fallback so the section still
+// resolves a base even if the module ever fails to load.
+const _RADAR_QUOTE_SUFFIXES = ['USDT', 'USDC', 'FDUSD', 'BUSD', 'TUSD', 'USD'];
+function _baseSymbolFromRadarPair(pairSymbol) {
+  const helpers = _phsHelpers();
+  if (helpers && typeof helpers.baseSymbolFromPair === 'function') return helpers.baseSymbolFromPair(pairSymbol);
+  const sym = typeof pairSymbol === 'string' ? pairSymbol.trim().toUpperCase().replace(/[^A-Z0-9]/g, '') : '';
+  if (!sym) return null;
+  for (const quote of _RADAR_QUOTE_SUFFIXES) {
+    if (sym.endsWith(quote) && sym.length > quote.length) return sym.slice(0, -quote.length);
+  }
+  return sym;
+}
+
+// Per-focused-base cache so repeated renders (Fleet polls, filter changes)
+// repaint from memory instead of re-fetching. `loadingBase` dedupes
+// concurrent fetches for the same base.
+const _radarPhCache = { base: null, model: null, loadingBase: null };
+
+function _radarPhToneColor(tone) {
+  if (tone === 'positive') return '#3ddc97';
+  if (tone === 'degraded') return '#ffaa00';
+  if (tone === 'error') return '#ff6b6b';
+  if (tone === 'neutral') return '#cbd5e1';
+  return '#8899aa'; // waiting / unknown
+}
+
+const _RADAR_PH_LABEL = '<div style="font-size:11px; letter-spacing:.09em; color:#f6f7fb; font-weight:800; text-transform:uppercase;">PRICE HISTORY SIGNALS <span style="color:#ffd166;">- ADMIN - HISTORY-BASED</span></div>';
+const _RADAR_PH_DB_UNAVAILABLE_REASON = 'Price-history database unavailable in this environment.';
+
+function _radarPhStatusFromModel(model) {
+  if (!model) return 'loading';
+  if (model.status === 'DB_UNAVAILABLE') return 'unavailable';
+  if (model.error === true) {
+    if (model.reclaimState === 'AUTH_REQUIRED' || model.absorptionState === 'AUTH_REQUIRED') return 'auth';
+    return 'error';
+  }
+  if (model.status === 'NO_HISTORY') return 'no-history';
+  if (model.status === 'INSUFFICIENT_HISTORY') return 'insufficient-history';
+  return 'loaded';
+}
+
+function _radarPhStatusLabel(model) {
+  const status = _radarPhStatusFromModel(model);
+  if (status === 'unavailable') return 'unavailable';
+  if (status === 'auth') return 'auth required';
+  if (status === 'error') return 'fetch error';
+  if (status === 'no-history') return 'no history';
+  if (status === 'insufficient-history') return 'insufficient history';
+  if (status === 'loading') return 'loading';
+  return 'loaded';
+}
+
+function _radarPhInnerHtml(focusBase) {
+  const helpers = _phsHelpers();
+  if (!focusBase) {
+    return _RADAR_PH_LABEL
+      + '<div style="font-size:12px; color:#f6f7fb; margin-top:5px;"><b>Focused:</b> no RADAR symbol yet</div>'
+      + '<div style="font-size:12px; color:#ffd166; margin-top:2px;"><b>Status:</b> fetch not started</div>';
+  }
+  if (!helpers || _radarPhCache.base !== focusBase || !_radarPhCache.model) {
+    return _RADAR_PH_LABEL
+      + '<div style="font-size:12px; color:#f6f7fb; margin-top:5px;"><b>Focused:</b> ' + _esc(focusBase) + '</div>'
+      + '<div style="font-size:12px; color:#ffd166; margin-top:2px;"><b>Status:</b> ' + (helpers ? 'loading' : 'module unavailable') + '</div>';
+  }
+  const m = _radarPhCache.model;
+  const rc = m.reclaim || {};
+  const ab = m.absorption || {};
+  const systemUnavailable = m.status === 'DB_UNAVAILABLE';
+  const rcTone = helpers.stateTone(m.reclaimState);
+  const abTone = helpers.stateTone(m.absorptionState);
+  const rcLabel = systemUnavailable ? 'Unknown' : helpers.stateLabel(m.reclaimState);
+  const abLabel = systemUnavailable ? 'Unknown' : helpers.stateLabel(m.absorptionState);
+  const obDegraded = systemUnavailable || abTone === 'degraded' || m.orderbookUsed !== true;
+  const historyReason = m.status === 'NO_HISTORY' ? 'No scheduled history yet.' : (m.status === 'INSUFFICIENT_HISTORY' ? 'Insufficient history.' : '');
+  const obColor = systemUnavailable ? '#8899aa' : (m.orderbookUsed === true ? '#3ddc97' : '#ffaa00');
+  return _RADAR_PH_LABEL
+    + '<div style="font-size:12px; margin-top:5px; display:flex; flex-wrap:wrap; gap:3px 14px; color:#f6f7fb;">'
+    + '<span><b style="color:#ffd166;">Focused</b> ' + _esc(focusBase) + '</span>'
+    + '<span><b style="color:#ffd166;">Status</b> ' + _esc(_radarPhStatusLabel(m)) + '</span>'
+    + '</div>'
+    + (systemUnavailable || m.reasonText || historyReason ? '<div style="font-size:12px; color:#ffd166; margin-top:3px;"><b>Reason:</b> ' + _esc(systemUnavailable ? _RADAR_PH_DB_UNAVAILABLE_REASON : (m.reasonText || historyReason)) + '</div>' : '')
+    + '<div style="font-size:12px; margin-top:4px;"><b style="color:#ffd166;">Reclaim:</b> '
+    + '<b style="color:' + _radarPhToneColor(rcTone) + ';">' + _esc(rcLabel) + '</b>'
+    + (systemUnavailable ? '' : (rc.reason ? ' <span style="color:var(--txt2);">- ' + _esc(rc.reason) + '</span>' : '')) + '</div>'
+    + '<div style="font-size:12px; margin-top:2px;"><b style="color:#ffd166;">Absorption:</b> '
+    + '<b style="color:' + _radarPhToneColor(abTone) + ';">' + _esc(abLabel) + '</b>'
+    + (systemUnavailable ? '' : (ab.reason ? ' <span style="color:var(--txt2);">- ' + _esc(ab.reason) + '</span>' : '')) + '</div>'
+    + '<div style="font-size:12px; margin-top:2px;"><b style="color:#ffd166;">Orderbook:</b> '
+    + '<span style="color:' + obColor + ';">' + _esc(systemUnavailable ? 'Unknown' : (m.orderbookModeText || 'Unknown'))
+    + (systemUnavailable || !m.orderbookReasonText ? '' : ' (' + _esc(m.orderbookReasonText) + ')')
+    + (obDegraded ? '' : '') + '</span></div>';
+}
+
+function _radarPriceHistorySectionHtml(selectedCandidate) {
+  if (!window.__isAdmin) return '';
+  const focusBase = selectedCandidate ? _baseSymbolFromRadarPair(selectedCandidate.symbol) : null;
+  return '<div class="radar-decision-card radar-ph-signals" id="radar-ph-signals-slot"'
+    + ' data-ph-debug="mounted" data-ph-admin="true" data-ph-pair="' + _esc(selectedCandidate && selectedCandidate.symbol || '') + '"'
+    + ' data-ph-base="' + _esc(focusBase || '') + '" data-ph-status="mounted"'
+    + ' style="display:block !important; min-height:66px; border-radius:8px; padding:10px 12px; background:rgba(255,193,7,0.08); border:2px solid #ffd166; margin-bottom:10px;">'
+    + _radarPhInnerHtml(focusBase)
+    + '</div>';
+}
+
+function _radarPhSetResult(base, model) {
+  _radarPhCache.base = base;
+  _radarPhCache.model = model;
+  const slot = document.getElementById('radar-ph-signals-slot');
+  if (slot && (slot.getAttribute('data-ph-base') || '') === base) {
+    slot.setAttribute('data-ph-status', _radarPhStatusFromModel(model));
+    slot.innerHTML = _radarPhInnerHtml(base);
+  }
+}
+
+async function _refreshRadarPriceHistorySignals() {
+  if (!window.__isAdmin) return;
+  const slot = document.getElementById('radar-ph-signals-slot');
+  if (!slot) return;
+  const base = slot.getAttribute('data-ph-base') || '';
+  if (!base) {
+    slot.setAttribute('data-ph-status', 'waiting');
+    slot.innerHTML = _radarPhInnerHtml(base);
+    return;
+  }
+  if (_radarPhCache.base === base && _radarPhCache.model) {
+    slot.setAttribute('data-ph-status', _radarPhStatusFromModel(_radarPhCache.model));
+    slot.innerHTML = _radarPhInnerHtml(base);
+    return;
+  }
+  if (_radarPhCache.loadingBase === base) return;
+  const helpers = _phsHelpers();
+  if (!helpers) {
+    slot.setAttribute('data-ph-status', 'error');
+    slot.innerHTML = _radarPhInnerHtml(base);
+    return;
+  }
+  _radarPhCache.loadingBase = base;
+  slot.setAttribute('data-ph-status', 'loading');
+  slot.innerHTML = _radarPhInnerHtml(base);
+  try {
+    const authHeaders = await _getAuthHeaders();
+    if (!authHeaders.Authorization) {
+      _radarPhSetResult(base, helpers.radarErrorModel('Sign in as an admin to view price-history diagnostics.', 'AUTH_REQUIRED'));
+      return;
+    }
+    const r = await fetch(ADMIN_PRICE_HISTORY_SIGNALS_ENDPOINT + '?symbol=' + encodeURIComponent(base), {
+      headers: { 'Accept': 'application/json', ...authHeaders },
+    });
+    if (r.status === 401 || r.status === 403) {
+      _radarPhSetResult(base, helpers.radarErrorModel('Not authorized for admin diagnostics.', 'AUTH_REQUIRED'));
+      return;
+    }
+    if (!r.ok) {
+      let errorBody = null;
+      try { errorBody = await r.json(); } catch { /* preserve FETCH_ERROR for a non-JSON transport failure */ }
+      const reason = errorBody && errorBody.reason === 'DB_UNAVAILABLE' ? 'DB_UNAVAILABLE' : 'FETCH_ERROR';
+      _radarPhSetResult(base, helpers.toRadarRenderModel({ ok: false, reason }, base));
+      return;
+    }
+    let json;
+    try { json = await r.json(); } catch { _radarPhSetResult(base, helpers.radarErrorModel('Malformed response for ' + base + '.', 'MALFORMED_RESPONSE')); return; }
+    _radarPhSetResult(base, helpers.toRadarRenderModel(json, base));
+  } catch (err) {
+    console.warn('[RADAR] price-history fetch failed:', err && err.name ? err.name : 'network error');
+    _radarPhSetResult(base, helpers.radarErrorModel('Could not load ' + base + ' price-history diagnostics.', 'FETCH_ERROR'));
+  } finally {
+    if (_radarPhCache.loadingBase === base) _radarPhCache.loadingBase = null;
   }
 }
 
@@ -9026,6 +9234,7 @@ function _renderTradingRadar(radar, esc) {
           </div>
         </div>
       </div>
+      ${_radarPriceHistorySectionHtml(selected)}
       <!-- Phase C.3: compact, decision-first visible sections. All raw/technical
            panels are moved into the collapsed "Advanced diagnostics" block below
            so the operator reads state in one screen without scrolling debug rows. -->
@@ -9326,7 +9535,9 @@ window._radarSelect = function(sym) {
     // Fleet.data, which is replaced wholesale on every poll — that swap is what
     // used to silently drop the selection before Cockpit could read it).
     Fleet.radarSelectedSymbol = c.symbol;
-    renderTradingRadarPanel();
+    renderTradingRadarPanel();  // re-render moves the focus card (and its
+    // price-history section) to this symbol; renderTradingRadarPanel() then
+    // triggers _refreshRadarPriceHistorySignals() for the new focus base.
   }
 };
 
@@ -9335,6 +9546,11 @@ function renderTradingRadarPanel() {
   if (!root) return;
   const radar = Fleet && Fleet.data ? Fleet.data.tradingRadar : null;
   root.innerHTML = _renderTradingRadar(radar, _esc);
+  // Populate the admin price-history section that _renderTradingRadar just
+  // emitted inside the Focus Candidate card. Cache-backed: fetches once per
+  // focused base symbol, repaints from memory on every other re-render, so
+  // Fleet poll ticks never re-hit the endpoint. Admin-only, GET-only.
+  try { _refreshRadarPriceHistorySignals(); } catch (e) { console.warn('[RADAR] price-history signal refresh failed:', e && e.message); }
 }
 
 // Position rows to render, with stale/duplicate "open" rows removed (spec 3). A

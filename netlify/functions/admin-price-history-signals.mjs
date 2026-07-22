@@ -133,6 +133,39 @@ export async function runAdminPriceHistorySignals(req, deps = {}) {
     }
   }
 
+  const options = { lookback, confirmations };
+  const preliminaryReclaim = analyzeReclaimFromPoints({ symbol, points: history.points, options });
+  const preliminaryAbsorption = analyzeAbsorptionFromPointsAndOrderbook({ symbol, points: history.points, orderbook: null, options });
+  const historyStatus = history.points.length === 0
+    ? 'NO_HISTORY'
+    : (preliminaryReclaim.status === 'INSUFFICIENT_HISTORY' || preliminaryAbsorption.status === 'INSUFFICIENT_HISTORY')
+      ? 'INSUFFICIENT_HISTORY' : null;
+  if (historyStatus) {
+    const noHistory = historyStatus === 'NO_HISTORY';
+    const reason = noHistory ? 'No scheduled history yet.' : 'Insufficient history.';
+    const reclaim = noHistory
+      ? { ...preliminaryReclaim, status: 'INSUFFICIENT_HISTORY', reason }
+      : preliminaryReclaim;
+    const absorption = noHistory
+      ? { ...preliminaryAbsorption, status: 'INSUFFICIENT_HISTORY', reason }
+      : preliminaryAbsorption;
+    return json(req, {
+      ok: true,
+      symbol,
+      status: historyStatus,
+      points: history.points.length,
+      orderbookUsed: false,
+      orderbookReason: noHistory ? 'NO_HISTORY' : 'INSUFFICIENT_HISTORY',
+      orderbookBridgeReason: null,
+      orderbookFallbackReason: null,
+      orderbookSource: null,
+      serverOrderbookAvailable: false,
+      orderbookMode: 'external_browser_required',
+      reclaim,
+      absorption,
+    });
+  }
+
   let orderbookUsed = false;
   let orderbookReason = 'ORDERBOOK_CLIENT_UNAVAILABLE';
   let orderbookBridgeReason = null;
@@ -229,12 +262,12 @@ export async function runAdminPriceHistorySignals(req, deps = {}) {
     }
   }
 
-  const options = { lookback, confirmations };
   const reclaim = analyzeReclaimFromPoints({ symbol, points: history.points, options });
   const absorption = analyzeAbsorptionFromPointsAndOrderbook({ symbol, points: history.points, orderbook, options });
   return json(req, {
     ok: true,
     symbol,
+    status: 'OK',
     points: history.points.length,
     orderbookUsed,
     orderbookReason,

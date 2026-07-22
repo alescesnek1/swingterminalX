@@ -495,6 +495,7 @@ email allowlist (§9), not a billing tier.
       failure (unauth, upstream down, invalid pair) → the endpoint still
       returns 200 with `orderbookUsed:false` and a stable reason, falling
       back to a history-only read.
+    - Authenticated RADAR wiring is now visible and cached per focused base pair; `DB_UNAVAILABLE` is rendered as an explicit degraded/unavailable status with unknown signal lines, while HTTP 200 `NO_HISTORY` / `INSUFFICIENT_HISTORY` remain waiting states. Generic HTTP/network failures remain `FETCH_ERROR`; no trading gates or alert paths are touched.
     - No trading, RADAR, alert, Telegram, or Supabase-auth behavior changed.
   - **Scheduled price-history collection (LOCAL, UNPUSHED, branch
     `feat/price-history-scheduler`) — production-risk-reviewed, not yet

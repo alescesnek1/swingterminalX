@@ -33,3 +33,7 @@ book feeds `analyzeAbsorptionFromPointsAndOrderbook`; on any failure
 (unauthenticated, upstream down, invalid pair) the endpoint still returns
 200 with `orderbookUsed:false` and a stable reason, falling back to a
 history-only read. Orderbook values never affect RADAR gates or alerts.
+
+## Signal availability states
+
+`/api/admin-price-history-signals` keeps a real price-history store failure as HTTP 503 with `reason:'DB_UNAVAILABLE'`; the RADAR panel renders this as `Status: unavailable`, shows the database-environment reason, and keeps reclaim, absorption, and orderbook as `Unknown`. A valid admin read with no rows returns HTTP 200 `status:'NO_HISTORY'`; a valid read with too few points returns HTTP 200 `status:'INSUFFICIENT_HISTORY'`. Both are waiting/degraded states, not transport errors. Generic 5xx/network failures remain `FETCH_ERROR`, while malformed bodies remain `MALFORMED_RESPONSE`.
