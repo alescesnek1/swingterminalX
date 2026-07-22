@@ -5738,6 +5738,70 @@ function _radarPhReadinessHtml(model) {
     + '</div>';
 }
 
+// Source-clarifying tooltip suffix for the RADAR table's Absorb/Reclaim
+// cells. Those columns show the MARKET structural reclaim / STRICT rolling
+// absorption. The separate, server-owned price-history read (which can add to
+// SETUP) is a different source, so the tooltip names the price-history status
+// explicitly rather than letting the operator assume the cell covers both.
+// Returns '' when the candidate has no backend price-history context.
+function _radarPhSourceTipSuffix(candidate, kind) {
+  const helpers = _phsHelpers();
+  if (!helpers || typeof helpers.backendModel !== 'function' || !candidate) return '';
+  const m = helpers.backendModel(candidate);
+  if (!m.present) return ' · price-history read: N/A (not in top-five scored set)';
+  const vlabel = (v) => v === 'CONFIRMED' ? 'confirmed' : v === 'NOT_CONFIRMED' ? 'not confirmed' : 'unknown';
+  if (kind === 'reclaim') {
+    return ' · price-history reclaim: ' + vlabel(m.reclaim) + (m.gateReclaim ? ' (+2 setup)' : '');
+  }
+  return ' · price-history absorption: ' + vlabel(m.absorption) + ' (' + m.absorptionMode + ')' + (m.gateAbsorption ? ' (+1 setup)' : '');
+}
+
+// BACKEND price-history SCORING block for the Focus Candidate card.
+//
+// Unlike _radarPriceHistorySectionHtml (the admin-only FRONTEND advisory read
+// from a separate /api/admin-price-history-signals fetch), this block reads
+// the SERVER-owned priceHistoryContext + score-adjustment fields already
+// carried on the selected radar candidate — the ONLY price-history read that
+// actually moved SETUP_SCORE (+2 reclaim / +1 history-only absorption, capped
+// +3). It is shown to every user because the data ships with the candidate,
+// so the table's Setup number and this card can never silently disagree. When
+// the focused candidate is not one of the top-five price-history-scored
+// candidates it says so honestly rather than showing a fake/blank reading.
+// Display only: never a gate, never touches execution score or Telegram.
+function _radarBackendPriceHistoryHtml(selectedCandidate) {
+  const helpers = _phsHelpers();
+  if (!helpers || typeof helpers.backendModel !== 'function' || !selectedCandidate) return '';
+  const m = helpers.backendModel(selectedCandidate);
+  const vlabel = (v) => v === 'CONFIRMED' ? 'confirmed' : v === 'NOT_CONFIRMED' ? 'not confirmed' : 'unknown';
+  const header = '<div style="font-size:11px; letter-spacing:.09em; color:#f6f7fb; font-weight:800; text-transform:uppercase;">BACKEND PRICE-HISTORY SCORING <span style="color:#7fd0ff;">- SERVER - MOVES SETUP</span></div>';
+  const wrapOpen = (present, adj) => '<div class="radar-decision-card radar-ph-backend" data-phb-present="' + present + '"'
+    + (present ? ' data-phb-adjustment="' + adj + '"' : '')
+    + ' style="border-radius:8px; padding:9px 11px; background:rgba(127,208,255,0.06); border:1px solid rgba(127,208,255,0.35); margin-bottom:10px;">';
+  if (!m.present) {
+    return wrapOpen(false, 0) + header
+      + '<div style="font-size:12px; color:var(--txt2); margin-top:4px;">Not in the top-five price-history-scored set — this symbol\'s setup score has no price-history support (that read runs for the top five ranked candidates only).</div>'
+      + '</div>';
+  }
+  const reason = (r) => r ? ' <span style="color:var(--txt2);">- ' + _esc(r) + '</span>' : '';
+  const adjText = m.adjustment > 0 ? ('+' + m.adjustment + ' setup') : '+0 setup';
+  const adjColor = m.adjustment > 0 ? '#3ddc97' : '#8899aa';
+  return wrapOpen(true, m.adjustment) + header
+    + '<div style="font-size:12px; margin-top:5px; display:flex; flex-wrap:wrap; gap:3px 14px; color:#f6f7fb;">'
+    + '<span><b style="color:#7fd0ff;">Setup adj</b> <b style="color:' + adjColor + ';">' + _esc(adjText) + '</b></span>'
+    + '<span><b style="color:#7fd0ff;">Status</b> ' + _esc(m.status) + '</span>'
+    + '<span><b style="color:#7fd0ff;">Points</b> ' + _esc(String(m.points)) + '</span>'
+    + '</div>'
+    + '<div style="font-size:12px; margin-top:4px;"><b style="color:#7fd0ff;">Price-history reclaim:</b> '
+    + '<b style="color:' + _radarPhVerdictColor(m.reclaim) + ';">' + _esc(vlabel(m.reclaim)) + '</b>'
+    + (m.gateReclaim ? ' <span style="color:#3ddc97;">(+2)</span>' : '') + reason(m.reclaimReason) + '</div>'
+    + '<div style="font-size:12px; margin-top:2px;"><b style="color:#7fd0ff;">Price-history absorption:</b> '
+    + '<b style="color:' + _radarPhVerdictColor(m.absorption) + ';">' + _esc(vlabel(m.absorption)) + '</b>'
+    + ' <span style="color:var(--txt3); font-size:11px;">(' + _esc(m.absorptionMode) + ', ' + _esc(m.absorptionConfidence) + ')</span>'
+    + (m.gateAbsorption ? ' <span style="color:#3ddc97;">(+1)</span>' : '') + reason(m.absorptionReason) + '</div>'
+    + '<div style="font-size:11px; margin-top:5px; color:var(--txt3);">Server-owned; this is what moved the Setup score. Distinct from the advisory frontend read below. Never affects execution score or Telegram.</div>'
+    + '</div>';
+}
+
 function _radarPriceHistorySectionHtml(selectedCandidate) {
   if (!window.__isAdmin) return '';
   const focusBase = selectedCandidate ? _baseSymbolFromRadarPair(selectedCandidate.symbol) : null;
@@ -9080,14 +9144,14 @@ function _renderTradingRadar(radar, esc) {
       <td><span class="${_fleetRadarBadgeClass(v1Status)}">${esc(v1Status)}</span></td>
       <td>${(() => { const f = formatSafetyLabel(c.safetyStatus, c.safetyReason, c.safetySource, c.chain, c.contractAddress, c.safetyBasis); return `<span class="safety-pill ${f.cssClass}" title="${esc(f.tooltip)}">${esc(f.labelShort)}</span>`; })()}</td>
       <td>${esc(_fleetFmtRadarValue(c.distanceToEntryReadyScore, 0))}</td>
-      <td><b class="${_fleetRadarScoreClass(c.SETUP_SCORE ?? c.setupQualityScore)}">${esc(_fleetFmtRadarValue(c.SETUP_SCORE ?? c.setupQualityScore, 0))}</b></td>
+      <td><b class="${_fleetRadarScoreClass(c.SETUP_SCORE ?? c.setupQualityScore)}">${esc(_fleetFmtRadarValue(c.SETUP_SCORE ?? c.setupQualityScore, 0))}</b>${(() => { const h = _phsHelpers(); if (!h || typeof h.backendAdjustmentBreakdown !== 'function') return ''; const b = h.backendAdjustmentBreakdown(c); return b.adjustment > 0 ? ` <span class="radar-ph-setup-tag" title="${esc(b.summary)}">+${b.adjustment} PH</span>` : ''; })()}</td>
       <td><b>${esc(_fleetFmtRadarValue(c.EXECUTION_SCORE, 0))}</b></td>
       <td><b>${esc(_fleetFmtRadarValue(c.FINAL_CONFIDENCE ?? c.confidence, 0))}</b></td>
       <td>${pillStatus((cl.relativeDump || {}).status)}</td>
       <td>${pillStatus((cl.longFlush || {}).status)}</td>
       <td>${pillStatus((cl.stabilization || {}).status)}</td>
-      <td>${(() => { const lbl = _fleetRadarAbsorbCompact(c); const tip = (c.ABSORB_BLOCK_REASON && c.ABSORB_BLOCK_REASON !== 'none') ? c.ABSORB_BLOCK_REASON : lbl; return `<span class="${_fleetRadarCompactClass(lbl)} radar-pill--text" title="${esc(tip)}">${esc(lbl)}</span>`; })()}</td>
-      <td>${(() => { const lbl = _fleetRadarReclaimCompact(c); const missing = Array.isArray(c.RECLAIM_SOURCE_FIELDS_MISSING) ? c.RECLAIM_SOURCE_FIELDS_MISSING.slice(0, 6).join(', ') : ''; const tip = c.RECLAIM_NEXT_REQUIRED_CONDITION || missing || lbl; return `<span class="${_fleetRadarCompactClass(lbl)} radar-pill--text" title="${esc(tip)}">${esc(lbl)}</span>`; })()}</td>
+      <td>${(() => { const lbl = _fleetRadarAbsorbCompact(c); const base = (c.ABSORB_BLOCK_REASON && c.ABSORB_BLOCK_REASON !== 'none') ? c.ABSORB_BLOCK_REASON : lbl; const tip = 'Strict rolling absorption. ' + base + _radarPhSourceTipSuffix(c, 'absorption'); return `<span class="${_fleetRadarCompactClass(lbl)} radar-pill--text" title="${esc(tip)}">${esc(lbl)}</span>`; })()}</td>
+      <td>${(() => { const lbl = _fleetRadarReclaimCompact(c); const missing = Array.isArray(c.RECLAIM_SOURCE_FIELDS_MISSING) ? c.RECLAIM_SOURCE_FIELDS_MISSING.slice(0, 6).join(', ') : ''; const base = c.RECLAIM_NEXT_REQUIRED_CONDITION || missing || lbl; const tip = 'Market structural reclaim. ' + base + _radarPhSourceTipSuffix(c, 'reclaim'); return `<span class="${_fleetRadarCompactClass(lbl)} radar-pill--text" title="${esc(tip)}">${esc(lbl)}</span>`; })()}</td>
       <td>${pillStatus((cl.marketRegime || {}).status)}</td>
       <td>${(() => { const lbl = _fleetRadarMatrixEntryLabel(c, v1Status); const setup = (cl.entryVariant || {}).type; const tip = setup && setup !== lbl ? `Setup signal: ${setup}; final entry: ${lbl}` : `Final entry: ${lbl}`; return `<span title="${esc(tip)}">${esc(lbl)}</span>`; })()}</td>
       <td class="radar-zone-td">${esc(zoneText(c.ENTRY_ZONE || c.entryZone))}</td>
@@ -9311,6 +9375,7 @@ function _renderTradingRadar(radar, esc) {
           </div>
         </div>
       </div>
+      ${_radarBackendPriceHistoryHtml(selected)}
       ${_radarPriceHistorySectionHtml(selected)}
       <!-- Phase C.3: compact, decision-first visible sections. All raw/technical
            panels are moved into the collapsed "Advanced diagnostics" block below

@@ -400,6 +400,122 @@ export function radarPriceHistorySignalErrorModel(message, kind) {
   return { ...base, reclaimState: state, absorptionState: state };
 }
 
+// ─────────────────────────────────────────────────────────────
+// BACKEND price-history SCORING context (pure, no DOM/fetch).
+//
+// This is a DIFFERENT source from everything above. The models above shape
+// the FRONTEND advisory read (the admin GET /api/admin-price-history-signals
+// fetch + optional browser orderbook merge). The functions below shape the
+// SERVER-owned `priceHistoryContext` + score-adjustment fields the trading
+// radar attached to the candidate itself
+// (netlify/functions/_price-history-radar-context.mjs + scripts/radar/
+// trading-radar.mjs). That backend context is the ONLY price-history read
+// that actually moved SETUP_SCORE (+2 reclaim / +1 history-only absorption,
+// capped +3). It is attached to the top-five ranked candidates only, so a
+// focused candidate outside that set legitimately has none — which must be
+// stated honestly ('ABSENT'), never rendered as a failure or conflated with
+// the advisory frontend read.
+//
+// HARD BOUNDARIES (mirrors the backend contract, display only): this context
+// never affects EXECUTION_SCORE and never affects Telegram eligibility.
+// Missing/unknown inputs stay UNKNOWN; nothing here is a gate.
+// ─────────────────────────────────────────────────────────────
+
+const BACKEND_PH_NOTE = 'Backend price-history scoring support — the only price-history read that moves SETUP_SCORE (capped +3). Never affects EXECUTION_SCORE or Telegram.';
+
+function _phBackendState(status) {
+  return status === 'CONFIRMED' ? 'CONFIRMED' : status === 'NOT_CONFIRMED' ? 'NOT_CONFIRMED' : 'UNKNOWN';
+}
+
+/**
+ * Normalized display model for the SERVER-owned price-history scoring context
+ * carried on a radar candidate. Never throws.
+ *
+ * When the candidate carries no `priceHistoryContext` (it is not one of the
+ * top-five price-history-scored candidates) the model is explicitly ABSENT
+ * with a plain-language blocker — it is never rendered as a failed/negative
+ * reading.
+ */
+export function radarBackendPriceHistoryModel(candidate) {
+  const c = candidate && typeof candidate === 'object' ? candidate : {};
+  const ctx = c.priceHistoryContext && typeof c.priceHistoryContext === 'object' ? c.priceHistoryContext : null;
+  const adjRaw = Number(c.priceHistoryScoreAdjustment);
+  const adjustment = Number.isFinite(adjRaw) ? Math.max(0, Math.min(3, Math.round(adjRaw))) : 0;
+  const usedForScoring = c.priceHistoryUsedForScoring === true;
+  const gate = c.priceHistoryGateSupport && typeof c.priceHistoryGateSupport === 'object' ? c.priceHistoryGateSupport : {};
+  const gateReclaim = gate.reclaim === true;
+  const gateAbsorption = gate.absorption === true;
+  const gateBlockers = Array.isArray(c.priceHistoryGateBlockers) ? c.priceHistoryGateBlockers.slice(0, 8) : [];
+
+  if (!ctx) {
+    return {
+      present: false,
+      status: 'ABSENT',
+      points: 0,
+      reclaim: 'UNKNOWN',
+      reclaimReason: '',
+      absorption: 'UNKNOWN',
+      absorptionMode: null,
+      absorptionConfidence: 'unknown',
+      absorptionReason: '',
+      adjustment: 0,
+      usedForScoring: false,
+      gateReclaim: false,
+      gateAbsorption: false,
+      blockers: ['not in the top-five price-history-scored set — backend scoring support N/A for this symbol'],
+      affectsExecution: false,
+      affectsTelegram: false,
+      source: 'price_history_db',
+      note: BACKEND_PH_NOTE,
+    };
+  }
+
+  const rc = ctx.reclaim && typeof ctx.reclaim === 'object' ? ctx.reclaim : {};
+  const ab = ctx.absorption && typeof ctx.absorption === 'object' ? ctx.absorption : {};
+  const blockers = gateBlockers.length ? gateBlockers : (Array.isArray(ctx.blockers) ? ctx.blockers.slice(0, 8) : []);
+  return {
+    present: true,
+    status: typeof ctx.status === 'string' && ctx.status ? ctx.status : 'UNKNOWN',
+    points: Number.isInteger(ctx.points) ? ctx.points : 0,
+    reclaim: _phBackendState(rc.status),
+    reclaimReason: typeof rc.reason === 'string' ? rc.reason : '',
+    absorption: _phBackendState(ab.status),
+    absorptionMode: typeof ab.mode === 'string' && ab.mode ? ab.mode : 'history_only',
+    absorptionConfidence: ['low', 'medium', 'high'].includes(ab.confidence) ? ab.confidence : 'unknown',
+    absorptionReason: typeof ab.reason === 'string' ? ab.reason : '',
+    adjustment,
+    usedForScoring,
+    gateReclaim,
+    gateAbsorption,
+    blockers,
+    affectsExecution: false,
+    affectsTelegram: false,
+    source: 'price_history_db',
+    note: BACKEND_PH_NOTE,
+  };
+}
+
+/**
+ * Compact, source-labeled breakdown of the backend SETUP adjustment for a
+ * candidate — used by the RADAR table's Setup cell tag/tooltip so the +N is
+ * traceable to reclaim (+2) / history-only absorption (+1). Never throws.
+ */
+export function radarBackendPriceHistoryAdjustmentBreakdown(candidate) {
+  const m = radarBackendPriceHistoryModel(candidate);
+  const parts = [];
+  if (m.gateReclaim) parts.push('+2 price-history reclaim');
+  if (m.gateAbsorption) parts.push('+1 history-only absorption');
+  let summary;
+  if (m.adjustment > 0) {
+    summary = `+${m.adjustment} setup from price-history (${parts.join(', ') || 'capped +3'}). No effect on execution score or Telegram.`;
+  } else if (m.present) {
+    summary = 'Price-history evaluated but added nothing to setup (no confirmed reclaim / history-only absorption).';
+  } else {
+    summary = 'Not in the top-five price-history-scored set — backend setup support N/A for this symbol.';
+  }
+  return { adjustment: m.adjustment, usedForScoring: m.usedForScoring, present: m.present, parts, summary };
+}
+
 if (typeof window !== 'undefined') {
   window.__priceHistorySignalsPanel = {
     toRenderModel: priceHistorySignalRenderModel,
@@ -413,5 +529,7 @@ if (typeof window !== 'undefined') {
     toRadarRenderModel: radarPriceHistorySignalRenderModel,
     radarErrorModel: radarPriceHistorySignalErrorModel,
     readinessDecision: priceHistoryReadinessDecision,
+    backendModel: radarBackendPriceHistoryModel,
+    backendAdjustmentBreakdown: radarBackendPriceHistoryAdjustmentBreakdown,
   };
 }

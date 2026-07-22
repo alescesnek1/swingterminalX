@@ -13,12 +13,25 @@
 > `/reply` or `/admin_summary` support system** here. If you find yourself
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
-> _Current local state after this documentation correction:_ HEAD `handoff correction`
-> is **ahead of `origin/main` (`28515fd`) by `0 4`**. The three runtime commits
-> are `c26652a` (advisory frontend overlay), `3d75047` (bounded top-five backend
-> context), and `d6e047e` (max +3 setup support); `handoff correction` is the handoff-only
-> correction. Runtime safety review passed; no push or deploy occurred.
-> `stash@{0}` is preserved. The owner's next step is push approval, not code.
+> _Current local state:_ the four price-history runtime/doc commits
+> (`c26652a` advisory frontend overlay, `3d75047` bounded top-five backend
+> context, `d6e047e` max +3 setup support, `d4baac1` handoff) are pushed —
+> `origin/main` = `d4baac1`. One **new local-only** commit sits on top:
+> **RADAR price-history/orderbook UI consistency** (display-only). It surfaces
+> the *server-owned* `priceHistoryContext` + `priceHistoryScoreAdjustment` in
+> the Focus card (new "Backend price-history scoring" block) and as a `+N PH`
+> tag on the table Setup cell, and source-labels the table Absorb/Reclaim
+> tooltips — so the table Setup number, the focus card, and the advisory
+> frontend read never silently disagree. It changes **no** gate, score,
+> ENTRY_READY, Telegram, or backend behavior; it only reads fields the radar
+> already emits. Browser audit confirmed the root cause: the focus card
+> followed `radar.selected` (e.g. LITUSDT at rank #107) while backend context
+> is attached to the **top-five only**, so the two "price-history" reads
+> operated on different candidate sets. `/api/orderbook` returns **502 upstream**
+> in production (Netlify→Binance egress — the documented KNOWN CONSTRAINT), so
+> the browser-orderbook enrichment cannot succeed; the UI already shows this
+> honestly. Full suite green (1610 pass / 0 fail / 26 skipped). No push, no
+> deploy. `stash@{0}` is preserved.
 ---
 
 ## 1. How ChatGPT should behave
