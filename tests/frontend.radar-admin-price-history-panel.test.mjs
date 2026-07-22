@@ -161,3 +161,32 @@ test('the Cockpit admin panel is untouched (still BTC/ETH-only, still its own re
   assert.match(terminalJs, /ADMIN_PRICE_HISTORY_SYMBOLS\s*=\s*\[\s*['"]BTC['"]\s*,\s*['"]ETH['"]\s*\]/);
   assert.match(terminalJs, /async function refreshAdminPriceHistorySignals\(\)/);
 });
+
+// ── Price-history readiness verdict overlay (advisory, no gate change) ──
+test('the readiness verdict is rendered from the pure readinessDecision helper (no new fetch)', () => {
+  const start = terminalJs.indexOf('function _radarPhReadinessHtml');
+  const end = terminalJs.indexOf('\nfunction _radarPriceHistorySectionHtml', start);
+  assert.ok(start !== -1, '_radarPhReadinessHtml must exist');
+  const fn = terminalJs.slice(start, end === -1 ? start + 1600 : end);
+  assert.match(fn, /helpers\.readinessDecision\(model\)/, 'must derive the verdict from the pure decision helper');
+  assert.doesNotMatch(fn, /fetch\(/, 'the verdict must render from the cached model, never its own fetch');
+  assert.doesNotMatch(fn, /await\s/, 'the verdict renderer is synchronous — no network');
+});
+
+test('the readiness verdict overlay changes no server-owned gate, score, or Telegram field', () => {
+  const start = terminalJs.indexOf('function _radarPhVerdictColor');
+  const end = terminalJs.indexOf('\nfunction _radarPriceHistorySectionHtml', start);
+  const block = terminalJs.slice(start, end === -1 ? start + 2400 : end);
+  // Must not assign to any gate/score/eligibility field.
+  assert.doesNotMatch(block, /telegramEligible/, 'must never reference Telegram eligibility');
+  assert.doesNotMatch(block, /\bactionability\s*=/, 'must never set actionability');
+  assert.doesNotMatch(block, /SETUP_SCORE\s*=|EXECUTION_SCORE\s*=|scores\.\w+\s*=/, 'must never mutate a score');
+  assert.doesNotMatch(block, /\b(buy|sell|long|short)\b/i, 'no trading-action wording');
+  // The disclaimer must make the advisory boundary explicit to the operator.
+  assert.match(block, /advisory/i);
+  assert.match(block, /does not change the server entry gate or Telegram/i);
+});
+
+test('readinessDecision is exposed on the shared panel window global', () => {
+  assert.match(panelJs, /readinessDecision:\s*priceHistoryReadinessDecision/);
+});

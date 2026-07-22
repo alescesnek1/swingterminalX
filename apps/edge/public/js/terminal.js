@@ -5703,7 +5703,39 @@ function _radarPhInnerHtml(focusBase) {
     + '<div style="font-size:12px; margin-top:2px;"><b style="color:#ffd166;">Orderbook:</b> '
     + '<span style="color:' + obColor + ';">' + _esc(systemUnavailable ? 'Unknown' : (m.orderbookModeText || 'Unknown'))
     + (systemUnavailable || !m.orderbookReasonText ? '' : ' (' + _esc(m.orderbookReasonText) + ')')
-    + (obDegraded ? '' : '') + '</span></div>';
+    + (obDegraded ? '' : '') + '</span></div>'
+    + _radarPhReadinessHtml(m);
+}
+
+// Readiness VERDICT derived from the same cached price-history model (no new
+// fetch). Turns reclaim/absorption/orderbook-support into an explicit
+// analyzed verdict, but is ADVISORY ONLY: it is labeled as frontend
+// price-history readiness and never changes the server-owned entry-ready
+// gate, Telegram eligibility, or setup/execution score. Missing inputs stay
+// UNKNOWN and never read as a directional (bullish/bearish) call.
+function _radarPhVerdictColor(verdict) {
+  if (verdict === 'CONFIRMED' || verdict === 'yes') return '#3ddc97';
+  if (verdict === 'NOT_CONFIRMED' || verdict === 'no') return '#ffaa00';
+  return '#8899aa'; // UNKNOWN / unknown
+}
+function _radarPhReadinessHtml(model) {
+  const helpers = _phsHelpers();
+  if (!helpers || typeof helpers.readinessDecision !== 'function') return '';
+  if (model && model.status === 'DB_UNAVAILABLE') return '';
+  const d = helpers.readinessDecision(model);
+  const vlabel = (v) => v === 'CONFIRMED' ? 'confirmed' : v === 'NOT_CONFIRMED' ? 'not confirmed' : 'unknown';
+  const blockers = Array.isArray(d.blockers) && d.blockers.length ? d.blockers.join('; ') : 'none';
+  return '<div style="font-size:12px; margin-top:6px; padding-top:5px; border-top:1px dashed rgba(255,255,255,0.12);">'
+    + '<b style="color:#ffd166;">Readiness verdict</b> '
+    + '<span style="color:var(--txt3); font-size:11px;">(price-history' + (d.source === 'price_history+browser_orderbook' ? ' + live book' : '') + ' — advisory, does not change the server entry gate or Telegram)</span>'
+    + '<div style="margin-top:3px; display:flex; flex-wrap:wrap; gap:3px 14px;">'
+    + '<span>Reclaim <b style="color:' + _radarPhVerdictColor(d.reclaim) + ';">' + _esc(vlabel(d.reclaim)) + '</b></span>'
+    + '<span>Absorption <b style="color:' + _radarPhVerdictColor(d.absorption) + ';">' + _esc(vlabel(d.absorption)) + '</b></span>'
+    + '<span>Book support <b style="color:' + _radarPhVerdictColor(d.orderbookSupport) + ';">' + _esc(d.orderbookSupport) + '</b></span>'
+    + '<span>Confidence <b style="color:var(--txt2);">' + _esc(d.confidence) + '</b></span>'
+    + '</div>'
+    + '<div style="margin-top:2px; color:var(--txt2);"><b style="color:#ffd166;">Blocker:</b> ' + _esc(blockers) + '</div>'
+    + '</div>';
 }
 
 function _radarPriceHistorySectionHtml(selectedCandidate) {

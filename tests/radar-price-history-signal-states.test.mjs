@@ -16,6 +16,7 @@ import {
   radarBaseSymbolFromPair,
   radarPriceHistorySignalRenderModel,
   radarPriceHistorySignalErrorModel,
+  priceHistoryReadinessDecision,
 } from '../apps/edge/public/js/price-history-signals-panel.js';
 
 const FORBIDDEN_WORDS = /\b(buy|sell|long|short)\b/i;
@@ -284,4 +285,120 @@ test('degraded/unavailable orderbook states read as such, never as a healthy liv
   assert.match(radarSignalStateLabel('ORDERBOOK_DEGRADED'), /degraded/i);
   assert.match(radarSignalStateLabel('ORDERBOOK_UNAVAILABLE'), /unavailable/i);
   assert.match(radarSignalStateLabel('HISTORY_ONLY'), /history/i);
+});
+
+// ── Readiness decision (analyze reclaim/absorption into a verdict) ──
+// Advisory only: proves it never fabricates a directional read, never claims
+// flow/OI/funding, caps confidence without a book, and stays UNKNOWN on
+// missing inputs.
+
+function bookFixture({ reclaimSignal = 'BULLISH_RECLAIM', absorptionSignal = 'BULLISH_ABSORPTION', orderbookSupport = 'bid', confidence = 'high', points = 20 } = {}) {
+  return radarPriceHistorySignalRenderModel({
+    ok: true, symbol: 'BTC', points,
+    orderbookUsed: true, orderbookReason: 'OK', orderbookMode: 'external_browser_required',
+    reclaim: { status: 'OK', signal: reclaimSignal, reason: '', confidence },
+    absorption: { status: 'OK', signal: absorptionSignal, reason: '', confidence, orderbookSupport },
+  });
+}
+
+test('readiness: full positive with a live bid book confirms reclaim+absorption and flags readiness context', () => {
+  const d = priceHistoryReadinessDecision(bookFixture());
+  assert.equal(d.reclaim, 'CONFIRMED');
+  assert.equal(d.absorption, 'CONFIRMED');
+  assert.equal(d.orderbookSupport, 'yes');
+  assert.equal(d.source, 'price_history+browser_orderbook');
+  assert.equal(d.readyForExecutionContext, true);
+  assert.equal(d.blockers.length, 0);
+});
+
+test('readiness: never claims flow / OI / funding / strict absorption', () => {
+  const d = priceHistoryReadinessDecision(bookFixture());
+  for (const forbidden of ['flow', 'openInterest', 'oi', 'funding', 'strict', 'takerBuy', 'cumulativeDelta']) {
+    assert.equal(Object.prototype.hasOwnProperty.call(d, forbidden), false, forbidden);
+  }
+  // The advisory note must state it does not change server gates.
+  assert.match(d.note, /does not change/i);
+  assert.match(d.note, /ENTRY_READY/);
+  assert.match(d.note, /Telegram/);
+});
+
+test('readiness: history-only (no book) leaves orderbook support unknown, caps confidence, is not ready', () => {
+  const model = radarPriceHistorySignalRenderModel(apiFixture({
+    reclaim: { status: 'OK', signal: 'BULLISH_RECLAIM', reason: '', confidence: 'high' },
+    absorption: { status: 'OK', signal: 'BULLISH_ABSORPTION', reason: '', confidence: 'high' },
+    orderbookUsed: false,
+  }));
+  const d = priceHistoryReadinessDecision(model);
+  assert.equal(d.reclaim, 'CONFIRMED');
+  assert.equal(d.absorption, 'CONFIRMED');
+  assert.equal(d.orderbookSupport, 'unknown');
+  assert.equal(d.source, 'price_history');
+  // No book => confidence can never be 'high'.
+  assert.notEqual(d.confidence, 'high');
+  assert.equal(d.readyForExecutionContext, false, 'no live book means never ready-for-execution context');
+  assert.ok(d.blockers.some((b) => /orderbook support unknown/i.test(b)));
+});
+
+test('readiness: a contradicting (ask) book on a bullish read yields no book support and not ready', () => {
+  const d = priceHistoryReadinessDecision(bookFixture({ orderbookSupport: 'ask' }));
+  assert.equal(d.orderbookSupport, 'no');
+  assert.equal(d.readyForExecutionContext, false);
+  assert.ok(d.blockers.some((b) => /orderbook does not support/i.test(b)));
+});
+
+test('readiness: insufficient history keeps reclaim/absorption UNKNOWN, never a directional guess', () => {
+  const model = radarPriceHistorySignalRenderModel(apiFixture({
+    reclaim: { status: 'INSUFFICIENT_HISTORY', signal: 'UNKNOWN', reason: 'need >= 5', confidence: 'low' },
+    absorption: { status: 'INSUFFICIENT_HISTORY', signal: 'UNKNOWN', reason: 'need >= 8', confidence: 'low' },
+  }));
+  const d = priceHistoryReadinessDecision(model);
+  assert.equal(d.reclaim, 'UNKNOWN');
+  assert.equal(d.absorption, 'UNKNOWN');
+  assert.equal(d.readyForExecutionContext, false);
+  assert.doesNotMatch(JSON.stringify(d), FORBIDDEN_WORDS);
+});
+
+test('readiness: DB-unavailable / error models resolve to all-UNKNOWN with an explicit blocker, never throw', () => {
+  for (const bad of [
+    radarPriceHistorySignalRenderModel({ ok: false, reason: 'DB_UNAVAILABLE' }),
+    radarPriceHistorySignalErrorModel('boom', 'FETCH_ERROR'),
+    null, undefined, {}, 'nope', 42,
+  ]) {
+    assert.doesNotThrow(() => priceHistoryReadinessDecision(bad));
+    const d = priceHistoryReadinessDecision(bad);
+    assert.equal(d.reclaim, 'UNKNOWN');
+    assert.equal(d.absorption, 'UNKNOWN');
+    assert.equal(d.orderbookSupport, 'unknown');
+    assert.equal(d.readyForExecutionContext, false);
+    assert.ok(Array.isArray(d.blockers) && d.blockers.length > 0);
+  }
+});
+
+test('readiness: a clean no-reclaim / no-absorption reads as NOT_CONFIRMED, not UNKNOWN or directional', () => {
+  const model = radarPriceHistorySignalRenderModel(bookApiClean());
+  const d = priceHistoryReadinessDecision(model);
+  assert.equal(d.reclaim, 'NOT_CONFIRMED');
+  assert.equal(d.absorption, 'NOT_CONFIRMED');
+  assert.equal(d.readyForExecutionContext, false);
+  assert.doesNotMatch(JSON.stringify(d), FORBIDDEN_WORDS);
+});
+
+function bookApiClean() {
+  return {
+    ok: true, symbol: 'BTC', points: 20,
+    orderbookUsed: true, orderbookReason: 'OK', orderbookMode: 'external_browser_required',
+    reclaim: { status: 'OK', signal: 'NO_RECLAIM', reason: '', confidence: 'low' },
+    absorption: { status: 'OK', signal: 'NO_ABSORPTION', reason: '', confidence: 'low', orderbookSupport: 'neutral' },
+  };
+}
+
+test('readiness: exposed on the window global for the plain-script terminal.js', async () => {
+  const originalWindow = globalThis.window;
+  globalThis.window = {};
+  try {
+    await import(`../apps/edge/public/js/price-history-signals-panel.js?cachebust=${Date.now()}`);
+    assert.equal(typeof globalThis.window.__priceHistorySignalsPanel.readinessDecision, 'function');
+  } finally {
+    globalThis.window = originalWindow;
+  }
 });

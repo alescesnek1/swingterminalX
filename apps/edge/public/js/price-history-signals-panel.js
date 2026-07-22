@@ -25,7 +25,14 @@ function safeSignalBlock(block) {
   const signal = typeof block.signal === 'string' && block.signal ? block.signal : 'UNKNOWN';
   const reason = typeof block.reason === 'string' ? block.reason : '';
   const confidence = typeof block.confidence === 'string' && block.confidence ? block.confidence : 'low';
-  return { status, signal, reason, confidence };
+  const out = { status, signal, reason, confidence };
+  // Preserve the browser-orderbook support direction ('bid'|'ask'|'neutral')
+  // when a merge set it, so the readiness decision can read it without a
+  // second source. Additive: absent on history-only / reclaim blocks.
+  if (block.orderbookSupport === 'bid' || block.orderbookSupport === 'ask' || block.orderbookSupport === 'neutral') {
+    out.orderbookSupport = block.orderbookSupport;
+  }
+  return out;
 }
 
 /**
@@ -262,6 +269,125 @@ export function radarPriceHistorySignalRenderModel(apiResponse, symbolFallback) 
   };
 }
 
+// ─────────────────────────────────────────────────────────────
+// PRICE-HISTORY READINESS DECISION (pure, no DOM/fetch)
+//
+// Turns the already-derived reclaim/absorption STATE codes into a single,
+// normalized decision object the Focus Candidate card can display as an
+// explicit VERDICT (reclaim/absorption/orderbook-support + blockers) rather
+// than a wall of raw diagnostics — this is the "analyze, don't just show"
+// step the product wants.
+//
+// HARD BOUNDARIES (fail-closed, advisory only):
+//   • This is a FRONTEND, price-history + point-in-time-orderbook readiness
+//     read. It is NOT strict rolling absorption and NOT the server's
+//     ENTRY_READY / Telegram / SETUP / EXECUTION gate. Nothing here changes
+//     any of those — the caller renders it as a separate, labeled verdict.
+//   • Missing/insufficient inputs stay UNKNOWN. It NEVER manufactures a
+//     directional (bullish/bearish) call from missing data, and NEVER claims
+//     flow / OI / funding / strict absorption it does not have.
+//   • orderbook support is 'unknown' unless a real browser book was merged
+//     (orderbookUsed === true); confidence is capped to 'medium' without a
+//     book so a history-only read can never read as high-confidence.
+// ─────────────────────────────────────────────────────────────
+
+// reclaimState -> CONFIRMED | NOT_CONFIRMED | UNKNOWN (fail-closed: anything
+// that is not a clean detected/absent outcome stays UNKNOWN).
+function _phReclaimVerdict(reclaimState) {
+  if (reclaimState === 'ACTIVE_RECLAIM') return 'CONFIRMED';
+  if (reclaimState === 'NO_RECLAIM') return 'NOT_CONFIRMED';
+  return 'UNKNOWN';
+}
+
+// absorptionState -> CONFIRMED | NOT_CONFIRMED | UNKNOWN. Only a real detected
+// absorption confirms; a clean no-absorption is NOT_CONFIRMED; history-only,
+// degraded, insufficient, unknown, or error all stay UNKNOWN (never forced to
+// a directional read).
+function _phAbsorptionVerdict(absorptionState) {
+  if (absorptionState === 'ABSORPTION') return 'CONFIRMED';
+  if (absorptionState === 'NO_ABSORPTION') return 'NOT_CONFIRMED';
+  return 'UNKNOWN';
+}
+
+const _PH_CONFIDENCE_ORDER = ['low', 'medium', 'high'];
+function _phCapConfidence(confidence, hasBook) {
+  const c = _PH_CONFIDENCE_ORDER.includes(confidence) ? confidence : 'low';
+  // Without a live book a history-only read can never be "high".
+  if (!hasBook && c === 'high') return 'medium';
+  return c;
+}
+
+/**
+ * Normalized readiness decision from a RADAR price-history render model
+ * (the shape returned by radarPriceHistorySignalRenderModel, optionally after
+ * a browser-orderbook merge that set orderbookUsed:true). Never throws.
+ *
+ * Returns:
+ *   { reclaim, absorption, orderbookSupport, confidence, source,
+ *     readyForExecutionContext, blockers, note }
+ * where reclaim/absorption are CONFIRMED|NOT_CONFIRMED|UNKNOWN,
+ * orderbookSupport is 'yes'|'no'|'unknown', and readyForExecutionContext is a
+ * DISPLAY-ONLY readiness flag — never a gate.
+ */
+export function priceHistoryReadinessDecision(model) {
+  const m = model && typeof model === 'object' ? model : {};
+  const NOTE = 'Frontend price-history readiness — advisory only; does not change server ENTRY_READY, Telegram, or setup/execution score.';
+
+  // A hard error / unavailable model is entirely UNKNOWN.
+  if (m.ok !== true || m.error === true || m.status === 'DB_UNAVAILABLE') {
+    return {
+      reclaim: 'UNKNOWN',
+      absorption: 'UNKNOWN',
+      orderbookSupport: 'unknown',
+      confidence: 'low',
+      source: 'price_history',
+      readyForExecutionContext: false,
+      blockers: ['price-history signals unavailable'],
+      note: NOTE,
+    };
+  }
+
+  const hasBook = m.orderbookUsed === true;
+  const reclaim = _phReclaimVerdict(m.reclaimState);
+  const absorption = _phAbsorptionVerdict(m.absorptionState);
+
+  // orderbook support only exists when a real book was merged.
+  const rawSupport = m.absorption && typeof m.absorption === 'object' ? m.absorption.orderbookSupport : null;
+  let orderbookSupport;
+  if (!hasBook) orderbookSupport = 'unknown';
+  else if (rawSupport === 'bid') orderbookSupport = 'yes';
+  else if (rawSupport === 'ask' || rawSupport === 'neutral') orderbookSupport = 'no';
+  else orderbookSupport = 'unknown';
+
+  const absConfidence = m.absorption && typeof m.absorption === 'object' ? m.absorption.confidence : 'low';
+  const confidence = _phCapConfidence(absConfidence, hasBook);
+
+  const blockers = [];
+  if (reclaim !== 'CONFIRMED') blockers.push(reclaim === 'UNKNOWN' ? 'reclaim unknown (insufficient history)' : 'reclaim not confirmed');
+  if (absorption !== 'CONFIRMED') blockers.push(absorption === 'UNKNOWN' ? 'absorption unknown (needs history or live book)' : 'absorption not confirmed');
+  if (!hasBook) blockers.push('orderbook support unknown (no live book)');
+  else if (orderbookSupport !== 'yes') blockers.push('orderbook does not support the read');
+
+  // DISPLAY-ONLY readiness context: all three price-history dimensions positive
+  // AND a real book present. This is never a gate — it can never set
+  // ENTRY_READY or Telegram, which are server-owned.
+  const readyForExecutionContext = reclaim === 'CONFIRMED'
+    && absorption === 'CONFIRMED'
+    && hasBook
+    && orderbookSupport === 'yes';
+
+  return {
+    reclaim,
+    absorption,
+    orderbookSupport,
+    confidence,
+    source: hasBook ? 'price_history+browser_orderbook' : 'price_history',
+    readyForExecutionContext,
+    blockers,
+    note: NOTE,
+  };
+}
+
 /**
  * Error model for the RADAR section. `kind` distinguishes the transport
  * failure (auth vs. network/HTTP vs. malformed body) so the UI can show the
@@ -286,5 +412,6 @@ if (typeof window !== 'undefined') {
     baseSymbolFromPair: radarBaseSymbolFromPair,
     toRadarRenderModel: radarPriceHistorySignalRenderModel,
     radarErrorModel: radarPriceHistorySignalErrorModel,
+    readinessDecision: priceHistoryReadinessDecision,
   };
 }
