@@ -13,6 +13,28 @@
 > `/reply` or `/admin_summary` support system** here. If you find yourself
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
+> _Cockpit RADAR data-visibility + cache-bust + STALE clarity (2026-07-22,
+> local-only on top of `3658a74`):_ QA found the #1 reason the owner "saw no
+> visible changes" — the asset cache-bust token `?v=6h8` had NOT been bumped
+> since `ce01910`, so with `Cache-Control: max-age=3600` returning browsers kept
+> serving OLD cached `terminal.js`/panels for up to an hour. **Fix: bumped all 11
+> asset versions `?v=6h8` → `?v=6i1`** (index.html). Any future JS/CSS change MUST
+> bump this token. Also proven: the owner's "reclaim STALE" is actually the
+> **Absorb** column — strict rolling absorption reads STALE across ALL 495
+> candidates because the microstructure producer is OFF
+> (`microstructureDiagnostics.microstructureEnabled=false`) and the only static
+> snapshot is ~34d old (`staticMicrostructure.receivedAt` 2026-06-18). Reclaim
+> itself shows NOT STARTED, not STALE. Fixes (display-only, no gate/score/Telegram
+> change): (a) a visible Focus-card banner explaining strict-absorb STALE is a
+> system-wide data-source state, not a per-coin signal; (b) Absorb STALE tooltip
+> now carries the age/producer context; (c) a new Cockpit "RADAR read" insight
+> block in the import panel giving the Cockpit the SAME price-history / market-vs-
+> price-history reclaim / strict-vs-history-only absorption / backend PH setup
+> support visibility as the RADAR Focus card (reuses the shared
+> `radarBackendPriceHistoryModel`; starts no fetch). Full suite green (1640 pass /
+> 0 fail / 26 skipped). Runtime UI verify still needs the cache-bust deployed. No
+> push, no deploy.
+>
 > _Orderbook 502 audit (2026-07-22, local-only fix on top of `13dd749`):_ the
 > `/api/orderbook` 502s were **NOT** infra/egress — `/api/orderbook` is the Deno
 > **Edge** function (`apps/edge/netlify/edge-functions/orderbook.js` →

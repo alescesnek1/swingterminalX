@@ -5012,6 +5012,53 @@ function _cpTpBadge(r, i) {
   const taken = (t.partials || []).some(p => p.tpIndex === i);
   return `<button type="button" class="cp-tp ${hit ? 'cp-tp--hit' : ''} ${taken ? 'cp-tp--taken' : ''}" data-cp-tp="${i}" data-cp-id="${_esc(t.id)}" title="Mark TP${i} taken">TP${i} ${_esc(_cpFmt(lvl))}${hit ? ' ✓' : (dist != null ? ' ' + _cpPct(dist) : '')}${taken ? ' • taken' : ''}</button>`;
 }
+// Cockpit-facing RADAR data insight block. Gives the Cockpit the SAME
+// price-history / reclaim / absorption visibility the RADAR Focus card has, so
+// the operator does not have to switch tabs to understand a candidate. It is
+// pure display over fields already on the candidate object + the shared
+// backend price-history model — it starts no fetch, changes no gate/score, and
+// never sets ENTRY_READY or Telegram. Honest by construction: market reclaim,
+// price-history reclaim, strict rolling absorption, and history-only
+// absorption are labeled as the DISTINCT sources they are, and STALE is
+// explained with the same system-wide microstructure context the RADAR uses.
+function _cpRadarDataInsightHtml(f) {
+  if (!f || f.__stale) return '';
+  const radar = (window.Fleet && window.Fleet.data && window.Fleet.data.tradingRadar) || {};
+  const helpers = _phsHelpers();
+  const marketReclaim = (typeof _fleetRadarReclaimCompact === 'function') ? _fleetRadarReclaimCompact(f) : (f.RECLAIM_STATUS || 'NO DATA');
+  const strictAbsorb = (typeof _fleetRadarAbsorbCompact === 'function') ? _fleetRadarAbsorbCompact(f) : (f.STRICT_ABSORB_STATUS || 'NO DATA');
+  const staleCtx = (strictAbsorb === 'STALE' && typeof _fleetRadarStaleContextText === 'function') ? _fleetRadarStaleContextText(radar) : '';
+  const m = (helpers && typeof helpers.backendModel === 'function') ? helpers.backendModel(f) : null;
+  const vlabel = (v) => v === 'CONFIRMED' ? 'confirmed' : v === 'NOT_CONFIRMED' ? 'not confirmed' : 'unknown';
+  const setup = _fleetFmtRadarValue(f.SETUP_SCORE ?? f.setupQualityScore, 0);
+  const exec = _fleetFmtRadarValue(f.EXECUTION_SCORE, 0);
+  const conf = _fleetFmtRadarValue(f.FINAL_CONFIDENCE ?? f.confidence, 0);
+
+  // Backend price-history scoring line (server source that can move SETUP).
+  let phLine;
+  if (!m || !m.present) {
+    phLine = '<span class="cp-radar-insight__na">Not in the top-five price-history-scored set — backend setup support N/A for this symbol.</span>';
+  } else {
+    const parts = [];
+    if (m.gateReclaim) parts.push('+2 reclaim');
+    if (m.gateAbsorption) parts.push('+1 history-only absorption');
+    const adj = m.adjustment > 0 ? `<b class="cp-radar-insight__pos">+${m.adjustment} setup</b> (${parts.join(', ')})` : '<b>+0 setup</b> (evaluated, no support)';
+    phLine = `${adj} · reclaim <b>${_esc(vlabel(m.reclaim))}</b> · absorption <b>${_esc(vlabel(m.absorption))}</b> (${_esc(m.absorptionMode)}, ${_esc(m.absorptionConfidence)})`;
+  }
+
+  const blocked = f.blockedBy || f.v1BlockedBy || (Array.isArray(f.reasons) ? f.reasons[0] : '') || 'none';
+  const next = f.nextRequiredConfirmation || f.v1NextConfirmation || 'none';
+
+  return `<div class="cp-radar-insight">
+    <div class="cp-radar-insight__title">RADAR read for ${_esc(f.symbol || '--')} <span class="cp-radar-insight__ctx">from Trading RADAR · advisory, does not change server gate / Telegram</span></div>
+    <div class="cp-radar-insight__row"><span>Scores</span><b>Setup ${_esc(setup)} · Exec ${_esc(exec)} · Conf ${_esc(conf)}</b></div>
+    <div class="cp-radar-insight__row"><span>Reclaim</span><b>market: ${_esc(marketReclaim)}</b> · price-history: <b>${m ? _esc(vlabel(m.reclaim)) : 'unknown'}</b></div>
+    <div class="cp-radar-insight__row"><span>Absorption</span><b>strict rolling: ${_esc(strictAbsorb)}</b>${staleCtx ? ` <span class="cp-radar-insight__na">(${_esc(staleCtx)})</span>` : ''} · history-only: <b>${m ? _esc(vlabel(m.absorption)) : 'unknown'}</b></div>
+    <div class="cp-radar-insight__row"><span>Backend PH scoring</span><span>${phLine}</span></div>
+    <div class="cp-radar-insight__row"><span>Blocked / next</span><b>${_esc(blocked)}</b> → ${_esc(next)}</div>
+    <div class="cp-radar-insight__row cp-radar-insight__note">Flow / OI / funding / live orderbook: see the RADAR Focus card and the Orderbook panel — not claimed here from price-history alone.</div>
+  </div>`;
+}
 // Import-from-RADAR panel HTML. Shows the focused candidate's full setup
 // (entry zone, stop, invalidation, TP1/2/3, safety, blocked reason / next
 // trigger) with a primary "Import this RADAR setup" button — or, when nothing
@@ -5055,6 +5102,7 @@ function _cpRadarFocusHtml() {
       <div><span>Blocked / reason</span><b>${_esc(f.blockedBy || f.ACTION || 'none')}</b></div>
       <div><span>Next trigger</span><b>${_esc(f.nextRequiredConfirmation || 'none')}</b></div>
     </div>
+    ${_cpRadarDataInsightHtml(f)}
     <button type="button" id="cockpit-import-radar" class="cockpit-primary-btn">Import this RADAR setup</button>
   </div>`;
 }
@@ -8874,6 +8922,44 @@ function _fleetRadarV1BlockedBy(c) {
 // Pure label/verdict derivation from EXISTING candidate fields. They change no
 // score, gate, routing, or Telegram eligibility — display only. Kept brace-light
 // (if/return chains, no nested blocks) so they stay simple and unit-testable.
+// Why-is-it-STALE context line. "STALE" alone reads like a UI bug; this
+// explains the actual state from real backend fields: how old the static
+// microstructure snapshot is and whether the rolling absorption producer is
+// running. Returns '' when there is nothing provable to say — it never
+// invents an age or a producer state.
+function _fleetRadarStaleContextText(radar) {
+  const parts = [];
+  const sm = radar && radar.staticMicrostructure;
+  const t = sm && sm.receivedAt ? Date.parse(sm.receivedAt) : NaN;
+  if (isFinite(t)) {
+    const days = Math.floor((Date.now() - t) / 86400000);
+    if (days >= 1) parts.push(`static microstructure snapshot is ${days}d old`);
+  }
+  const md = radar && radar.microstructureDiagnostics;
+  if (md && md.microstructureEnabled === false) parts.push('rolling absorption producer is not running');
+  return parts.join(' · ');
+}
+// Visible, honest system-wide microstructure status banner for the Focus card.
+// When the rolling absorption producer is not running (and the only static
+// snapshot is stale) EVERY candidate's strict Absorb reads STALE — that is a
+// data-source state, NOT a per-coin signal and NOT a UI bug. Surfacing it once,
+// visibly, stops the operator reading a system-wide "STALE" as a broken app or
+// as a per-coin reclaim/absorption verdict. Returns '' when microstructure is
+// actually live (nothing to warn about). Display-only; never a gate.
+function _radarMicrostructureStatusNote(radar) {
+  const md = radar && radar.microstructureDiagnostics;
+  const sm = radar && radar.staticMicrostructure;
+  const producerOff = md && md.microstructureEnabled === false;
+  const staticStale = sm && (sm.stale === true || sm.providerStatus === 'stale');
+  if (!producerOff && !staticStale) return '';
+  const ctx = _fleetRadarStaleContextText(radar);
+  const detail = ctx ? _esc(ctx) : (producerOff ? 'rolling absorption producer is not running' : 'static microstructure snapshot is stale');
+  return '<div class="radar-micro-status-note" style="border-radius:8px; padding:8px 11px; margin-bottom:10px; background:rgba(255,170,0,0.08); border:1px solid rgba(255,170,0,0.4); font-size:12px; color:#f6f7fb;">'
+    + '<b style="color:#ffaa00;">Strict rolling absorption is STALE for all candidates</b> — ' + detail + '. '
+    + 'This is a data-source state, not a per-coin signal: the <b>Absorb</b> column reads STALE everywhere until the microstructure producer is live again. '
+    + 'It does not change reclaim, ENTRY_READY, Telegram, or the setup/execution score.'
+    + '</div>';
+}
 // Compact matrix label for the Absorb column. Never returns a bare "?" — every
 // branch yields an explicit word so the operator reads meaning without hover.
 function _fleetRadarAbsorbCompact(c) {
@@ -9135,6 +9221,10 @@ function _renderTradingRadar(radar, esc) {
     ? items.map(x => `<span class="${cls}">${esc(x)}</span>`).join('')
     : `<span class="${cls} radar-chip--muted">none</span>`;
 
+  // Computed once per render: why STALE labels are stale (age + producer
+  // state). Appended to STALE tooltips/details so "STALE" is explained.
+  const _staleCtx = _fleetRadarStaleContextText(radar);
+
   const matrixHtml = rowsToRender.length ? rowsToRender.map(c => {
     const cl = c.conditionChecklist || {};
     const v1Status = _fleetRadarV1Status(c);
@@ -9150,7 +9240,7 @@ function _renderTradingRadar(radar, esc) {
       <td>${pillStatus((cl.relativeDump || {}).status)}</td>
       <td>${pillStatus((cl.longFlush || {}).status)}</td>
       <td>${pillStatus((cl.stabilization || {}).status)}</td>
-      <td>${(() => { const lbl = _fleetRadarAbsorbCompact(c); const base = (c.ABSORB_BLOCK_REASON && c.ABSORB_BLOCK_REASON !== 'none') ? c.ABSORB_BLOCK_REASON : lbl; const tip = 'Strict rolling absorption. ' + base + _radarPhSourceTipSuffix(c, 'absorption'); return `<span class="${_fleetRadarCompactClass(lbl)} radar-pill--text" title="${esc(tip)}">${esc(lbl)}</span>`; })()}</td>
+      <td>${(() => { const lbl = _fleetRadarAbsorbCompact(c); const base = (c.ABSORB_BLOCK_REASON && c.ABSORB_BLOCK_REASON !== 'none') ? c.ABSORB_BLOCK_REASON : lbl; const staleTip = (lbl === 'STALE' && _staleCtx) ? ' (' + _staleCtx + ')' : ''; const tip = 'Strict rolling absorption. ' + base + staleTip + _radarPhSourceTipSuffix(c, 'absorption'); return `<span class="${_fleetRadarCompactClass(lbl)} radar-pill--text" title="${esc(tip)}">${esc(lbl)}</span>`; })()}</td>
       <td>${(() => { const lbl = _fleetRadarReclaimCompact(c); const missing = Array.isArray(c.RECLAIM_SOURCE_FIELDS_MISSING) ? c.RECLAIM_SOURCE_FIELDS_MISSING.slice(0, 6).join(', ') : ''; const base = c.RECLAIM_NEXT_REQUIRED_CONDITION || missing || lbl; const tip = 'Market structural reclaim. ' + base + _radarPhSourceTipSuffix(c, 'reclaim'); return `<span class="${_fleetRadarCompactClass(lbl)} radar-pill--text" title="${esc(tip)}">${esc(lbl)}</span>`; })()}</td>
       <td>${pillStatus((cl.marketRegime || {}).status)}</td>
       <td>${(() => { const lbl = _fleetRadarMatrixEntryLabel(c, v1Status); const setup = (cl.entryVariant || {}).type; const tip = setup && setup !== lbl ? `Setup signal: ${setup}; final entry: ${lbl}` : `Final entry: ${lbl}`; return `<span title="${esc(tip)}">${esc(lbl)}</span>`; })()}</td>
@@ -9334,6 +9424,7 @@ function _renderTradingRadar(radar, esc) {
     const zHigh = rPrimary && rPrimary.level_zone_high != null ? _fleetFmtRadarPrice(rPrimary.level_zone_high) : '--';
 
     focusHtml = `<div class="radar-focus-card">
+      ${_radarMicrostructureStatusNote(radar)}
       ${(() => {
         // Context-only operator readiness summary (server-computed; display only).
         // It mirrors existing status and never creates a new ENTRY_READY-like state.

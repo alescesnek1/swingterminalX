@@ -27,7 +27,9 @@ function slice(source, startMarker, endMarker) {
 }
 
 test('price-history-orderbook.js is loaded as a module script in index.html', () => {
-  assert.match(indexHtml, /<script type="module" src="\/js\/price-history-orderbook\.js\?v=6h8"><\/script>/);
+  // Version-agnostic: the cache-bust token bumps on every asset change, so this
+  // guard checks the module wiring, not a specific ?v= value.
+  assert.match(indexHtml, /<script type="module" src="\/js\/price-history-orderbook\.js\?v=[a-z0-9]+"><\/script>/);
 });
 
 test('price-history-orderbook.js exposes its pure merge helper on window.__priceHistoryOrderbook', () => {
