@@ -51,12 +51,12 @@ test('advisory text states it is advisory-read-only and does not satisfy strict 
   assert.match(text, /server gate/i);
 });
 
-// ── 4. Cache token fully bumped to 6i4 ───────────────────────
-test('all versioned assets in index.html are bumped to exactly one token: 6i4', () => {
+// ── 4. Cache token fully bumped to 6i5 ───────────────────────
+test('all versioned assets in index.html are bumped to exactly one token: 6i5', () => {
   const versions = Array.from(indexHtml.matchAll(/\?v=([a-z0-9]+)/g)).map((x) => x[1]);
   assert.ok(versions.length >= 10, 'expected the full versioned asset set');
-  assert.ok(versions.every((v) => v === '6i4'), `all asset versions must be 6i4, saw: ${[...new Set(versions)].join(',')}`);
-  assert.doesNotMatch(indexHtml, /\?v=6i3\b/, 'the previous cache-bust token must be gone');
+  assert.ok(versions.every((v) => v === '6i5'), `all asset versions must be 6i5, saw: ${[...new Set(versions)].join(',')}`);
+  assert.doesNotMatch(indexHtml, /\?v=6i4\b/, 'the previous cache-bust token must be gone');
 });
 
 // ── 5. No inline <script> injected for this feature ──────────

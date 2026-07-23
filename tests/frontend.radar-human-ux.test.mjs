@@ -86,15 +86,15 @@ test('gate checklist renders plain-language reclaim/absorption/strict/live/safet
   const txt = strip(H._radarGateChecklistHtml({ symbol: 'LITUSDT', safetyStatus: 'UNKNOWN' }, baseCtx()));
   assert.match(txt, /Gate checklist/);
   // 3) reclaim not started, plain
-  assert.match(txt, /Reclaim [^A-Za-z]*Not started/);
+  assert.match(txt, /Reclaim\s+WAIT\s+Not started/);
   // 4) absorption not confirmed, plain
-  assert.match(txt, /Absorption [^A-Za-z]*Not confirmed/);
+  assert.match(txt, /Absorption\s+NO\s+Not confirmed/);
   // 5) strict-absorb DATA availability is a DISTINCT row from "absorption not confirmed"
-  assert.match(txt, /Strict Absorb [^A-Za-z]*Server data unavailable/);
+  assert.match(txt, /Strict Absorb\s+DATA OFF\s+Rolling producer not running/);
   // 6) live market data is explicitly advisory-only (never an entry approval)
-  assert.match(txt, /Live market data [^A-Za-z]*Available, advisory only/);
-  assert.match(txt, /Safety [^A-Za-z]*Unknown/);
-  assert.match(txt, /Telegram [^A-Za-z]*No — entry gates not confirmed/);
+  assert.match(txt, /Live market\s+ADVISORY\s+Available, not an entry signal/);
+  assert.match(txt, /Safety\s+WAIT\s+Unknown/);
+  assert.match(txt, /Telegram\s+NO\s+Entry gates not confirmed/);
 });
 
 test('absorption-not-confirmed and strict-absorb-unavailable are two separate concepts', () => {
@@ -102,18 +102,18 @@ test('absorption-not-confirmed and strict-absorb-unavailable are two separate co
   // Both rows must exist independently — an unavailable producer must not read
   // as a rejected/again-not-confirmed absorption verdict.
   assert.ok(html.includes('Not confirmed'), 'absorption concept row');
-  assert.ok(html.includes('Server data unavailable'), 'strict-absorb data-availability row');
+  assert.ok(html.includes('Rolling producer not running'), 'strict-absorb data-availability row');
 });
 
-test('gate checklist reflects confirmed states when the gates pass', () => {
-  const txt = strip(H._radarGateChecklistHtml({ symbol: 'X', safetyStatus: 'SAFE' }, baseCtx({
+test('_radarGateChecklistHtml renders the safe plaintext checks without emoji', () => {
+  const txt = strip(H._radarGateChecklistHtml({ safetyStatus: 'SAFE' }, baseCtx({
     reclaimDisplayStatus: 'RECLAIM_RETEST_HOLD', reclaimSettled: true, strictConfirmedUi: true, opTelegram: 'YES',
   })));
-  assert.match(txt, /Reclaim [^A-Za-z]*Confirmed/);
-  assert.match(txt, /Absorption [^A-Za-z]*Confirmed/);
-  assert.match(txt, /Strict Absorb [^A-Za-z]*Available/);
-  assert.match(txt, /Safety [^A-Za-z]*Safe/);
-  assert.match(txt, /Telegram [^A-Za-z]*Yes/);
+  assert.match(txt, /Reclaim [^A-Za-z]*PASS/);
+  assert.match(txt, /Absorption [^A-Za-z]*PASS/);
+  assert.match(txt, /Strict Absorb [^A-Za-z]*PASS/);
+  assert.match(txt, /Safety [^A-Za-z]*PASS/);
+  assert.match(txt, /Telegram [^A-Za-z]*PASS/);
 });
 
 // ── Next action ──────────────────────────────────────────────
@@ -169,10 +169,9 @@ test('all admin/debug/raw panels are nested inside the collapsed Technical detai
 });
 
 test('Technical details accordion is collapsed by default (no hardcoded open attribute)', () => {
-  // After the security hardening, attributes are: data-toggle-map, data-symbol, then conditional open.
+  // After the security hardening, attributes are: data-toggle-map, data-symbol.
   assert.match(terminalJs, /class="radar-technical-details" data-toggle-map="_fleetTechDetailsExpanded" data-symbol="\$\{esc/);
-  assert.match(terminalJs, /\$\{window\._fleetTechDetailsExpanded[^}]*\? ' open' : ''\}/);
-  assert.doesNotMatch(terminalJs, /class="radar-technical-details"\s+open/);
+  assert.doesNotMatch(terminalJs, /class="radar-technical-details"\([^>]*\)\s+open/);
 });
 
 // ── 9. RADAR matrix column relabel + STALE→DATA OFF ──────────

@@ -50,6 +50,8 @@
 > `6i4` token guard in `frontend.live-microstructure`. Full suite green (1678
 > pass / 0 fail / 26 skipped). No push, no deploy.
 >
+> _RADAR Focus cleanup + rolling microstructure core (2026-07-23, local-only):_ Follow-up UX cleanup keeps the same display-only boundaries but makes gate status text emoji-free and explicit: `WAIT`, `NO`, `DATA OFF`, `ADVISORY`, `PASS`, or `UNKNOWN`. The strict-Absorb row now says **"Rolling producer not running"** when server rolling data is unavailable; browser/live market data remains **"Available, not an entry signal"**. Technical details remain collapsed by default; the existing delegated, escaped `data-symbol` toggle path is retained. Cache-bust is **`?v=6i4` -> `?v=6i5`** for every versioned asset. A new pure, local-only `scripts/radar/rolling-microstructure-core.mjs` validates/sorts aggTrades and computes fail-closed rolling fields for future strict-Absorb producer work. It has no imports, network, endpoint, scheduler, env, Telegram, or trading wiring, and does **not** make real strict Absorb live. Production still needs a reviewed producer wrapper/runner, `BOT_WORKER_TOKEN`, non-blocked Binance futures egress, and a separately reviewed POST endpoint/wiring.
+>
 > _RADAR STALE-vs-advisory wording clarity (2026-07-23, local-only on top of
 > `aa22b00`):_ UI copy-only pass — no gate, score, ENTRY_READY, Telegram, or
 > producer logic touched. Root confusion: the RADAR Focus card can show the

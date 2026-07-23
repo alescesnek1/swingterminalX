@@ -232,11 +232,11 @@ const LiveFeed = {
     const el = document.getElementById(id);
     if (!el) return;
     const isExpanded = el.classList.toggle('expanded');
-    
+
     // Check if any items are expanded to toggle reading mode
     const anyExpanded = !!document.querySelector('.lf-item.expanded');
     this._readingMode = anyExpanded;
-    
+
     // If we just exited reading mode, truncate events if needed
     if (!this._readingMode && this._events.length > this._max) {
       this._events.length = this._max;
@@ -332,10 +332,10 @@ const LiveFeed = {
     // entry can't ship a javascript: href.
     const safeUrl = _safeUrl(e.url);
     const isNewsExpandable = e.category === 'news' && !!safeUrl;
-    
+
     // We also make all telegram alerts expandable for modern interaction
     const isExpandable = isNewsExpandable || isTelegram;
-    
+
     if (isNewsExpandable) {
        detailsBlock = `<div class="lf-details" style="display:${isExpanded ? 'block' : 'none'}; margin-top:8px; padding-top:8px; border-top:1px dashed var(--b2); font-size:11px; color:var(--txt2);">
          <a href="${safeUrl}" target="_blank" rel="noopener noreferrer" style="display:inline-block;font-weight:600">Read full article →</a>
@@ -1019,9 +1019,9 @@ function getFunding(d) { return d._funding || 0; }
 function getPredFunding(d) { return (d._funding || 0) * 1.5; }
 function getBasis(d) { return ((d._funding || 0) * 100).toFixed(4); }
 function getOiPct(d) { return d._oiDelta || 0; }
-function getLsRatio(d) { 
+function getLsRatio(d) {
   const tr = d._takerRatio || 0.5;
-  return { l: tr * 100, s: (1 - tr) * 100 }; 
+  return { l: tr * 100, s: (1 - tr) * 100 };
 }
 
 // ========== COMPOSITE HOTNESS SCORE (0-100) ==========
@@ -2180,7 +2180,7 @@ function renderList() {
       // on every renderList() call, a WebSocket-driven innerHTML rebuild
       // re-locks each cell to its exact X — zero layout drift.
       const cs = (k) => _colStyle(k);
-      
+
       let attChip = '';
       if (d.ATTENTION_SOURCE === 'coingecko' && d.ATTENTION_KIND === 'trending' && Number.isFinite(d.ATTENTION_RANK) && d.ATTENTION_RANK > 0) {
         attChip = `<span class="exch-badge" title="CoinGecko trending context only" style="background:var(--bg3);color:var(--txt2);margin-left:4px;">CG #${_esc(String(d.ATTENTION_RANK))}</span>`;
@@ -3075,7 +3075,7 @@ function renderHeatmap() {
     ctx.fillText('No matching coins found.', canvas.clientWidth/2, canvas.clientHeight/2);
     const hmCount = document.getElementById('hm-count');
     if (hmCount) hmCount.textContent = '0 coins';
-    
+
     // Observability event
     try { window.SystemEvents?.push('cockpit_heatmap_empty', { search: searchTerm, limit }); } catch(e){}
     return;
@@ -3084,7 +3084,7 @@ function renderHeatmap() {
   const wrap = canvas.parentElement;
   const W = wrap.clientWidth || 800;
   let H = wrap.clientHeight || 500;
-  
+
   // Heatmap readability fix: ensure enough vertical space so cells stay
   // large — owner explicitly rejected a "cramped wall" default. Scroll
   // vertically instead of shrinking cells to fit everything on-screen.
@@ -3094,7 +3094,7 @@ function renderHeatmap() {
   if (requiredH > H) {
     H = requiredH;
   }
-  
+
   canvas.style.width = W + 'px';
   canvas.style.height = H + 'px';
   if (W < 10 || H < 10) return;
@@ -3467,7 +3467,7 @@ window.showBubbleDetail = function(id, el) {
   if (!d) return;
   const detail = document.getElementById('bub-detail');
   if (!detail) return;
-  
+
   const c = Number(d.price_change_percentage_24h) || 0;
   const mc = Number(d.market_cap) || 0;
   const vol = Number(d.total_volume) || 0;
@@ -3497,7 +3497,7 @@ window.showBubbleDetail = function(id, el) {
 window.showHeatmapDetail = function(d) {
   const detail = document.getElementById('hm-detail');
   if (!detail) return;
-  
+
   const c = Number(d.price_change_percentage_24h) || 0;
   const mc = Number(d.market_cap) || 0;
   const vol = Number(d.total_volume) || 0;
@@ -6613,7 +6613,7 @@ function _pbRenderExecutionPreview(state) {
 
   const isFallback = (state && state.candidate && state.candidate.strategyFallback === true) || (Array.isArray(state && state.events) && state.events.some(e => e.type === 'TESTNET_COMPATIBLE_FALLBACK_SELECTED'));
   const isSmokeFallback = (state && state.candidate && state.candidate.smokeFallback === true) || (state && state.paperPosition && state.paperPosition.smokeFallback === true) || (Array.isArray(state && state.events) && state.events.some(e => e.type === 'TESTNET_SMOKE_QUOTE_FALLBACK_SELECTED'));
-  
+
   if (isSmokeFallback) {
     html += '<div style="background: rgba(255, 100, 100, 0.1); color: #ff6666; border: 1px solid rgba(255, 100, 100, 0.4); padding: 10px; border-radius: 4px; margin-top: 10px; margin-bottom: 15px; font-size: 13px; text-align: center;">'
       + '<b style="display: block; margin-bottom: 4px;">TESTNET SMOKE FALLBACK</b>'
@@ -6625,7 +6625,7 @@ function _pbRenderExecutionPreview(state) {
       + 'Fallback selected only to validate Binance Spot Testnet order adapter. Not a high-conviction strategy signal.'
       + '</div>';
   }
-  
+
   if (recentResult && recentResult.status === 'submitted') {
     html +=
       '<div class="pb-execution-preview-card__testnet-result">'
@@ -6721,7 +6721,7 @@ function _pbRenderDiagnostics(state) {
     card.innerHTML = '';
     return;
   }
-  
+
   card.hidden = false;
   let diagHtml = '<div style="font-size: 11px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.05); padding: 10px; border-radius: 4px; text-align: left; font-family: monospace;">'
       + '<b style="color: #8899aa; display: block; margin-bottom: 6px;">TESTNET FALLBACK DIAGNOSTICS</b>'
@@ -6761,7 +6761,7 @@ async function _createPaperbotExecutionIntentRequest() {
     body: JSON.stringify({ sessionId }),
   });
   const payload = await res.json().catch(() => ({}));
-  
+
   if (payload && typeof payload === 'object' && ('status' in payload || 'events' in payload || 'ok' in payload)) {
     renderPaperBot(_paperbotStateFromControlResponse(payload));
   }
@@ -6770,7 +6770,7 @@ async function _createPaperbotExecutionIntentRequest() {
     let msg = payload.error || 'Failed to create execution intent';
     throw new Error(msg);
   }
-  
+
   try { window.Toast?.success('INTENT CREATED', 'Waiting for local worker to submit Binance Spot Testnet order.'); } catch {}
   return payload;
 }
@@ -6792,7 +6792,7 @@ async function _createPaperbotSmokeIntentRequest() {
     body: JSON.stringify({ sessionId }),
   });
   const payload = await res.json().catch(() => ({}));
-  
+
   if (payload && typeof payload === 'object' && ('status' in payload || 'events' in payload || 'ok' in payload)) {
     renderPaperBot(_paperbotStateFromControlResponse(payload));
   }
@@ -6801,7 +6801,7 @@ async function _createPaperbotSmokeIntentRequest() {
     let msg = payload.error || 'Failed to create smoke intent';
     throw new Error(msg);
   }
-  
+
   try { window.Toast?.success('SMOKE INTENT CREATED', 'Smoke intent created. Local worker will validate BTCUSDT on Binance Spot Testnet and submit a testnet-only order.'); } catch {}
   return payload;
 }
@@ -7057,7 +7057,7 @@ function _pbDrawReceipt(canvas, trade) {
   // ── EXIT marker (colored ring at end) ──
   const exitX = toX(pnlPts[pnlPts.length - 1].t);
   const exitY = toY(pnlPts[pnlPts.length - 1].pnl);
-  
+
   if (trade.isOpen) {
     const pulse = (Math.sin(Date.now() / 150) + 1) / 2;
     const r1 = 4.5 + pulse * 2;
@@ -7232,7 +7232,7 @@ function renderPaperBot(state) {
     if (statusText.textContent !== txt) statusText.textContent = txt;
     statusEl.classList.remove('pb-status-searching','pb-status-intrade','pb-status-stopped');
     statusEl.classList.add(klass);
-    
+
     let workerStatusEl = document.getElementById('pb-worker-status');
     if (!workerStatusEl) {
       workerStatusEl = document.createElement('div');
@@ -7244,7 +7244,7 @@ function renderPaperBot(state) {
       workerStatusEl.style.borderRadius = '4px';
       statusEl.parentNode.insertBefore(workerStatusEl, statusEl.nextSibling);
     }
-    
+
     if (state.testnetExecutionEnabled) {
       workerStatusEl.style.display = 'inline-block';
       const isOnline = state.workerStatus && state.workerStatus.online;
@@ -9025,12 +9025,12 @@ function _fleetRadarAbsorbVerdict(c) {
   const staticOnlySnapshot = c.hasStaticMicrostructure === true && c.hasRollingMicrostructure !== true;
   const untrustedStatic = c.staticMicrostructureTrusted !== true;
   const hasMissingRollingFields = Array.isArray(c.missingAbsorptionFields) && c.missingAbsorptionFields.length > 0;
-  
+
   if (c.rollingMicrostructurePresent === false) {
     if (c.rollingMicrostructureStatus === 'STALE') return 'STALE — Rolling data stale';
     return 'NO STRICT DATA — Rolling producer missing';
   }
-  
+
   if (c.rollingMicrostructurePresent === true && c.rollingMicrostructureStatus === 'INCOMPLETE') {
     const miss = c.rollingMicrostructureMissingFields || [];
     if (miss.length === 1 && miss[0] === 'longLiquidationSpike') {
@@ -9039,7 +9039,7 @@ function _fleetRadarAbsorbVerdict(c) {
       return `NO STRICT DATA — Rolling data present, strict Absorb incomplete: missing ${miss.join(', ')}`;
     }
   }
-  
+
   if (strict === 'ABSORB_DATA_UNAVAILABLE' && proxy === 'ABSORB_REJECTED') return 'NO STRICT DATA — proxy rejected';
   if (strict === 'ABSORB_DATA_UNAVAILABLE' && proxy === 'ABSORB_PARTIAL_EVIDENCE') return 'PROXY ONLY — strict unavailable, not confirmed';
   if (strict === 'ABSORB_DATA_UNAVAILABLE' && proxy === 'ABSORB_WATCH') return 'PROXY — strict unavailable, not confirmed';
@@ -9222,22 +9222,38 @@ function _radarHumanDecisionHtml(c, ctx) {
 // entry approval.
 function _radarGateChecklistHtml(c, ctx) {
   const esc = ctx.esc;
-  const ICON = { pass: '✅', warn: '⚠️', fail: '❌' };
-  const row = (k, g) => `<div class="radar-gate__row"><span class="radar-gate__k">${esc(k)}</span><span class="radar-gate__v radar-gate__v--${g.icon}"><span class="radar-gate__i">${ICON[g.icon]}</span> ${esc(g.text)}</span></div>`;
-  const reclaim = _radarReclaimGate(ctx.reclaimDisplayStatus);
-  const absorption = ctx.strictConfirmedUi ? { icon: 'pass', text: 'Confirmed' } : { icon: 'fail', text: 'Not confirmed' };
-  const strictData = ctx.strictConfirmedUi ? { icon: 'pass', text: 'Available' } : { icon: 'warn', text: 'Server data unavailable' };
-  const live = { icon: 'pass', text: 'Available, advisory only' };
-  const safety = _radarSafetyGate(c.safetyStatus);
-  const tg = ctx.opTelegram === 'YES' ? { icon: 'pass', text: 'Yes' } : { icon: 'fail', text: 'No — entry gates not confirmed' };
+  const STATUS = { pass: 'PASS', warn: 'WAIT', fail: 'NO', off: 'DATA OFF', advisory: 'ADVISORY', unknown: 'UNKNOWN' };
+  const pill = (cls) => `<span class="radar-pill radar-pill-${cls.replace(' ', '-').toLowerCase()}">${STATUS[cls]}</span>`;
+  const row = (k, p, t) => `<div class="radar-gate__row"><span class="radar-gate__k">${esc(k)}</span><span class="radar-gate__v">${pill(p)} ${esc(t)}</span></div>`;
+
+  const rec = _radarReclaimGate(ctx.reclaimDisplayStatus);
+  const recLabel = rec.icon === 'pass' ? 'pass' : (rec.icon === 'fail' && rec.text === 'Failed') ? 'fail' : 'warn';
+  const reclaimMsg = rec.text === 'Not started' ? 'Not started' : rec.text;
+
+  const absLabel = ctx.strictConfirmedUi ? 'pass' : 'fail';
+  const absText = ctx.strictConfirmedUi ? 'Confirmed' : 'Not confirmed';
+
+  const strictLabel = ctx.strictConfirmedUi ? 'pass' : 'off';
+  const strictText = ctx.strictConfirmedUi ? 'Available' : 'Rolling producer not running';
+
+  const liveLabel = 'advisory';
+  const liveText = 'Available, not an entry signal';
+
+  const saf = _radarSafetyGate(c.safetyStatus);
+  const safLabel = saf.icon === 'pass' ? 'pass' : saf.icon === 'warn' ? 'warn' : 'fail';
+  const safText = saf.text;
+
+  const tgLabel = ctx.opTelegram === 'YES' ? 'pass' : 'fail';
+  const tgText = ctx.opTelegram === 'YES' ? 'Yes' : 'Entry gates not confirmed';
+
   return `<div class="radar-gate">
       <div class="radar-gate__title">Gate checklist</div>
-      ${row('Reclaim', reclaim)}
-      ${row('Absorption', absorption)}
-      ${row('Strict Absorb', strictData)}
-      ${row('Live market data', live)}
-      ${row('Safety', safety)}
-      ${row('Telegram', tg)}
+      ${row('Reclaim', recLabel, reclaimMsg)}
+      ${row('Absorption', absLabel, absText)}
+      ${row('Strict Absorb', strictLabel, strictText)}
+      ${row('Live market', liveLabel, liveText)}
+      ${row('Safety', safLabel, safText)}
+      ${row('Telegram', tgLabel, tgText)}
     </div>`;
 }
 // Single next action + a fixed caution that live orderbook OK is not an entry signal.
@@ -9297,7 +9313,7 @@ function _renderTradingRadar(radar, esc) {
     ? diag.topRejectedSamples
     : (Array.isArray(diag.rejectedSamples) ? diag.rejectedSamples : []);
   if (!Array.isArray(diag.rejectedSamples)) diag.rejectedSamples = rejectedRows;
-  
+
   const activeFilter = window._radarFilter || 'TOP_20';
   const rowLimitStr = window._radarFilterLimit || '20';
   const rowLimit = rowLimitStr === 'ALL' ? allCandidates.length : (parseInt(rowLimitStr, 10) || 20);
@@ -9352,14 +9368,14 @@ function _renderTradingRadar(radar, esc) {
   let rowsToRender = candidates;
   if (activeFilter === 'TOP_20') rowsToRender = rowsToRender.slice(0, 20);
   else rowsToRender = rowsToRender.slice(0, rowLimit);
-  
+
   const pillStatus = (s) => {
-    if (s === 'PASS') return '<span class="radar-pill radar-pill-pass">✓</span>';
-    if (s === 'FAIL') return '<span class="radar-pill radar-pill-fail">✕</span>';
-    if (s === 'MISSING DATA') return '<span class="radar-pill radar-pill-missing">?</span>';
-    return '<span class="radar-pill radar-pill-wait">…</span>';
+    if (s === 'PASS') return '<span class="radar-pill radar-pill-pass">PASS</span>';
+    if (s === 'FAIL') return '<span class="radar-pill radar-pill-fail">NO</span>';
+    if (s === 'MISSING DATA') return '<span class="radar-pill radar-pill-missing">UNKNOWN</span>';
+    return '<span class="radar-pill radar-pill-wait">WAIT</span>';
   };
-  
+
   const zoneText = (zone) => zone && zone.low != null && zone.high != null
     ? _fleetFmtRadarPrice(zone.low) + '-' + _fleetFmtRadarPrice(zone.high)
     : '--';
@@ -9428,11 +9444,11 @@ function _renderTradingRadar(radar, esc) {
   </table></div>`;
 
   // What to watch now (nearest to entry)
-  const watchNowCandidates = Array.isArray(radar.candidates) 
+  const watchNowCandidates = Array.isArray(radar.candidates)
     ? [...radar.candidates]
         .filter(c => c.actionability !== 'ENTRY_READY')
         .sort((a,b) => b.distanceToEntryReadyScore - a.distanceToEntryReadyScore)
-        .slice(0, 3) 
+        .slice(0, 3)
     : [];
   const commonBlocker = watchNowCandidates.length === 3
     && watchNowCandidates.every(c => _fleetRadarV1BlockedBy(c) === _fleetRadarV1BlockedBy(watchNowCandidates[0]))
@@ -9457,10 +9473,10 @@ function _renderTradingRadar(radar, esc) {
   if (selected) {
     const selectedV1Status = _fleetRadarV1Status(selected);
     const selectedV1BlockedBy = _fleetRadarV1BlockedBy(selected);
-    const actLabel = selectedV1Status !== '--' ? selectedV1Status : (selected.actionability === 'ENTRY_READY' ? 'ENTRY READY' : 
+    const actLabel = selectedV1Status !== '--' ? selectedV1Status : (selected.actionability === 'ENTRY_READY' ? 'ENTRY READY' :
                      selected.actionability === 'NEAR_ENTRY' ? 'NEAR ENTRY - WAITING FOR CONFIRMATION' :
                      selected.actionability === 'INVALIDATED' ? 'INVALIDATED' : 'NOT ACTIONABLE YET');
-    
+
     const cl = selected.conditionChecklist || {};
     // Phase B: the absorption row always shows the EXPLICIT Absorb v2 state
     // (e.g. ABSORB_DATA_UNAVAILABLE / ABSORB_PROVIDER_UNTRUSTED / ABSORB_REJECTED /
@@ -9550,7 +9566,7 @@ function _renderTradingRadar(radar, esc) {
     const strictStatusText = selected.STRICT_ABSORB_STATUS === 'ABSORB_DATA_STALE' ? 'STALE'
       : selected.STRICT_ABSORB_STATUS === 'ABSORB_PROVIDER_UNTRUSTED' ? 'UNTRUSTED'
       : selected.STRICT_ABSORB_STATUS === 'ABSORB_DATA_UNAVAILABLE' ? 'MISSING' : selected.STRICT_ABSORB_STATUS;
-      
+
     const isStaticOnly = selected.hasStaticMicrostructure === true && selected.hasRollingMicrostructure !== true;
     const untrustedStatic = selected.staticMicrostructureTrusted !== true;
     const hasMissingRollingFields = Array.isArray(selected.missingAbsorptionFields) && selected.missingAbsorptionFields.length > 0;
@@ -9599,10 +9615,10 @@ function _renderTradingRadar(radar, esc) {
       ${_radarGateChecklistHtml(selected, ctx)}
       ${_radarNextActionHtml(selected, ctx)}
       ${_radarKeyLevelsHtml(selected, ctx)}
-      <details class="radar-technical-details" data-toggle-map="_fleetTechDetailsExpanded" data-symbol="${esc(selected.symbol)}"${window._fleetTechDetailsExpanded && window._fleetTechDetailsExpanded[selected.symbol] ? ' open' : ''}>
+      <details class="radar-technical-details" data-toggle-map="_fleetTechDetailsExpanded" data-symbol="${esc(selected.symbol)}">
         <summary class="radar-technical-details__summary">Technical details</summary>
+        ${_radarMicrostructureStatusNote(radar)}
       <div class="radar-tech-group"><div class="radar-tech-group__title">Server gate / strict Absorb</div>
-      ${_radarMicrostructureStatusNote(radar)}
       ${(() => {
         // Context-only operator readiness summary (server-computed; display only).
         // It mirrors existing status and never creates a new ENTRY_READY-like state.
@@ -9921,11 +9937,11 @@ function _renderTradingRadar(radar, esc) {
     + '<li>Rejected: ' + esc(Object.entries(diag.rejectedByReason || diag.rejected || {}).slice(0, 4).map(([k, v]) => k + ':' + v).join(', ') || 'none') + '</li>'
     + '<li>Missing: ' + esc(missing.join(', ') || 'none') + '</li>'
     + '</ul>';
-    
+
   if (rejectedRows.length) {
      html += '<br/>Top rejections:<br/>' + diag.rejectedSamples.slice(0,10).map(s => '• ' + esc(s.symbol) + ': ' + esc(s.reason)).join('<br/>');
   }
-  
+
   html += '</details>';
 
   html += '<details class="radar-diagnostics radar-telegram-diagnostics"><summary>Telegram Alert Status</summary>'
@@ -10432,7 +10448,7 @@ function renderFleet() {
     + '<div><span>Last intent</span><b>' + _esc(auto.lastIntentId || '--') + '</b></div>'
     + '<div><span>Live lock</span><b>' + _esc(auto.liveExecutionAllowed ? 'gate passed' : 'locked') + '</b></div>'
     + '</div>';
-    
+
   let diagnosticsHtml = '';
   if (auto.diagnostics || auto.universeDiagnostics) {
     const ud = auto.diagnostics || auto.universeDiagnostics;
@@ -10450,7 +10466,7 @@ function renderFleet() {
     }
 
     const fallbackReasonHtml = (isFallback && ud.fallbackReason) ? '<li style="color:var(--rd);">Fallback: ' + _esc(ud.fallbackReason) + '</li>' : '';
-    const newDiagnostics = ud.scoringVersion === 'auto-scorer-v2' 
+    const newDiagnostics = ud.scoringVersion === 'auto-scorer-v2'
       ? `<li>V2 Scorer (History: ${ud.historySamples || 0} samples${ud.historyWarmup ? ', warmup' : ''})</li>
          <li>Excluded Cooldown: ${ud.excludedCooldown || 0}</li>
          <li>Excluded Leveraged: ${ud.excludedLeveraged || 0}</li>
@@ -10491,7 +10507,7 @@ function renderFleet() {
     + '</ul></div>'
     + diagnosticsHtml
     + '</div>';
-    
+
   if (Array.isArray(auto.candidates) && auto.candidates.length) {
     html += '<div class="fleet-auto-trader__leaderboard">'
       + '<div><span>Candidate Leaderboard</span><table style="width:100%;text-align:left;font-size:0.8rem;border-collapse:collapse;"><thead>'
@@ -10511,7 +10527,7 @@ function renderFleet() {
         }).join('')
       + '</tbody></table></div></div>';
   }
-  
+
   html += (auto.liveExecutionAllowed ? '' : '<div class="fleet-auto-trader__locked">' + (auto.effectiveMode === 'shadow' ? 'Shadow observation active. Live promotion locked: missing ' : (auto.mode === 'live_spot' ? 'Live auto locked: missing ' : 'Live promotion locked: missing ')) + _esc((auto.liveGateMissing || []).join(', ') || 'required gates') + '</div>')
     + (data.isAdmin ? (() => {
         const autoCanPromotePaper = (autoEvidence.autoShadowEvaluations != null ? autoEvidence.autoShadowEvaluations : (autoEvidence.shadowEvaluations || 0)) >= 20;
@@ -13067,7 +13083,7 @@ class LocalPaperBot {
       } else {
         priceCurve = [{ p: pos.entryPrice, t: openTs }, { p: px, t: now }];
       }
-      
+
       return { ...pos, currentPrice: px, currentPnl: this._round(pnl, 6), currentPnlPct: this._round(pnlPct, 4), unrealizedPnl: this._round(pnl, 6), unrealizedPnlPct: this._round(pnlPct, 4), priceCurve };
     });
     const wins = this.state.wins | 0;
