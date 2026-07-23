@@ -119,15 +119,19 @@ test('fresh rolling snapshot from producer with slightly misaligned clock is not
 test('preserves validated local-foundation measurement metadata and optional rolling fields', () => {
   const s = normalizeRollingMicrostructureSnapshot(snapshot({ BTCUSDT: completeRow({
     absorptionScore: 71,
+    bidDepthRebuildPct: 18.5,
     deltaImprovementPct: 4,
     marketBuyVolumeDominance: 0.61,
     aggressiveSellsFailed: true,
     supportRetestHeld: true,
     spreadAndSlippageHealthy: true,
+    spreadPct: 0.05,
+    depthUsdWithin1Pct: 1000,
     rollingMeasuredAt: new Date(NOW - 500).toISOString(),
     rollingWindowSec: 300,
-    samples: { aggTrades: 60, depthSnapshots: 2, ignored: 99 },
+    samples: { aggTrades: 60, depthSnapshots: 2, klines: 30, ignored: 99 },
     source: 'binance-futures-public',
+    validation: { makerFlagsValid: true, tradesValidated: true, tradesSorted: true, klinesValidated: true },
   }) }), { nowMs: NOW });
   const row = s.data.BTCUSDT;
   assert.equal(row.absorptionScore, 71);

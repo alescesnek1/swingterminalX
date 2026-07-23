@@ -1,26 +1,19 @@
 # RADAR Rolling Microstructure - Technical Design and Risk Review
 
-> **Status: LOCAL FOUNDATION ONLY - production inactive.**
-> As of `df333c3`, the repo contains the pure rolling microstructure core,
-> snapshot validation, a disabled-by-default producer wrapper, and tests.
-> This is not a production activation. Strict Absorb remains fail-closed:
-> no trusted rolling producer is running, `ENTRY_READY` is unchanged, and
-> Telegram remains blocked unless the existing strict gates pass.
+> **Status: LOCAL LIVE-CAPABLE, production inactive.**
+> The local one-shot producer can now create `trusted:true` snapshots only from
+> complete, fresh public Binance-futures measurements: a 300-second validated and
+> sorted aggTrades window, two time-separated depth samples, 30+ validated 1m
+> klines, and every Strict-Absorb input. The snapshot normalizer independently
+> re-checks source, freshness, sample floors, validation metadata, all required
+> fields, and buy dominance in `0..1`; any failure drops the row from strict use.
 >
-> The original design-only document has now been partially implemented as a
-> local foundation. The implemented parts are limited to measurement helpers,
-> snapshot validation, a disabled producer wrapper, and tests. Gate thresholds,
-> `ENTRY_READY`, Telegram eligibility, and production runtime activation remain
-> unchanged.
->
-> Production activation is intentionally out of scope. It requires a separately
-> reviewed runner/scheduler, explicit POST mode, `BOT_WORKER_TOKEN`,
-> `CONTROL_BASE_URL`, and a machine with working Binance futures public egress.
-> Producer snapshots remain `trusted:false`; missing, thin, stale, or malformed
-> measurements fail closed and are not allowed to unlock Strict Absorb.
->
-> This document remains the companion to [radar-microstructure.md](radar-microstructure.md).
-
+> This is not production activation. The producer remains disabled by default;
+> it is dry-run unless the separate POST flag and control-plane token are supplied.
+> No scheduler, workflow, production configuration, private/signed endpoint,
+> `ENTRY_READY` threshold, Telegram eligibility, or trading behavior changed.
+> A local trusted row reaches only the existing Strict-Absorb gate; all existing
+> independent gates still govern ENTRY_READY and Telegram.
 ## Design stance
 
 The existing RADAR gate **already** reads the rolling field names below and

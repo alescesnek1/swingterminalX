@@ -2229,6 +2229,8 @@ function withRollingMicrostructureSnapshot(market, rollingMicrostructureSnapshot
     marketBuyVolumeDominance: row.marketBuyVolumeDominance ?? market.marketBuyVolumeDominance,
     supportRetested: row.supportRetested ?? row.supportRetestHeld ?? market.supportRetested,
     spreadAndSlippageHealthy: row.spreadAndSlippageHealthy ?? market.spreadAndSlippageHealthy,
+    spreadPct: row.spreadPct ?? market.spreadPct,
+    depthUsdWithin1Pct: row.depthUsdWithin1Pct ?? market.depthUsdWithin1Pct,
     flow: row.flow ? { ...(market.flow && typeof market.flow === 'object' ? market.flow : {}), ...row.flow } : market.flow,
     rollingMicrostructureSymbol: symbol,
     rollingMicrostructurePresent: true,
