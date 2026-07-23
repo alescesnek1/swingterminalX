@@ -6,7 +6,7 @@
 > sorted aggTrades window, two time-separated depth samples, 30+ validated 1m
 > klines, and every Strict-Absorb input. The snapshot normalizer independently
 > re-checks source, freshness, sample floors, validation metadata, all required
-> fields, and buy dominance in `0..1`; any failure drops the row from strict use.
+> fields, and buy dominance in `0..1`; any failure drops the row from strict use. Trusted collection also requires the exact HTTPS host `fapi.binance.com`; alternate hosts, IPs, protocol-relative URLs, and lookalikes fail before fetch.
 >
 > This is not production activation. The producer remains disabled by default;
 > it is dry-run unless the separate POST flag and control-plane token are supplied.

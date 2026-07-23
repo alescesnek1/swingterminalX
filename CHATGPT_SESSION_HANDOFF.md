@@ -58,7 +58,7 @@
 > complete 300-second public Binance-futures measurement passes independent
 > validation: sorted/validated aggTrades with explicit maker flags, two
 > time-separated depth samples, 30+ validated 1m klines, valid `0..1` buy
-> dominance, all Strict-Absorb fields, and fresh source/sample metadata.
+> dominance, all Strict-Absorb fields, fresh source/sample metadata, and the exact HTTPS public host `fapi.binance.com` (alternate hosts fail before fetch).
 > Missing, thin, stale, malformed, untrusted, or incomplete rows are omitted or
 > rejected before merge. The producer is still dry-run unless the separately
 > opt-in POST flag, token, and control URL are supplied; no scheduler, workflow,

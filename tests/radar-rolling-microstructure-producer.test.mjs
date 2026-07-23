@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { buildRollingSnapshotFromSamples, normalizeRollingProducerOptions, runRollingMicrostructureProducer, selectRollingTargets } from '../scripts/radar/rolling-microstructure-producer.mjs';
+import { buildRollingSnapshotFromSamples, isAllowedBinanceFuturesBaseUrl, normalizeRollingProducerOptions, runRollingMicrostructureProducer, selectRollingTargets } from '../scripts/radar/rolling-microstructure-producer.mjs';
 const NOW = 1_800_000_000_000; const envEnabled = { WORKER_RADAR_ROLLING_ENABLED: 'true' }; const candidates = [{ futures_pair: 'BTCUSDT' }];
 const response = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
 const depth = (total) => ({ bids: [['100', String(total)]], asks: [['100.05', '1']] });
@@ -15,3 +15,24 @@ test('thin, malformed-maker, and stale samples are omitted and cannot become tru
 test('explicit post remains separately opt-in and fails before network when token is absent', async () => { let calls = 0; const result = await runRollingMicrostructureProducer({ env: { ...envEnabled, WORKER_RADAR_ROLLING_POST_ENABLED: 'true', CONTROL_BASE_URL: 'https://ctl.example' }, fetchImpl: async () => { calls += 1; return response({}); }, candidates }); assert.equal(result.reason, 'BOT_WORKER_TOKEN_REQUIRED'); assert.equal(calls, 0); });
 test('only stable futures symbols are targeted and top-N is bounded', () => { assert.deepEqual(selectRollingTargets([{ symbol: 'BTC-USDT' }, { symbol: 'BTCUSDT' }, { symbol: 'BTCUSDT' }], { topN: 99 }).map((x) => x.symbol), ['BTCUSDT']); assert.equal(normalizeRollingProducerOptions({ env: { ...envEnabled, WORKER_RADAR_ROLLING_TOP_N: '999' } }).topN, 10); });
 test('source has only public unsigned reads, no scheduler or signed endpoint', () => { const source = readFileSync(new URL('../scripts/radar/rolling-microstructure-producer.mjs', import.meta.url), 'utf8'); assert.match(source, /\/fapi\/v1\/(aggTrades|depth|klines)/); assert.doesNotMatch(source, /\/fapi\/v1\/order|\/dapi\/|\/sapi\/|signature|apiKey|apiSecret/i); assert.doesNotMatch(source, /cron|schedule|workflow|netlify\.toml/i); });
+test('trusted rolling measurements require the exact HTTPS Binance Futures host', () => {
+  assert.equal(isAllowedBinanceFuturesBaseUrl('https://fapi.binance.com'), true);
+  for (const hostile of ['http://fapi.binance.com', 'https://evil.com', 'https://fapi.binance.com.evil.com', 'https://localhost', 'https://127.0.0.1', '//fapi.binance.com', 'javascript:alert(1)']) {
+    assert.equal(isAllowedBinanceFuturesBaseUrl(hostile), false, hostile);
+  }
+});
+
+test('hostile base URLs fail closed before any injected fetch and cannot produce trusted data', async () => {
+  for (const baseUrl of ['http://fapi.binance.com', 'https://evil.com', 'https://fapi.binance.com.evil.com', 'https://localhost', 'https://127.0.0.1', '//fapi.binance.com', 'javascript:alert(1)']) {
+    let calls = 0;
+    const fetchImpl = async () => { calls += 1; throw new Error('must not fetch hostile host'); };
+    const producerOptions = normalizeRollingProducerOptions({ env: envEnabled, baseUrl, depthIntervalMs: 0 });
+    const snapshot = await buildRollingSnapshotFromSamples({ candidates, fetchImpl, options: producerOptions, now: NOW, waitFn: async () => {} });
+    assert.equal(snapshot.trusted, false, baseUrl);
+    assert.deepEqual(snapshot.data, {}, baseUrl);
+    assert.equal(calls, 0, baseUrl);
+    const result = await runRollingMicrostructureProducer({ env: envEnabled, baseUrl, fetchImpl, candidates, now: NOW, waitFn: async () => {}, logger: { log() {} } });
+    assert.equal(result.reason, 'BINANCE_FUTURES_BASE_URL_NOT_ALLOWED', baseUrl);
+    assert.equal(calls, 0, baseUrl);
+  }
+});
