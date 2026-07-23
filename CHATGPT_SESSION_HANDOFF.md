@@ -13,6 +13,40 @@
 > `/reply` or `/admin_summary` support system** here. If you find yourself
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
+> _Live microstructure visibility for RADAR + Cockpit (2026-07-23, local-only
+> on top of `f55f766`):_ added a NEW advisory-only, read-only same-origin GET
+> Edge route **`/api/microstructure-snapshot`**
+> (`apps/edge/netlify/edge-functions/microstructure-snapshot.js`, wired in
+> `netlify.toml`) that surfaces the LIVE microstructure the strict rolling-
+> absorption producer does not provide: order-book summary + funding rate + open
+> interest + an aggregate-trade **taker-flow proxy** (Binance `m` flag: `m===true`
+> taker sold, `m===false` taker bought), all from PUBLIC Binance market-data GETs
+> routed through our origin. Reuses `resolveOrderbook` (minimal `fetchImpl` DI
+> refactor in `lib/binance.js`, behavior-preserving) for the spot↔futures book
+> fallback; the book is the gate (404 `SYMBOL_NOT_ON_BINANCE` / 502
+> `UPSTREAM_ERROR`). Funding/OI are futures-only → honest `UNSUPPORTED` on spot,
+> never faked; liquidation is always `UNKNOWN` (no public feed wired); every leg
+> degrades to `UNKNOWN` on failure, never a bearish 0. Response carries
+> `advisory_only:true` + `affects_server_gates/strict_absorb/entry_ready/telegram
+> = false`. Frontend: new **`#radar-live-microstructure-slot`** (RADAR Focus card)
+> and **`#cockpit-live-microstructure-slot`** (Cockpit import panel), a cache/
+> deduped fetch helper (`_refreshLiveMicrostructure`, 20s TTL, 6s timeout, fail-
+> closed + logged), and an explicit "Advisory only — does not change server gates,
+> strict Absorb, ENTRY_READY, or Telegram." line. This is **display-only**: it
+> changes NO server gate, strict-Absorb status, ENTRY_READY, scoring, or Telegram
+> eligibility, and the existing strict-Absorb STALE banner is untouched. Asset
+> cache-bust bumped **`?v=6i1` → `?v=6i2`** (all of index.html). New tests:
+> `tests/edge.microstructure-snapshot.test.mjs` (auth/origin fail-closed before
+> any fetch, 404 not-listed, futures funding/OI normalized, spot funding/OI
+> UNSUPPORTED + futures endpoints never called, flow proxy math + malformed→
+> UNKNOWN, liquidation UNKNOWN, advisory flags, source-guard: no POST/worker-
+> token/private-endpoint/Telegram) + `tests/frontend.live-microstructure.test.mjs`
+> (both slots mounted, advisory wording, single `6i2` token, no inline `<script>`,
+> pair resolver keeps quoted pairs / appends USDT to bases). Full suite green
+> (1662 pass / 0 fail / 26 skipped). Runtime smoke needs a deploy (Edge runs
+> server-side + requires an authenticated Supabase session; not verifiable
+> locally). No push, no deploy.
+>
 > _Cockpit RADAR data-visibility + cache-bust + STALE clarity (2026-07-22,
 > local-only on top of `3658a74`):_ QA found the #1 reason the owner "saw no
 > visible changes" — the asset cache-bust token `?v=6h8` had NOT been bumped

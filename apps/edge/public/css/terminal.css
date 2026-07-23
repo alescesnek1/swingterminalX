@@ -2085,3 +2085,18 @@ html,body{overflow-x:hidden;max-width:100vw}
 .cd-gecko-sec{font-size:8px;font-weight:700;color:var(--txt3)}
 .cd-gname{display:inline-block;background:var(--s3);border-radius:3px;padding:0 4px;margin:1px 2px 1px 0;font-size:9px;color:var(--txt2)}
 
+/* Live microstructure read (advisory only) — RADAR Focus + Cockpit slots */
+.live-micro{border:1px solid var(--b2);border-radius:8px;padding:8px 11px;margin:8px 0;background:rgba(90,140,255,0.05)}
+.live-micro__title{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--txt2);margin-bottom:5px}
+.live-micro__ctx{font-weight:500;color:var(--txt3);text-transform:none;letter-spacing:0}
+.live-micro__row{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px;font-size:11px;line-height:1.5;margin:2px 0}
+.live-micro__row>span:first-child{color:var(--txt3);min-width:96px}
+.live-micro__detail{color:var(--txt2);font-family:'IBM Plex Mono',monospace}
+.live-micro__msg,.live-micro__err{color:var(--txt3)}
+.live-micro__err{color:var(--red)}
+.live-micro__st{font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;border-radius:3px;border:1px solid var(--b2);color:var(--txt2)}
+.live-micro__st--ok{color:var(--grn);border-color:var(--grn)}
+.live-micro__st--unsupported{color:var(--txt3)}
+.live-micro__st--unknown{color:var(--amb);border-color:var(--amb)}
+.live-micro__note{margin-top:6px;font-size:9px;color:var(--txt3);font-style:italic}
+

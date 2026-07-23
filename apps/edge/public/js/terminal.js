@@ -5103,6 +5103,7 @@ function _cpRadarFocusHtml() {
       <div><span>Next trigger</span><b>${_esc(f.nextRequiredConfirmation || 'none')}</b></div>
     </div>
     ${_cpRadarDataInsightHtml(f)}
+    ${_liveMicroSlotHtml('cockpit-live-microstructure-slot', _resolveLiveMicroTarget(f))}
     <button type="button" id="cockpit-import-radar" class="cockpit-primary-btn">Import this RADAR setup</button>
   </div>`;
 }
@@ -5162,6 +5163,9 @@ function renderCockpit() {
   // otherwise a clear "go pick one" message + Open Trading RADAR button.
   const focusEl = document.getElementById('cockpit-radar-focus');
   if (focusEl) focusEl.innerHTML = _cpRadarFocusHtml();
+  // Advisory-only live microstructure read (cache-backed + deduped — a no-op
+  // network-wise when the same candidate is already loaded).
+  try { _refreshLiveMicrostructure('cockpit-live-microstructure-slot'); } catch (e) { console.warn('[LIVE-MICRO] cockpit refresh failed:', e && e.message); }
 
   // Funding divergence / extremes — context-only panel (existing DIVERGENCE_MAP).
   const fxEl = document.getElementById('cockpit-funding-context');
@@ -9468,6 +9472,7 @@ function _renderTradingRadar(radar, esc) {
       </div>
       ${_radarBackendPriceHistoryHtml(selected)}
       ${_radarPriceHistorySectionHtml(selected)}
+      ${_liveMicroSlotHtml('radar-live-microstructure-slot', _resolveLiveMicroTarget(selected))}
       <!-- Phase C.3: compact, decision-first visible sections. All raw/technical
            panels are moved into the collapsed "Advanced diagnostics" block below
            so the operator reads state in one screen without scrolling debug rows. -->
@@ -9784,6 +9789,9 @@ function renderTradingRadarPanel() {
   // focused base symbol, repaints from memory on every other re-render, so
   // Fleet poll ticks never re-hit the endpoint. Admin-only, GET-only.
   try { _refreshRadarPriceHistorySignals(); } catch (e) { console.warn('[RADAR] price-history signal refresh failed:', e && e.message); }
+  // Advisory-only live microstructure read for the focused candidate. Cache-
+  // backed + deduped, so this is a no-op network-wise on repaint / poll ticks.
+  try { _refreshLiveMicrostructure('radar-live-microstructure-slot'); } catch (e) { console.warn('[LIVE-MICRO] radar refresh failed:', e && e.message); }
 }
 
 // Position rows to render, with stale/duplicate "open" rows removed (spec 3). A
@@ -13220,3 +13228,138 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 });
+
+// ── Live microstructure read (advisory only) ─────────────────────────
+// Display-only surface over /api/microstructure-snapshot (funding / OI /
+// aggregate-trade taker-flow proxy + order-book summary). It starts a GET,
+// renders numbers, and NEVER changes a server gate, strict Absorb,
+// ENTRY_READY, or Telegram — the same guarantee the endpoint advertises with
+// advisory_only:true. Results are cached/deduped by `${pair}|${market}` so
+// Fleet poll ticks and the twin RADAR + Cockpit slots never spam the network,
+// and every failure is fail-closed + visible + logged (error-observability).
+const LIVE_MICRO_ADVISORY_TEXT = 'Advisory only — does not change server gates, strict Absorb, ENTRY_READY, or Telegram.';
+const LIVE_MICRO_TTL_MS = 20_000;
+const LIVE_MICRO_SLOT_IDS = ['radar-live-microstructure-slot', 'cockpit-live-microstructure-slot'];
+const _liveMicroCache = new Map(); // key `${pair}|${market}` -> { at, model }
+const _liveMicroInFlight = new Set();
+
+// Resolve a RADAR/Cockpit candidate to a Binance { pair, market } SAFELY.
+// The candidate's `symbol` is a venue PAIR in RADAR context ("BTCUSDT" /
+// "ERAUSDC"), but a base-only symbol ("BTC") can arrive from other call sites —
+// so a USDT quote is appended ONLY when no known quote suffix is already
+// present, never blindly (which would corrupt a USDC pair into USDCUSDT).
+function _resolveLiveMicroTarget(candidate) {
+  if (!candidate) return null;
+  const raw = String((candidate && (candidate.symbol || candidate.pair)) || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!raw) return null;
+  const quotes = ['USDT', 'USDC', 'FDUSD', 'BUSD', 'TUSD', 'USD'];
+  const hasQuote = quotes.some((q) => raw.endsWith(q) && raw.length > q.length);
+  const pair = hasQuote ? raw : raw + 'USDT';
+  const market = (candidate.binance_market === 'futures' || candidate.exchange === 'ALPHA') ? 'futures' : 'spot';
+  return { pair, market };
+}
+
+function _liveMicroStatusText(s) {
+  return String(s == null ? 'UNKNOWN' : s).toUpperCase();
+}
+
+// Render the advisory read from a view model. States: waiting (no candidate),
+// loading, auth (signed out), error (fail-closed visible reason), ok (data).
+function _liveMicroInnerHtml(model) {
+  const num = (v, dp) => (v == null || !isFinite(v)) ? '—' : Number(v).toFixed(dp);
+  const wrap = (bodyHtml) =>
+    '<div class="live-micro__title">Live microstructure read <span class="live-micro__ctx">advisory</span></div>'
+    + bodyHtml
+    + `<div class="live-micro__note">${_esc(LIVE_MICRO_ADVISORY_TEXT)}</div>`;
+  const m = model || { state: 'waiting' };
+  if (m.state === 'waiting') return wrap('<div class="live-micro__row live-micro__msg">Select a RADAR candidate to load its live microstructure.</div>');
+  if (m.state === 'loading') return wrap('<div class="live-micro__row live-micro__msg">Loading live microstructure…</div>');
+  if (m.state === 'auth') return wrap('<div class="live-micro__row live-micro__msg">Sign in to load the live microstructure read.</div>');
+  if (m.state === 'error') return wrap(`<div class="live-micro__row live-micro__err">${_esc(m.message || 'Live microstructure unavailable.')}</div>`);
+  // state === 'ok'
+  const d = m.data || {};
+  const ob = d.orderbook || {}, fu = d.funding || {}, oi = d.open_interest || {}, fl = d.flow_proxy || {}, lq = d.liquidation || {};
+  const obDetail = ob.available
+    ? `bid ${_esc(num(ob.best_bid, 6))} · ask ${_esc(num(ob.best_ask, 6))} · spread ${_esc(num(ob.spread_bps, 2))} bps · imb ${_esc(num(ob.imbalance, 3))}`
+    : _esc(ob.reason || 'unavailable');
+  const fuDetail = fu.available ? `rate ${_esc(num(fu.rate, 6))}` : _esc(fu.reason || _liveMicroStatusText(fu.status));
+  const oiDetail = oi.available ? `value ${_esc(num(oi.value, 2))}` : _esc(oi.reason || _liveMicroStatusText(oi.status));
+  const flDetail = fl.available ? `taker buy ratio ${_esc(num(fl.taker_buy_ratio, 3))} · ${_esc(fl.trades_used)} trades` : _esc(fl.reason || _liveMicroStatusText(fl.status));
+  const mkt = `${_esc(d.market || '--')}${d.market_fallback ? ' (fallback)' : ''}`;
+  const row = (label, status, detail) =>
+    `<div class="live-micro__row"><span>${_esc(label)}</span>`
+    + `<b class="live-micro__st live-micro__st--${_esc(_liveMicroStatusText(status).toLowerCase())}">${_esc(_liveMicroStatusText(status))}</b> `
+    + `<span class="live-micro__detail">${detail}</span></div>`;
+  return wrap(
+    row('Order book', ob.status, obDetail)
+    + row('Funding', fu.status, fuDetail)
+    + row('Open interest', oi.status, oiDetail)
+    + row('Flow proxy', fl.status, flDetail)
+    + row('Liquidation', lq.status, _esc(lq.reason || ''))
+    + `<div class="live-micro__row live-micro__resolved"><span>Resolved market</span><b>${mkt}</b></div>`
+  );
+}
+
+// Emit the slot container (id + resolved target as data-attrs) with an initial
+// view: cached data if we have any, else loading (target present) / waiting.
+function _liveMicroSlotHtml(slotId, target) {
+  const pair = target ? target.pair : '';
+  const market = target ? target.market : '';
+  const key = (pair && market) ? `${pair}|${market}` : '';
+  const cached = key ? _liveMicroCache.get(key) : null;
+  const model = cached ? { state: 'ok', data: cached.model } : (target ? { state: 'loading' } : { state: 'waiting' });
+  return `<div class="live-micro" id="${_esc(slotId)}" data-micro-pair="${_esc(pair)}" data-micro-market="${_esc(market)}" data-micro-key="${_esc(key)}">`
+    + _liveMicroInnerHtml(model)
+    + '</div>';
+}
+
+// Repaint every mounted slot that is showing this pair|market key (RADAR and
+// Cockpit can display the same focused candidate at once).
+function _liveMicroPaintKey(key, model) {
+  for (const id of LIVE_MICRO_SLOT_IDS) {
+    const el = document.getElementById(id);
+    if (el && (el.getAttribute('data-micro-key') || '') === key) el.innerHTML = _liveMicroInnerHtml(model);
+  }
+}
+
+async function _refreshLiveMicrostructure(slotId) {
+  const slot = document.getElementById(slotId);
+  if (!slot) return;
+  const pair = slot.getAttribute('data-micro-pair') || '';
+  const market = slot.getAttribute('data-micro-market') || '';
+  if (!pair || !market) { slot.innerHTML = _liveMicroInnerHtml({ state: 'waiting' }); return; }
+  const key = `${pair}|${market}`;
+  const cached = _liveMicroCache.get(key);
+  if (cached && (Date.now() - cached.at) < LIVE_MICRO_TTL_MS) {
+    slot.innerHTML = _liveMicroInnerHtml({ state: 'ok', data: cached.model });
+    return;
+  }
+  if (_liveMicroInFlight.has(key)) return; // dedupe: one in-flight fetch per key
+  _liveMicroInFlight.add(key);
+  slot.innerHTML = _liveMicroInnerHtml(cached ? { state: 'ok', data: cached.model } : { state: 'loading' });
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 6000);
+  try {
+    const authHeaders = await _getAuthHeaders();
+    if (!authHeaders.Authorization) { _liveMicroPaintKey(key, { state: 'auth' }); return; }
+    const url = `/api/microstructure-snapshot?pair=${encodeURIComponent(pair)}&market=${encodeURIComponent(market)}`;
+    const r = await fetch(url, { signal: ctrl.signal, headers: { 'Accept': 'application/json', ...authHeaders } });
+    if (!r.ok) {
+      let body = null; try { body = await r.json(); } catch { /* keep HTTP status as the reason */ }
+      const reason = (body && (body.detail || body.error)) || `HTTP ${r.status}`;
+      console.warn('[LIVE-MICRO]', r.status, pair, market, reason);
+      _liveMicroPaintKey(key, { state: 'error', message: `Live microstructure unavailable: ${reason}` });
+      return;
+    }
+    const json = await r.json();
+    _liveMicroCache.set(key, { at: Date.now(), model: json });
+    _liveMicroPaintKey(key, { state: 'ok', data: json });
+  } catch (e) {
+    const isAbort = e && e.name === 'AbortError';
+    console.warn('[LIVE-MICRO]', isAbort ? 'timeout' : (e && e.name ? e.name : 'network error'), pair, market);
+    _liveMicroPaintKey(key, { state: 'error', message: isAbort ? 'Live microstructure: timed out (backend/Binance did not answer).' : 'Live microstructure unavailable (network error).' });
+  } finally {
+    clearTimeout(timer);
+    _liveMicroInFlight.delete(key);
+  }
+}

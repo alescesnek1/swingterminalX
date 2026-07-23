@@ -56,6 +56,14 @@
   path = "/api/orderbook"
   function = "orderbook"
 
+# Advisory-only live microstructure read (funding / OI / aggregate-trade flow
+# proxy + order-book summary) for the RADAR Focus and Cockpit UI. Read-only,
+# public Binance GETs, changes no server gate / strict Absorb / ENTRY_READY /
+# Telegram.
+[[edge_functions]]
+  path = "/api/microstructure-snapshot"
+  function = "microstructure-snapshot"
+
 # ── Headers ──
 [[headers]]
   for = "/*"

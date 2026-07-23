@@ -51,11 +51,16 @@ export function normalizeBinanceSymbol(input) {
   return { pair: `${stripped}USDT`, base: stripped, quote: 'USDT' };
 }
 
-async function fetchJson(url, label) {
+// `fetchImpl` defaults to the global `fetch` (evaluated at call time, so tests
+// that swap `global.fetch` still take effect). It is optional so callers that
+// want dependency injection — e.g. the microstructure-snapshot route routing a
+// single mock fetch across depth/funding/OI/aggTrades — can pass one WITHOUT
+// changing behavior for existing callers (orderbook.js still passes nothing).
+async function fetchJson(url, label, fetchImpl = fetch) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(url, { signal: ctrl.signal, headers: { 'Accept': 'application/json' } });
+    const res = await fetchImpl(url, { signal: ctrl.signal, headers: { 'Accept': 'application/json' } });
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       throw new Error(`${label} HTTP ${res.status}: ${body.slice(0, 140)}`);
@@ -172,14 +177,14 @@ export function classifyDepthFailure(message) {
  * can distinguish "not on this market" from a real upstream failure — never a
  * silent null.
  */
-export async function fetchOrderbook({ pair, market = 'spot' }) {
+export async function fetchOrderbook({ pair, market = 'spot', fetchImpl }) {
   if (!pair) throw depthError('UPSTREAM_ERROR', 'fetchOrderbook: missing pair');
   const base = market === 'futures' ? FUT_BASE : SPOT_BASE;
   const path = market === 'futures' ? '/fapi/v1/depth' : '/api/v3/depth';
   const url = `${base}${path}?symbol=${pair}&limit=${ORDERBOOK_DEPTH}`;
   let depth;
   try {
-    depth = await fetchJson(url, `${market}-depth/${pair}`);
+    depth = await fetchJson(url, `${market}-depth/${pair}`, fetchImpl);
   } catch (e) {
     const msg = String(e?.message || e);
     throw depthError(classifyDepthFailure(msg), msg);
@@ -203,11 +208,11 @@ export async function fetchOrderbook({ pair, market = 'spot' }) {
  * so the route can honestly say "not listed on Binance" — not "upstream
  * failed". Returns { book, market, fallback }.
  */
-export async function resolveOrderbook({ pair, market = 'spot' }) {
+export async function resolveOrderbook({ pair, market = 'spot', fetchImpl }) {
   const primary = market === 'futures' ? 'futures' : 'spot';
   const secondary = primary === 'spot' ? 'futures' : 'spot';
   try {
-    const book = await fetchOrderbook({ pair, market: primary });
+    const book = await fetchOrderbook({ pair, market: primary, fetchImpl });
     return { book, market: primary, fallback: false };
   } catch (e) {
     const kind = e?.kind || 'UPSTREAM_ERROR';
@@ -217,7 +222,7 @@ export async function resolveOrderbook({ pair, market = 'spot' }) {
     if (kind !== 'INVALID_SYMBOL' && kind !== 'EMPTY_BOOK') throw e;
   }
   try {
-    const book = await fetchOrderbook({ pair, market: secondary });
+    const book = await fetchOrderbook({ pair, market: secondary, fetchImpl });
     return { book, market: secondary, fallback: true };
   } catch (e2) {
     const kind2 = e2?.kind || 'UPSTREAM_ERROR';
