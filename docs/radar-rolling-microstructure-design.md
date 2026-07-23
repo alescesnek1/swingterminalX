@@ -1,10 +1,25 @@
-# RADAR Rolling Microstructure — Technical Design & Risk Review
+# RADAR Rolling Microstructure - Technical Design and Risk Review
 
-> **Status: LOCAL FOUNDATION ONLY ? not production active.** A disabled-by-default, one-shot local producer now wraps the pure core. It defaults to zero network/POST; explicit local enablement is dry-run unless a separate post flag plus token/base URL are present. Producer snapshots are trusted:false and cannot activate strict Absorb. No scheduler or production activation is included.
-> This document specifies the next phase (rolling absorption data). No producer,
-> trading-radar, gate, threshold, score, ENTRY_READY, or Telegram code is to be
-> changed by reading or merging this document. It is the companion to the
-> static-phase doc, [radar-microstructure.md](radar-microstructure.md).
+> **Status: LOCAL FOUNDATION ONLY - production inactive.**
+> As of `df333c3`, the repo contains the pure rolling microstructure core,
+> snapshot validation, a disabled-by-default producer wrapper, and tests.
+> This is not a production activation. Strict Absorb remains fail-closed:
+> no trusted rolling producer is running, `ENTRY_READY` is unchanged, and
+> Telegram remains blocked unless the existing strict gates pass.
+>
+> The original design-only document has now been partially implemented as a
+> local foundation. The implemented parts are limited to measurement helpers,
+> snapshot validation, a disabled producer wrapper, and tests. Gate thresholds,
+> `ENTRY_READY`, Telegram eligibility, and production runtime activation remain
+> unchanged.
+>
+> Production activation is intentionally out of scope. It requires a separately
+> reviewed runner/scheduler, explicit POST mode, `BOT_WORKER_TOKEN`,
+> `CONTROL_BASE_URL`, and a machine with working Binance futures public egress.
+> Producer snapshots remain `trusted:false`; missing, thin, stale, or malformed
+> measurements fail closed and are not allowed to unlock Strict Absorb.
+>
+> This document remains the companion to [radar-microstructure.md](radar-microstructure.md).
 
 ## Design stance
 
