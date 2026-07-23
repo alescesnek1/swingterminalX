@@ -13,6 +13,31 @@
 > `/reply` or `/admin_summary` support system** here. If you find yourself
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
+> _RADAR STALE-vs-advisory wording clarity (2026-07-23, local-only on top of
+> `aa22b00`):_ UI copy-only pass — no gate, score, ENTRY_READY, Telegram, or
+> producer logic touched. Root confusion: the RADAR Focus card can show the
+> top **strict-Absorb STALE banner** (server GATE data — producer off / static
+> snapshot stale) at the same time the admin price-history / live-microstructure
+> **advisory** sections show a live "Orderbook: Browser live book (OK)" read,
+> which read as a contradiction. Fixes: (1) the STALE banner
+> (`_radarMicrostructureStatusNote`) now explicitly says this is **SERVER-side
+> strict-Absorb GATE data — not the browser/live advisory read shown below**,
+> plus a bridge line *"Browser live book can be OK while strict rolling Absorb
+> remains STALE. They are different data layers."* (2) Trade Readiness's
+> "Missing data:" label is now **"Missing server-gate data:"**. (3) The PH
+> admin readiness-verdict disclaimer and its "Orderbook:" row now say
+> **"advisory read only"** / **"does not satisfy strict Absorb"** (that
+> sub-panel's own long-standing test guard forbids the literal `ENTRY_READY`
+> token, so it keeps its existing "server entry gate" phrasing instead). (4)
+> The Live Microstructure section (`LIVE_MICRO_ADVISORY_TEXT`, outside that
+> guard) now reads **"Advisory read only — does not satisfy strict Absorb and
+> does not unblock ENTRY_READY or Telegram."** Cache-bust bumped **`?v=6i2` →
+> `?v=6i3`** per standing discipline (any JS/CSS change bumps the token).
+> Updated 3 tests whose assertions pinned the OLD wording
+> (`frontend.radar-trade-readiness`, `frontend.radar-cockpit-flow`,
+> `frontend.live-microstructure`) to the new, intentionally-changed copy. Full
+> suite green (1662 pass / 0 fail / 26 skipped). No push, no deploy.
+>
 > _Live microstructure visibility for RADAR + Cockpit (2026-07-23, local-only
 > on top of `f55f766`):_ added a NEW advisory-only, read-only same-origin GET
 > Edge route **`/api/microstructure-snapshot`**

@@ -114,7 +114,7 @@ test('A: RADAR focus render honors the persisted pick (poll cannot yank focus of
 // ── B) Humanized Trade Readiness "Missing data" ─────────────────────────────
 
 test('B: Missing data renders through the humanizer, not raw candidate keys', () => {
-  assert.match(terminalJs, /Missing data:<\/b> \$\{joinList\(\(Array\.isArray\(tr\.missing\) \? tr\.missing : \[\]\)\.map\(_radarHumanizeSignal\)\)\}/);
+  assert.match(terminalJs, /Missing server-gate data:<\/b> \$\{joinList\(\(Array\.isArray\(tr\.missing\) \? tr\.missing : \[\]\)\.map\(_radarHumanizeSignal\)\)\}/);
 });
 
 test('B: humanizer maps every required key and never emits camelCase output', () => {

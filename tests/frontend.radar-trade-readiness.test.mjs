@@ -21,7 +21,7 @@ test('RADAR trade-readiness panel shows the operator-language sections', () => {
   assert.match(terminalJs, /Context only/);
   assert.match(terminalJs, /Blocked by:/);
   assert.match(terminalJs, /Supporting context:/);
-  assert.match(terminalJs, /Missing data:/);
+  assert.match(terminalJs, /Missing server-gate data:/);
   assert.match(terminalJs, /Next check:/);
   // renders the server-provided arrays/fields
   assert.match(terminalJs, /tr\.headline/);

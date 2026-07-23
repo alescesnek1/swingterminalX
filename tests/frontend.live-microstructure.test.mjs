@@ -40,23 +40,23 @@ test('Cockpit import panel mounts #cockpit-live-microstructure-slot', () => {
 });
 
 // ── 3. Advisory wording names the non-effects explicitly ─────
-test('advisory text states it changes neither strict Absorb, ENTRY_READY, nor Telegram', () => {
+test('advisory text states it is advisory-read-only and does not satisfy strict Absorb / unblock ENTRY_READY / Telegram', () => {
   const m = terminalJs.match(/const LIVE_MICRO_ADVISORY_TEXT = '([^']+)'/);
   assert.ok(m, 'LIVE_MICRO_ADVISORY_TEXT must be defined');
   const text = m[1];
-  assert.match(text, /Advisory only/i);
-  assert.match(text, /strict Absorb/);
+  assert.match(text, /Advisory read only/i);
+  assert.match(text, /does not satisfy strict Absorb/i);
   assert.match(text, /ENTRY_READY/);
   assert.match(text, /Telegram/);
   assert.match(text, /server gate/i);
 });
 
-// ── 4. Cache token fully bumped to 6i2 ───────────────────────
-test('all versioned assets in index.html are bumped to exactly one token: 6i2', () => {
+// ── 4. Cache token fully bumped to 6i3 ───────────────────────
+test('all versioned assets in index.html are bumped to exactly one token: 6i3', () => {
   const versions = Array.from(indexHtml.matchAll(/\?v=([a-z0-9]+)/g)).map((x) => x[1]);
   assert.ok(versions.length >= 10, 'expected the full versioned asset set');
-  assert.ok(versions.every((v) => v === '6i2'), `all asset versions must be 6i2, saw: ${[...new Set(versions)].join(',')}`);
-  assert.doesNotMatch(indexHtml, /\?v=6i1\b/, 'the previous cache-bust token must be gone');
+  assert.ok(versions.every((v) => v === '6i3'), `all asset versions must be 6i3, saw: ${[...new Set(versions)].join(',')}`);
+  assert.doesNotMatch(indexHtml, /\?v=6i2\b/, 'the previous cache-bust token must be gone');
 });
 
 // ── 5. No inline <script> injected for this feature ──────────

@@ -5755,7 +5755,9 @@ function _radarPhInnerHtml(focusBase) {
     + '<div style="font-size:12px; margin-top:2px;"><b style="color:#ffd166;">Orderbook:</b> '
     + '<span style="color:' + obColor + ';">' + _esc(systemUnavailable ? 'Unknown' : (m.orderbookModeText || 'Unknown'))
     + (systemUnavailable || !m.orderbookReasonText ? '' : ' (' + _esc(m.orderbookReasonText) + ')')
-    + (obDegraded ? '' : '') + '</span></div>'
+    + (obDegraded ? '' : '') + '</span>'
+    + (systemUnavailable ? '' : ' <span style="color:var(--txt3); font-size:11px;">— advisory read only; an OK book here does not satisfy strict Absorb</span>')
+    + '</div>'
     + _radarPhReadinessHtml(m);
 }
 
@@ -5779,7 +5781,7 @@ function _radarPhReadinessHtml(model) {
   const blockers = Array.isArray(d.blockers) && d.blockers.length ? d.blockers.join('; ') : 'none';
   return '<div style="font-size:12px; margin-top:6px; padding-top:5px; border-top:1px dashed rgba(255,255,255,0.12);">'
     + '<b style="color:#ffd166;">Readiness verdict</b> '
-    + '<span style="color:var(--txt3); font-size:11px;">(price-history' + (d.source === 'price_history+browser_orderbook' ? ' + live book' : '') + ' — advisory, does not change the server entry gate or Telegram)</span>'
+    + '<span style="color:var(--txt3); font-size:11px;">(price-history' + (d.source === 'price_history+browser_orderbook' ? ' + live book' : '') + ' — advisory read only; does not satisfy strict Absorb; does not change the server entry gate or Telegram)</span>'
     + '<div style="margin-top:3px; display:flex; flex-wrap:wrap; gap:3px 14px;">'
     + '<span>Reclaim <b style="color:' + _radarPhVerdictColor(d.reclaim) + ';">' + _esc(vlabel(d.reclaim)) + '</b></span>'
     + '<span>Absorption <b style="color:' + _radarPhVerdictColor(d.absorption) + ';">' + _esc(vlabel(d.absorption)) + '</b></span>'
@@ -8960,8 +8962,10 @@ function _radarMicrostructureStatusNote(radar) {
   const detail = ctx ? _esc(ctx) : (producerOff ? 'rolling absorption producer is not running' : 'static microstructure snapshot is stale');
   return '<div class="radar-micro-status-note" style="border-radius:8px; padding:8px 11px; margin-bottom:10px; background:rgba(255,170,0,0.08); border:1px solid rgba(255,170,0,0.4); font-size:12px; color:#f6f7fb;">'
     + '<b style="color:#ffaa00;">Strict rolling absorption is STALE for all candidates</b> — ' + detail + '. '
-    + 'This is a data-source state, not a per-coin signal: the <b>Absorb</b> column reads STALE everywhere until the microstructure producer is live again. '
-    + 'It does not change reclaim, ENTRY_READY, Telegram, or the setup/execution score.'
+    + 'This is <b>SERVER-side strict-Absorb GATE data</b> — not the browser/live advisory read shown below. '
+    + 'It is a data-source state, not a per-coin signal: the <b>Absorb</b> column reads STALE everywhere until the microstructure producer is live again. '
+    + 'It does not change reclaim, ENTRY_READY, Telegram, or the setup/execution score. '
+    + '<span class="radar-micro-status-note__bridge">Browser live book can be OK while strict rolling Absorb remains STALE. They are different data layers.</span>'
     + '</div>';
 }
 // Compact matrix label for the Absorb column. Never returns a bare "?" — every
@@ -9441,7 +9445,7 @@ function _renderTradingRadar(radar, esc) {
         <div class="radar-trade-readiness__headline ${readyCls}">Actionable now: ${tr.actionable ? 'yes' : 'no'}</div>
         <div class="radar-trade-readiness__row"><b>Blocked by:</b> ${joinList(tr.blockers)}</div>
         <div class="radar-trade-readiness__row"><b>Supporting context:</b> ${joinList(tr.supportive)}</div>
-        <div class="radar-trade-readiness__row"><b>Missing data:</b> ${joinList((Array.isArray(tr.missing) ? tr.missing : []).map(_radarHumanizeSignal))}</div>
+        <div class="radar-trade-readiness__row"><b>Missing server-gate data:</b> ${joinList((Array.isArray(tr.missing) ? tr.missing : []).map(_radarHumanizeSignal))}</div>
         <div class="radar-trade-readiness__row"><b>Next check:</b> ${esc(tr.nextCheck)}</div>
         <div class="radar-trade-readiness__sub">${esc(tr.headline)}</div>
       </div>`;
@@ -13237,7 +13241,7 @@ document.addEventListener('DOMContentLoaded', () => {
 // advisory_only:true. Results are cached/deduped by `${pair}|${market}` so
 // Fleet poll ticks and the twin RADAR + Cockpit slots never spam the network,
 // and every failure is fail-closed + visible + logged (error-observability).
-const LIVE_MICRO_ADVISORY_TEXT = 'Advisory only — does not change server gates, strict Absorb, ENTRY_READY, or Telegram.';
+const LIVE_MICRO_ADVISORY_TEXT = 'Advisory read only — does not satisfy strict Absorb and does not unblock ENTRY_READY or Telegram. Server gates are unaffected.';
 const LIVE_MICRO_TTL_MS = 20_000;
 const LIVE_MICRO_SLOT_IDS = ['radar-live-microstructure-slot', 'cockpit-live-microstructure-slot'];
 const _liveMicroCache = new Map(); // key `${pair}|${market}` -> { at, model }
@@ -13268,7 +13272,7 @@ function _liveMicroStatusText(s) {
 function _liveMicroInnerHtml(model) {
   const num = (v, dp) => (v == null || !isFinite(v)) ? '—' : Number(v).toFixed(dp);
   const wrap = (bodyHtml) =>
-    '<div class="live-micro__title">Live microstructure read <span class="live-micro__ctx">advisory</span></div>'
+    '<div class="live-micro__title">Live microstructure read <span class="live-micro__ctx">Advisory read only</span></div>'
     + bodyHtml
     + `<div class="live-micro__note">${_esc(LIVE_MICRO_ADVISORY_TEXT)}</div>`;
   const m = model || { state: 'waiting' };
