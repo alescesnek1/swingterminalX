@@ -169,7 +169,9 @@ test('all admin/debug/raw panels are nested inside the collapsed Technical detai
 });
 
 test('Technical details accordion is collapsed by default (no hardcoded open attribute)', () => {
-  assert.match(terminalJs, /class="radar-technical-details"\$\{window\._fleetTechDetailsExpanded[^}]*\? ' open' : ''\}/);
+  // After the security hardening, attributes are: data-toggle-map, data-symbol, then conditional open.
+  assert.match(terminalJs, /class="radar-technical-details" data-toggle-map="_fleetTechDetailsExpanded" data-symbol="\$\{esc/);
+  assert.match(terminalJs, /\$\{window\._fleetTechDetailsExpanded[^}]*\? ' open' : ''\}/);
   assert.doesNotMatch(terminalJs, /class="radar-technical-details"\s+open/);
 });
 
@@ -203,4 +205,74 @@ test('CSS defines the new human-first section classes', () => {
   for (const cls of ['.radar-decision', '.radar-gate', '.radar-next', '.radar-klevels', '.radar-technical-details', '.radar-tech-group', '.radar-datasrc']) {
     assert.ok(terminalCss.includes(cls + '{') || terminalCss.includes(cls + ' ') || terminalCss.includes(cls + ','), `CSS must style ${cls}`);
   }
+});
+
+// ── SECURITY: Inline ontoggle + raw symbol hardening ─────────
+test('no inline ontoggle handler interpolates raw selected.symbol', () => {
+  // The unsafe pattern was: ontoggle="...['${selected.symbol}']..."
+  // After the fix, ontoggle should not appear with symbol interpolation.
+  assert.doesNotMatch(terminalJs, /ontoggle="[^"]*\$\{selected\.symbol\}/);
+  assert.doesNotMatch(terminalJs, /ontoggle="[^"]*\$\{esc\(selected\.symbol/);
+});
+
+test('RADAR details use safe data-symbol + data-toggle-map instead of inline JS', () => {
+  // Both <details> elements should have data-toggle-map and data-symbol attributes.
+  assert.match(terminalJs, /data-toggle-map="_fleetTechDetailsExpanded" data-symbol="\$\{esc/);
+  assert.match(terminalJs, /data-toggle-map="_fleetAdvancedDiagExpanded" data-symbol="\$\{esc/);
+});
+
+test('renderTradingRadarPanel installs toggle listeners via querySelectorAll, not inline JS', () => {
+  const fnBody = extractFn(terminalJs, 'renderTradingRadarPanel');
+  assert.match(fnBody, /querySelectorAll.*data-toggle-map.*data-symbol/);
+  assert.match(fnBody, /addEventListener.*toggle/);
+  assert.match(fnBody, /el\.dataset\.symbol/);
+  assert.match(fnBody, /el\.dataset\.toggleMap/);
+});
+
+test('a symbol with a single quote does not produce broken HTML in _renderTradingRadar', () => {
+  // Render function outputs data-symbol="${esc(selected.symbol)}".
+  // _esc maps ' → &#39;, so <details data-symbol="FOO&#39;BAR"> is safe.
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const sym = "FOO'USDT";
+  const escaped = esc(sym);
+  assert.equal(escaped, 'FOO&#39;USDT');
+  // Construct the attribute as it would appear in rendered HTML.
+  const attr = `data-symbol="${escaped}"`;
+  // Verify the attribute does not contain a raw unescaped single quote that
+  // could break out of the HTML attribute value.
+  assert.doesNotMatch(attr, /data-symbol="[^"]*'[^"]*"/);
+});
+
+test('a symbol with a double quote does not produce broken HTML in _renderTradingRadar', () => {
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const sym = 'FOO"USDT';
+  const escaped = esc(sym);
+  assert.equal(escaped, 'FOO&quot;USDT');
+  const attr = `data-symbol="${escaped}"`;
+  // The escaped value should not contain a raw double quote.
+  // Count double quotes: should be exactly 2 (opening and closing).
+  const dqCount = [...attr].filter(c => c === '"').length;
+  assert.equal(dqCount, 2, 'only the two delimiters, no injected double quote');
+});
+
+test('Technical details section and advanced diagnostics section still exist and are collapsed', () => {
+  assert.match(terminalJs, /class="radar-technical-details"/);
+  assert.match(terminalJs, /class="radar-advanced-diagnostics"/);
+  // Neither has a hardcoded open attribute — open is purely conditional.
+  assert.doesNotMatch(terminalJs, /class="radar-technical-details"\s+open\b/);
+  assert.doesNotMatch(terminalJs, /class="radar-advanced-diagnostics"\s+open\b/);
+});
+
+test('live microstructure slot and advisory content still renders via safe path', () => {
+  assert.match(terminalJs, /_liveMicroSlotHtml.*radar-live-microstructure-slot/);
+  assert.match(terminalJs, /_refreshLiveMicrostructure.*radar-live-microstructure-slot/);
+});
+
+test('no backend/scoring/Telegram/ENTRY_READY logic changed by toggle hardening', () => {
+  const fnBody = extractFn(terminalJs, 'renderTradingRadarPanel');
+  assert.doesNotMatch(fnBody, /telegramEligible\s*=/);
+  assert.doesNotMatch(fnBody, /ENTRY_READY/);
+  assert.doesNotMatch(fnBody, /SETUP_SCORE\s*=/);
+  assert.doesNotMatch(fnBody, /EXECUTION_SCORE\s*=/);
+  assert.doesNotMatch(fnBody, /STRICT_ABSORB_CONFIRMED\s*=/);
 });

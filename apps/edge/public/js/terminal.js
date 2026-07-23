@@ -9599,7 +9599,7 @@ function _renderTradingRadar(radar, esc) {
       ${_radarGateChecklistHtml(selected, ctx)}
       ${_radarNextActionHtml(selected, ctx)}
       ${_radarKeyLevelsHtml(selected, ctx)}
-      <details class="radar-technical-details"${window._fleetTechDetailsExpanded && window._fleetTechDetailsExpanded[selected.symbol] ? ' open' : ''} ontoggle="window._fleetTechDetailsExpanded = window._fleetTechDetailsExpanded || {}; window._fleetTechDetailsExpanded['${selected.symbol}'] = this.open;">
+      <details class="radar-technical-details" data-toggle-map="_fleetTechDetailsExpanded" data-symbol="${esc(selected.symbol)}"${window._fleetTechDetailsExpanded && window._fleetTechDetailsExpanded[selected.symbol] ? ' open' : ''}>
         <summary class="radar-technical-details__summary">Technical details</summary>
       <div class="radar-tech-group"><div class="radar-tech-group__title">Server gate / strict Absorb</div>
       ${_radarMicrostructureStatusNote(radar)}
@@ -9692,7 +9692,7 @@ function _renderTradingRadar(radar, esc) {
       <div class="radar-focus-blocked"><span>Reason</span><b>${esc((selected.REASON || selected.reasons || []).join(' | ') || '--')}</b></div>
       <div class="radar-focus-blocked"><span>Invalidation</span><b>${esc(selected.INVALIDATION || '--')}</b></div>
       </div>
-      <details class="radar-advanced-diagnostics" style="margin-top:8px;" ${window._fleetAdvancedDiagExpanded && window._fleetAdvancedDiagExpanded[selected.symbol] ? 'open' : ''} ontoggle="window._fleetAdvancedDiagExpanded = window._fleetAdvancedDiagExpanded || {}; window._fleetAdvancedDiagExpanded['${selected.symbol}'] = this.open;">
+      <details class="radar-advanced-diagnostics" style="margin-top:8px;" data-toggle-map="_fleetAdvancedDiagExpanded" data-symbol="${esc(selected.symbol)}" ${window._fleetAdvancedDiagExpanded && window._fleetAdvancedDiagExpanded[selected.symbol] ? 'open' : ''}>
         <summary style="cursor:pointer; font-size:11px; letter-spacing:.06em; color:var(--txt2); text-transform:uppercase; padding:5px 0;">Raw diagnostics (click to expand)</summary>
       <div class="radar-why-next" style="border:1px solid var(--b2, #1a2540); border-radius:8px; padding:8px 11px; margin:6px 0 8px;">
         <div style="${cardLabel}">Detailed blockers</div>
@@ -9964,6 +9964,19 @@ function renderTradingRadarPanel() {
   if (!root) return;
   const radar = Fleet && Fleet.data ? Fleet.data.tradingRadar : null;
   root.innerHTML = _renderTradingRadar(radar, _esc);
+  // Hardened toggle-state persistence: replaced inline ontoggle="...symbol..." handlers
+  // (XSS sink — raw symbol in inline JS string) with safe data-* attributes + delegated
+  // event listeners. The symbol is read from element.dataset, never interpolated into JS.
+  root.querySelectorAll('details[data-toggle-map][data-symbol]').forEach(function (el) {
+    el.addEventListener('toggle', function () {
+      var mapName = el.dataset.toggleMap;
+      var sym = el.dataset.symbol;
+      if (mapName && sym) {
+        window[mapName] = window[mapName] || {};
+        window[mapName][sym] = el.open;
+      }
+    });
+  });
   // Populate the admin price-history section that _renderTradingRadar just
   // emitted inside the Focus Candidate card. Cache-backed: fetches once per
   // focused base symbol, repaints from memory on every other re-render, so
