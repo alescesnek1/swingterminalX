@@ -9151,6 +9151,144 @@ function _radarHumanizeSignal(key) {
     .trim();
 }
 
+// ── Human-first Focus Candidate helpers (UI-only, display-only) ─────────────
+// These render the default, 10-second-readable Focus view: one dominant
+// decision card, a plain-language gate checklist, the single next action, and
+// key trade levels. They read ONLY already-computed candidate/verdict fields
+// bundled in `ctx` — they start no fetch, change no score/gate/ENTRY_READY/
+// Telegram, and are pure string builders (unit-testable in isolation).
+
+// Reclaim gate as a plain { icon, text } pair. icon ∈ pass|warn|fail. Confirmed/
+// retest = pass; not-started = fail (price has not reclaimed the zone yet);
+// attempt/detected = in-progress warn; failed = fail; anything else = no-data warn.
+function _radarReclaimGate(displayStatus) {
+  const s = String(displayStatus || '');
+  if (s === 'RECLAIM_CONFIRMED' || s === 'RECLAIM_CONFIRMED_NO_RETEST' || s === 'RECLAIM_RETEST_HOLD') return { icon: 'pass', text: 'Confirmed' };
+  if (s === 'RECLAIM_NOT_STARTED') return { icon: 'fail', text: 'Not started' };
+  if (s === 'RECLAIM_ATTEMPT' || s === 'RECLAIM_DETECTED') return { icon: 'warn', text: 'In progress, not confirmed' };
+  if (s === 'RECLAIM_FAILED') return { icon: 'fail', text: 'Failed' };
+  return { icon: 'warn', text: 'No data' };
+}
+// Plain reclaim phrase for the one-line "Main reason" sentence.
+function _radarReclaimPlain(displayStatus) {
+  const s = String(displayStatus || '');
+  if (s === 'RECLAIM_NOT_STARTED') return 'reclaim has not started (price has not reclaimed the zone)';
+  if (s === 'RECLAIM_CONFIRMED' || s === 'RECLAIM_CONFIRMED_NO_RETEST' || s === 'RECLAIM_RETEST_HOLD') return 'reclaim is confirmed';
+  if (s === 'RECLAIM_FAILED') return 'reclaim failed';
+  if (s === 'RECLAIM_ATTEMPT' || s === 'RECLAIM_DETECTED') return 'reclaim is not yet confirmed';
+  return 'reclaim data is unavailable';
+}
+// Safety gate as a plain { icon, text } pair from the candidate safety status.
+function _radarSafetyGate(status) {
+  const s = String(status || 'UNKNOWN').toUpperCase();
+  if (s === 'SAFE') return { icon: 'pass', text: 'Safe' };
+  if (s === 'DANGER') return { icon: 'fail', text: 'Danger' };
+  if (s === 'UNSAFE' || s === 'HIGH_RISK') return { icon: 'fail', text: 'Unsafe' };
+  if (s === 'CAUTION' || s === 'WARN' || s === 'WARNING') return { icon: 'warn', text: 'Caution' };
+  return { icon: 'warn', text: 'Unknown' };
+}
+// One-sentence "Main reason" for the decision card, from reclaim + absorption +
+// regime/safety state. Never a trading instruction — just why the state is what it is.
+function _radarDecisionReason(c, ctx) {
+  if (ctx.entryReadyNow) return 'All entry gates are confirmed.';
+  if (ctx.status === 'RISK_OFF_BLOCKED') return 'Market regime is risk-off — no entries until it recovers.';
+  if (ctx.status === 'INVALIDATED') return 'Setup invalidated or safety risk is active — no entry.';
+  const reclaimDone = ctx.reclaimSettled === true;
+  const absorbDone = ctx.strictConfirmedUi === true;
+  const rp = _radarReclaimPlain(ctx.reclaimDisplayStatus);
+  const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+  if (!reclaimDone && !absorbDone) return cap(rp) + ' and absorption is not confirmed.';
+  if (!reclaimDone) return cap(rp) + '.';
+  if (!absorbDone) return 'Reclaim is confirmed, but absorption is not confirmed.';
+  const bl = (ctx.blockedBy && ctx.blockedBy !== '--') ? ctx.blockedBy : 'final confirmation pending';
+  return 'Waiting on ' + bl + '.';
+}
+// Dominant decision card: "SYMBOL — VERDICT" + do-not-enter line + main reason.
+function _radarHumanDecisionHtml(c, ctx) {
+  const esc = ctx.esc;
+  const head = String(ctx.entryParts && ctx.entryParts.head ? ctx.entryParts.head : 'WATCH ONLY');
+  const tone = _fleetRadarVerdictTone(head);
+  const sub = ctx.entryReadyNow ? 'Entry gates are confirmed.' : 'Do not enter now.';
+  return `<div class="radar-decision" style="border-color:${tone};">
+      <div class="radar-decision__top"><span class="radar-decision__sym">${esc(c.symbol || '--')}</span> <span class="radar-decision__verdict" style="color:${tone};">${esc(head)}</span></div>
+      <div class="radar-decision__sub" style="color:${tone};">${esc(sub)}</div>
+      <div class="radar-decision__reason"><span class="radar-decision__reason-k">Main reason</span> ${esc(_radarDecisionReason(c, ctx))}</div>
+    </div>`;
+}
+// Plain-language gate checklist. Keeps two DISTINCT rows: "Absorption" (the
+// concept: confirmed or not) and "Strict Absorb" (the server data availability),
+// so an unavailable producer never reads as a rejected absorption. Live market
+// data is explicitly marked advisory-only so an OK book never looks like an
+// entry approval.
+function _radarGateChecklistHtml(c, ctx) {
+  const esc = ctx.esc;
+  const ICON = { pass: '✅', warn: '⚠️', fail: '❌' };
+  const row = (k, g) => `<div class="radar-gate__row"><span class="radar-gate__k">${esc(k)}</span><span class="radar-gate__v radar-gate__v--${g.icon}"><span class="radar-gate__i">${ICON[g.icon]}</span> ${esc(g.text)}</span></div>`;
+  const reclaim = _radarReclaimGate(ctx.reclaimDisplayStatus);
+  const absorption = ctx.strictConfirmedUi ? { icon: 'pass', text: 'Confirmed' } : { icon: 'fail', text: 'Not confirmed' };
+  const strictData = ctx.strictConfirmedUi ? { icon: 'pass', text: 'Available' } : { icon: 'warn', text: 'Server data unavailable' };
+  const live = { icon: 'pass', text: 'Available, advisory only' };
+  const safety = _radarSafetyGate(c.safetyStatus);
+  const tg = ctx.opTelegram === 'YES' ? { icon: 'pass', text: 'Yes' } : { icon: 'fail', text: 'No — entry gates not confirmed' };
+  return `<div class="radar-gate">
+      <div class="radar-gate__title">Gate checklist</div>
+      ${row('Reclaim', reclaim)}
+      ${row('Absorption', absorption)}
+      ${row('Strict Absorb', strictData)}
+      ${row('Live market data', live)}
+      ${row('Safety', safety)}
+      ${row('Telegram', tg)}
+    </div>`;
+}
+// Single next action + a fixed caution that live orderbook OK is not an entry signal.
+function _radarNextActionHtml(c, ctx) {
+  const esc = ctx.esc;
+  const caution = ctx.entryReadyNow ? '' : `<div class="radar-next__caution">Do not treat live orderbook OK as an entry signal.</div>`;
+  return `<div class="radar-next">
+      <div class="radar-next__title">Next action</div>
+      <div class="radar-next__main">${esc(ctx.opNextConcise || '--')}</div>
+      ${caution}
+    </div>`;
+}
+// Key trade levels (entry zone / stop / invalidation / targets / timeframe).
+function _radarKeyLevelsHtml(c, ctx) {
+  const esc = ctx.esc;
+  const k = ctx.keyLevels || {};
+  const cell = (label, val) => `<div class="radar-klevels__cell"><span>${esc(label)}</span><b>${esc(val)}</b></div>`;
+  return `<div class="radar-klevels">
+      <div class="radar-klevels__title">Key levels</div>
+      <div class="radar-klevels__grid">
+        ${cell('Entry zone', k.zone || '--')}
+        ${cell('Stop', k.stop || '--')}
+        ${cell('Invalidation', k.inval || '--')}
+        ${cell('Targets', k.tps || '--')}
+        ${cell('Timeframe', k.tf || '--')}
+      </div>
+    </div>`;
+}
+// Compact data-source status/meaning matrix (inside Technical details). Explains
+// why STALE server strict-Absorb can coexist with an OK advisory live book —
+// they are different layers. Static/legend by design; the live advisory values
+// are marked advisory only (their live numbers live in the microstructure read).
+function _radarDataSourceMatrixHtml(c, radar, ctx) {
+  const esc = ctx.esc;
+  const strictUnavail = ctx.strictConfirmedUi !== true;
+  const rows = [
+    ['Server strict Absorb', strictUnavail ? 'Unavailable' : 'Available', strictUnavail ? 'rolling producer not running' : 'rolling microstructure live'],
+    ['Price-history', 'Loaded', 'history-only, advisory'],
+    ['Browser orderbook', 'Advisory', 'advisory only — not an entry signal'],
+    ['Funding', 'Advisory', 'advisory only'],
+    ['Open interest', 'Advisory', 'advisory only'],
+    ['Flow proxy', 'Advisory', 'advisory only'],
+    ['Liquidation', 'Unknown', 'no public feed wired'],
+  ];
+  const body = rows.map(([src, st, mean]) => `<tr><td>${esc(src)}</td><td>${esc(st)}</td><td>${esc(mean)}</td></tr>`).join('');
+  return `<div class="radar-datasrc">
+      <div class="radar-datasrc__title">Data-source status</div>
+      <table class="radar-datasrc__table"><thead><tr><th>Source</th><th>Status</th><th>Meaning</th></tr></thead><tbody>${body}</tbody></table>
+    </div>`;
+}
+
 function _renderTradingRadar(radar, esc) {
   radar = radar || {};
   const allCandidates = Array.isArray(radar.candidates) ? radar.candidates : [];
@@ -9248,8 +9386,8 @@ function _renderTradingRadar(radar, esc) {
       <td>${pillStatus((cl.relativeDump || {}).status)}</td>
       <td>${pillStatus((cl.longFlush || {}).status)}</td>
       <td>${pillStatus((cl.stabilization || {}).status)}</td>
-      <td>${(() => { const lbl = _fleetRadarAbsorbCompact(c); const base = (c.ABSORB_BLOCK_REASON && c.ABSORB_BLOCK_REASON !== 'none') ? c.ABSORB_BLOCK_REASON : lbl; const staleTip = (lbl === 'STALE' && _staleCtx) ? ' (' + _staleCtx + ')' : ''; const tip = 'Strict rolling absorption. ' + base + staleTip + _radarPhSourceTipSuffix(c, 'absorption'); return `<span class="${_fleetRadarCompactClass(lbl)} radar-pill--text" title="${esc(tip)}">${esc(lbl)}</span>`; })()}</td>
-      <td>${(() => { const lbl = _fleetRadarReclaimCompact(c); const missing = Array.isArray(c.RECLAIM_SOURCE_FIELDS_MISSING) ? c.RECLAIM_SOURCE_FIELDS_MISSING.slice(0, 6).join(', ') : ''; const base = c.RECLAIM_NEXT_REQUIRED_CONDITION || missing || lbl; const tip = 'Market structural reclaim. ' + base + _radarPhSourceTipSuffix(c, 'reclaim'); return `<span class="${_fleetRadarCompactClass(lbl)} radar-pill--text" title="${esc(tip)}">${esc(lbl)}</span>`; })()}</td>
+      <td>${(() => { const lbl = _fleetRadarAbsorbCompact(c); const disp = lbl === 'STALE' ? 'DATA OFF' : lbl; const base = (c.ABSORB_BLOCK_REASON && c.ABSORB_BLOCK_REASON !== 'none') ? c.ABSORB_BLOCK_REASON : lbl; const staleTip = (lbl === 'STALE') ? ('Rolling producer not running. This does not mean absorption is confirmed or rejected.' + (_staleCtx ? ' (' + _staleCtx + ')' : '')) : ('Strict rolling absorption. ' + base); const tip = staleTip + _radarPhSourceTipSuffix(c, 'absorption'); return `<span class="${_fleetRadarCompactClass(lbl)} radar-pill--text" title="${esc(tip)}">${esc(disp)}</span>`; })()}</td>
+      <td>${(() => { const lbl = _fleetRadarReclaimCompact(c); const missing = Array.isArray(c.RECLAIM_SOURCE_FIELDS_MISSING) ? c.RECLAIM_SOURCE_FIELDS_MISSING.slice(0, 6).join(', ') : ''; const base = c.RECLAIM_NEXT_REQUIRED_CONDITION || missing || lbl; const notStarted = lbl === 'NOT STARTED' ? 'Price has not reclaimed the zone yet. ' : ''; const tip = 'Market structural reclaim. ' + notStarted + base + _radarPhSourceTipSuffix(c, 'reclaim'); return `<span class="${_fleetRadarCompactClass(lbl)} radar-pill--text" title="${esc(tip)}">${esc(lbl)}</span>`; })()}</td>
       <td>${pillStatus((cl.marketRegime || {}).status)}</td>
       <td>${(() => { const lbl = _fleetRadarMatrixEntryLabel(c, v1Status); const setup = (cl.entryVariant || {}).type; const tip = setup && setup !== lbl ? `Setup signal: ${setup}; final entry: ${lbl}` : `Final entry: ${lbl}`; return `<span title="${esc(tip)}">${esc(lbl)}</span>`; })()}</td>
       <td class="radar-zone-td">${esc(zoneText(c.ENTRY_ZONE || c.entryZone))}</td>
@@ -9282,7 +9420,7 @@ function _renderTradingRadar(radar, esc) {
     <thead>
       <tr>
         <th>Symbol</th><th>Status</th><th>Safety</th><th>Dist</th><th>Setup</th><th>Exec</th><th>Conf</th>
-        <th>Dump</th><th>Flush</th><th>Stabil.</th><th>Absorb.</th><th>Reclaim</th><th>Regime</th>
+        <th>Dump</th><th>Flush</th><th>Stabil.</th><th title="Server-side strict rolling absorption gate. DATA OFF = rolling producer not running (not a confirmed or rejected absorption).">Strict Absorb Gate</th><th title="Market structural reclaim. Not Started = price has not reclaimed the zone yet.">Reclaim</th><th>Regime</th>
         <th>Entry</th><th>Zone</th><th>Stop</th><th>Blocked By</th><th>Telegram</th>
       </tr>
     </thead>
@@ -9431,7 +9569,39 @@ function _renderTradingRadar(radar, esc) {
     const zLow = rPrimary && rPrimary.level_zone_low != null ? _fleetFmtRadarPrice(rPrimary.level_zone_low) : '--';
     const zHigh = rPrimary && rPrimary.level_zone_high != null ? _fleetFmtRadarPrice(rPrimary.level_zone_high) : '--';
 
+    // Bundle the already-computed verdict/level fields for the human-first Focus
+    // helpers. Display-only: reuses existing data, adds no fetch, changes no gate.
+    const ctx = {
+      esc,
+      status: selectedV1Status,
+      blockedBy: selectedV1BlockedBy,
+      entryParts,
+      absorbParts,
+      reclaimHuman,
+      reclaimDisplayStatus,
+      reclaimSettled,
+      strictConfirmedUi,
+      strictStatusText,
+      opTelegram,
+      opNextConcise,
+      entryReadyNow: String(opEntryVerdict).indexOf('ENTRY READY') >= 0,
+      keyLevels: {
+        zone: zoneText(selected.ENTRY_ZONE || selected.entryZone),
+        stop: _fleetFmtRadarPrice(selected.STOP_LOSS_LEVEL ?? selected.suggestedStop),
+        inval: _fleetFmtRadarPrice(selected.HARD_INVALIDATION ?? selected.invalidationLevel),
+        tps: (selected.TAKE_PROFIT_LEVELS || selected.takeProfitCheckpoints || []).map(tp => _fleetFmtRadarPrice(tp.level)).join(' / ') || '--',
+        tf: selected.TIMEFRAME_CONTEXT || '--',
+      },
+    };
+
     focusHtml = `<div class="radar-focus-card">
+      ${_radarHumanDecisionHtml(selected, ctx)}
+      ${_radarGateChecklistHtml(selected, ctx)}
+      ${_radarNextActionHtml(selected, ctx)}
+      ${_radarKeyLevelsHtml(selected, ctx)}
+      <details class="radar-technical-details"${window._fleetTechDetailsExpanded && window._fleetTechDetailsExpanded[selected.symbol] ? ' open' : ''} ontoggle="window._fleetTechDetailsExpanded = window._fleetTechDetailsExpanded || {}; window._fleetTechDetailsExpanded['${selected.symbol}'] = this.open;">
+        <summary class="radar-technical-details__summary">Technical details</summary>
+      <div class="radar-tech-group"><div class="radar-tech-group__title">Server gate / strict Absorb</div>
       ${_radarMicrostructureStatusNote(radar)}
       ${(() => {
         // Context-only operator readiness summary (server-computed; display only).
@@ -9474,12 +9644,13 @@ function _renderTradingRadar(radar, esc) {
           </div>
         </div>
       </div>
+      </div>
+      <div class="radar-tech-group"><div class="radar-tech-group__title">Price-history signal</div>
       ${_radarBackendPriceHistoryHtml(selected)}
       ${_radarPriceHistorySectionHtml(selected)}
+      </div>
+      <div class="radar-tech-group"><div class="radar-tech-group__title">Browser orderbook &amp; live microstructure</div>
       ${_liveMicroSlotHtml('radar-live-microstructure-slot', _resolveLiveMicroTarget(selected))}
-      <!-- Phase C.3: compact, decision-first visible sections. All raw/technical
-           panels are moved into the collapsed "Advanced diagnostics" block below
-           so the operator reads state in one screen without scrolling debug rows. -->
       <div class="radar-focus-title"><b>${esc(selected.symbol || '--')}</b> <span class="${_fleetRadarBadgeClass(selectedV1Status)}">${actLabel}</span></div>
       <div class="radar-key-trade" style="border:1px solid var(--b2, #1a2540); border-radius:8px; padding:8px 11px; margin-bottom:8px;">
         <div style="${cardLabel}">Key trade info</div>
@@ -9515,10 +9686,14 @@ function _renderTradingRadar(radar, esc) {
         <div class="radar-microstructure__row radar-pressure-zones__note"><span>Note</span><b>${esc(pz.disclaimer || 'Derived proxy from closed candles; not liquidation data; not order-book data.')}</b></div>
       </div>`;
       })()}
+      </div>
+      <div class="radar-tech-group"><div class="radar-tech-group__title">Missing data / errors</div>
+      ${_radarDataSourceMatrixHtml(selected, radar, ctx)}
       <div class="radar-focus-blocked"><span>Reason</span><b>${esc((selected.REASON || selected.reasons || []).join(' | ') || '--')}</b></div>
       <div class="radar-focus-blocked"><span>Invalidation</span><b>${esc(selected.INVALIDATION || '--')}</b></div>
+      </div>
       <details class="radar-advanced-diagnostics" style="margin-top:8px;" ${window._fleetAdvancedDiagExpanded && window._fleetAdvancedDiagExpanded[selected.symbol] ? 'open' : ''} ontoggle="window._fleetAdvancedDiagExpanded = window._fleetAdvancedDiagExpanded || {}; window._fleetAdvancedDiagExpanded['${selected.symbol}'] = this.open;">
-        <summary style="cursor:pointer; font-size:11px; letter-spacing:.06em; color:var(--txt2); text-transform:uppercase; padding:5px 0;">Advanced diagnostics (raw &mdash; click to expand)</summary>
+        <summary style="cursor:pointer; font-size:11px; letter-spacing:.06em; color:var(--txt2); text-transform:uppercase; padding:5px 0;">Raw diagnostics (click to expand)</summary>
       <div class="radar-why-next" style="border:1px solid var(--b2, #1a2540); border-radius:8px; padding:8px 11px; margin:6px 0 8px;">
         <div style="${cardLabel}">Detailed blockers</div>
         <div style="font-size:12px; margin-top:3px;"><b style="color:var(--txt3);">Blocker:</b> ${esc(selectedV1BlockedBy === '--' ? 'none' : selectedV1BlockedBy)}</div>
@@ -9689,6 +9864,7 @@ function _renderTradingRadar(radar, esc) {
       <div class="radar-next-trigger"><span>TP zones</span><b>${esc((selected.TAKE_PROFIT_LEVELS || selected.takeProfitCheckpoints || []).map(tp => `${tp.label || 'TP'} ${_fleetFmtRadarPrice(tp.level)}`).join(' / ') || '--')}</b></div>
       <div class="radar-focus-blocked"><span>Reason</span><b>${esc((selected.REASON || selected.reasons || []).join(' | ') || '--')}</b></div>
       <div class="radar-focus-blocked"><span>Invalidation</span><b>${esc(selected.INVALIDATION || '--')}</b></div>
+      </details>
       </details>
     </div>`;
   } else {

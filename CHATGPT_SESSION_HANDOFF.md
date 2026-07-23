@@ -13,6 +13,43 @@
 > `/reply` or `/admin_summary` support system** here. If you find yourself
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
+> _RADAR Focus Candidate human-readability redesign (2026-07-23, local-only on
+> top of `c537a47`):_ UI/UX-only restructure of the Trading RADAR Focus card so
+> a human reads the trade state in ~10 seconds. No backend scoring, strict
+> Absorb, reclaim, ENTRY_READY, Telegram, or producer change; no new fetch (the
+> new sections reuse already-computed candidate fields). The default view is now
+> a **decision hierarchy**: (1) a dominant decision card `SYMBOL — WATCH ONLY` +
+> `Do not enter now.` + one-line "Main reason"; (2) a plain-language **gate
+> checklist** with SIX rows — Reclaim / Absorption / Strict Absorb / Live market
+> data / Safety / Telegram — where **"Absorption: Not confirmed"** (the concept)
+> is a DISTINCT row from **"Strict Absorb: Server data unavailable"** (the data
+> layer), Live market data is explicitly **"Available, advisory only"**, and
+> Telegram reads **"No — entry gates not confirmed"**; (3) a single **Next
+> action** with the fixed caution *"Do not treat live orderbook OK as an entry
+> signal."*; (4) **Key levels** (entry/stop/invalidation/targets/timeframe).
+> Everything admin/debug/raw — the STALE banner, Trade Readiness, operator
+> summary cards, backend + admin price-history, live-microstructure slot,
+> pressure zones, a new compact **data-source status matrix**, and all the raw
+> Provider/Absorb/Reclaim/Score panels — is now nested inside ONE collapsed
+> **`<details class="radar-technical-details">` "Technical details"** accordion
+> (per-symbol remembered toggle; the old `radar-advanced-diagnostics` block is
+> kept as the nested "Raw diagnostics" group). New helpers:
+> `_radarHumanDecisionHtml` / `_radarGateChecklistHtml` / `_radarNextActionHtml`
+> / `_radarKeyLevelsHtml` / `_radarDataSourceMatrixHtml` (+ pure
+> `_radarReclaimGate` / `_radarReclaimPlain` / `_radarSafetyGate` /
+> `_radarDecisionReason`). Matrix table: `Absorb.` column relabeled **"Strict
+> Absorb Gate"**, a STALE value now DISPLAYS as **"DATA OFF"** with tooltip
+> *"Rolling producer not running. This does not mean absorption is confirmed or
+> rejected."* (the `_fleetRadarAbsorbCompact` helper still RETURNS `STALE` —
+> only the cell display maps), and the Reclaim NOT-STARTED tooltip now says
+> *"Price has not reclaimed the zone yet."* — no value/filtering logic changed.
+> Cache-bust **`?v=6i3` → `?v=6i4`**. Tests: new
+> `tests/frontend.radar-human-ux.test.mjs` (16 executable checks of the four
+> helpers + structure + matrix relabel + display-only guarantee); updated the
+> `Raw diagnostics` label guard in `frontend.trading-radar-panel` and the
+> `6i4` token guard in `frontend.live-microstructure`. Full suite green (1678
+> pass / 0 fail / 26 skipped). No push, no deploy.
+>
 > _RADAR STALE-vs-advisory wording clarity (2026-07-23, local-only on top of
 > `aa22b00`):_ UI copy-only pass — no gate, score, ENTRY_READY, Telegram, or
 > producer logic touched. Root confusion: the RADAR Focus card can show the

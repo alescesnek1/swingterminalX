@@ -414,7 +414,9 @@ test('Phase C.3: focus detail has compact Key trade info and Compact diagnostics
 
 test('Phase C.3: an Advanced diagnostics collapsible (collapsed by default) exists', () => {
   assert.match(terminalJs, /<details class="radar-advanced-diagnostics"/);
-  assert.match(terminalJs, /Advanced diagnostics/);
+  // The raw-diagnostics collapsible is now labeled "Raw diagnostics" (it lives
+  // nested inside the top-level "Technical details" accordion after the redesign).
+  assert.match(terminalJs, /Raw diagnostics/);
   // <details> with no `open` attribute is collapsed by default.
   assert.doesNotMatch(terminalJs, /<details class="radar-advanced-diagnostics"[^>]*\sopen/);
 });
