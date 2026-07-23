@@ -97,6 +97,16 @@ test('gate checklist renders plain-language reclaim/absorption/strict/live/safet
   assert.match(txt, /Telegram\s+NO\s+Entry gates not confirmed/);
 });
 
+test('gate checklist uses stable three-column rows with non-wrapping status badges', () => {
+  const html = H._radarGateChecklistHtml({ symbol: 'LITUSDT', safetyStatus: 'UNKNOWN' }, baseCtx());
+  assert.match(html, /class=\"radar-gate__head\"[^>]*><span>Gate<\/span><span>Status<\/span><span>Meaning<\/span>/);
+  for (const status of ['WAIT', 'NO', 'DATA OFF', 'ADVISORY']) assert.ok(html.includes('>' + status + '<'), status + ' stays a complete badge label');
+  assert.match(html, /radar-gate__k\">Reclaim<\/span><span class=\"radar-gate__status\">[\s\S]*?WAIT[\s\S]*?<\/span><span class=\"radar-gate__meaning\">Not started/);
+  assert.match(terminalCss, /\.radar-gate__head,\.radar-gate__row\{display:grid;grid-template-columns:minmax\(112px,160px\) max-content minmax\(0,1fr\)/);
+  assert.match(terminalCss, /\.radar-gate__status\{white-space:nowrap/);
+  assert.match(terminalCss, /\.radar-gate__status \.radar-pill\{white-space:nowrap/);
+});
+
 test('absorption-not-confirmed and strict-absorb-unavailable are two separate concepts', () => {
   const html = H._radarGateChecklistHtml({ symbol: 'X', safetyStatus: 'UNKNOWN' }, baseCtx());
   // Both rows must exist independently — an unavailable producer must not read

@@ -9224,7 +9224,7 @@ function _radarGateChecklistHtml(c, ctx) {
   const esc = ctx.esc;
   const STATUS = { pass: 'PASS', warn: 'WAIT', fail: 'NO', off: 'DATA OFF', advisory: 'ADVISORY', unknown: 'UNKNOWN' };
   const pill = (cls) => `<span class="radar-pill radar-pill-${cls.replace(' ', '-').toLowerCase()}">${STATUS[cls]}</span>`;
-  const row = (k, p, t) => `<div class="radar-gate__row"><span class="radar-gate__k">${esc(k)}</span><span class="radar-gate__v">${pill(p)} ${esc(t)}</span></div>`;
+  const row = (k, p, t) => `<div class="radar-gate__row"><span class="radar-gate__k">${esc(k)}</span><span class="radar-gate__status">${pill(p)}</span><span class="radar-gate__meaning">${esc(t)}</span></div>`;
 
   const rec = _radarReclaimGate(ctx.reclaimDisplayStatus);
   const recLabel = rec.icon === 'pass' ? 'pass' : (rec.icon === 'fail' && rec.text === 'Failed') ? 'fail' : 'warn';
@@ -9248,6 +9248,7 @@ function _radarGateChecklistHtml(c, ctx) {
 
   return `<div class="radar-gate">
       <div class="radar-gate__title">Gate checklist</div>
+      <div class="radar-gate__head" aria-hidden="true"><span>Gate</span><span>Status</span><span>Meaning</span></div>
       ${row('Reclaim', recLabel, reclaimMsg)}
       ${row('Absorption', absLabel, absText)}
       ${row('Strict Absorb', strictLabel, strictText)}

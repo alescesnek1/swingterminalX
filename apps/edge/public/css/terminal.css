@@ -2040,14 +2040,14 @@ html,body{overflow-x:hidden;max-width:100vw}
 .radar-decision__reason-k{display:block;font-size:9px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:var(--txt3);margin-bottom:2px}
 .radar-gate{border:1px solid var(--b2,#1a2540);border-radius:8px;padding:10px 12px;margin-bottom:10px;background:rgba(0,0,0,.14)}
 .radar-gate__title,.radar-next__title,.radar-klevels__title,.radar-datasrc__title{font-size:10px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:var(--txt3);margin-bottom:6px}
-.radar-gate__row{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:3px 0;font-size:13px;border-top:1px dashed rgba(255,255,255,.06)}
-.radar-gate__row:first-of-type{border-top:0}
+.radar-gate__head,.radar-gate__row{display:grid;grid-template-columns:minmax(112px,160px) max-content minmax(0,1fr);column-gap:14px;align-items:center}
+.radar-gate__head{padding:0 0 4px;font-size:9px;font-weight:900;letter-spacing:.06em;text-transform:uppercase;color:var(--txt3)}
+.radar-gate__row{row-gap:4px;padding:5px 0;font-size:13px;border-top:1px dashed rgba(255,255,255,.06)}
 .radar-gate__k{color:var(--txt2);font-weight:600}
-.radar-gate__v{font-weight:700;text-align:right;overflow-wrap:anywhere}
-.radar-gate__v--pass{color:var(--grn)}
-.radar-gate__v--warn{color:var(--amb)}
-.radar-gate__v--fail{color:var(--red)}
-.radar-gate__i{font-style:normal}
+.radar-gate__status{white-space:nowrap;line-height:1}
+.radar-gate__meaning{min-width:0;font-weight:700;line-height:1.3;overflow-wrap:anywhere}
+.radar-gate__status .radar-pill{white-space:nowrap}
+@media(max-width:620px){.radar-gate__head,.radar-gate__row{grid-template-columns:minmax(92px,120px) max-content minmax(0,1fr);column-gap:8px}.radar-gate__row{font-size:12px}}
 .radar-next{border:1px solid rgba(0,232,200,.28);border-radius:8px;padding:10px 12px;margin-bottom:10px;background:rgba(0,232,200,.05)}
 .radar-next__main{font-size:13px;font-weight:600;color:var(--txt);line-height:1.4;overflow-wrap:anywhere}
 .radar-next__caution{margin-top:6px;font-size:11px;font-style:italic;color:var(--amb)}
