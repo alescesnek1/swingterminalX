@@ -30,6 +30,7 @@ export function computeRollingAbsorption(input, now = Date.now()) {
   const minSamples = Number.isInteger(configuredMinSamples) && configuredMinSamples > 0 ? configuredMinSamples : DEFAULT_MIN_TRADE_SAMPLES;
   const trades = input.trades.map((trade) => normalizeTrade(trade, now, windowMs)).filter(Boolean).sort((a, b) => a.timestamp - b.timestamp);
   if (trades.length < minSamples) return {};
+
   let takerBuyVolume = 0;
   let takerSellVolume = 0;
   for (const trade of trades) {
@@ -39,6 +40,7 @@ export function computeRollingAbsorption(input, now = Date.now()) {
   }
   const totalVolume = takerBuyVolume + takerSellVolume;
   if (!(totalVolume > 0)) return {};
+
   const startPrice = trades[0].price;
   const endPrice = trades[trades.length - 1].price;
   const priceChangePct = ((endPrice - startPrice) / startPrice) * 100;
@@ -51,9 +53,12 @@ export function computeRollingAbsorption(input, now = Date.now()) {
     fields.aggressiveSellsFailed = takerSellVolume > takerBuyVolume * 1.2 && priceChangePct >= -0.1;
     fields.absorptionScore = Math.max(0, Math.min(100, (marketBuyVolumeDominance * 100 * 1.5) + (priceChangePct > 0 ? 20 : 0)));
   }
+
   const beforeDepth = Number(input.snapshots?.before?.bidDepth);
   const afterDepth = Number(input.snapshots?.after?.bidDepth);
-  if (finitePositive(beforeDepth) && finiteNumber(afterDepth) && afterDepth >= 0) fields.bidDepthRebuildPct = (afterDepth / beforeDepth) * 100;
+  if (finitePositive(beforeDepth) && finiteNumber(afterDepth) && afterDepth >= 0) {
+    fields.bidDepthRebuildPct = ((afterDepth - beforeDepth) / beforeDepth) * 100;
+  }
   const low = Number(input.context?.supportZone?.low);
   const high = Number(input.context?.supportZone?.high);
   if (finiteNumber(low) && finiteNumber(high) && low <= high) {

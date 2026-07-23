@@ -115,3 +115,42 @@ test('fresh rolling snapshot from producer with slightly misaligned clock is not
   const normalized = normalizeRollingMicrostructureSnapshot(s, { nowMs: NOW });
   assert.equal(normalized.stale, false);
 });
+
+test('preserves validated local-foundation measurement metadata and optional rolling fields', () => {
+  const s = normalizeRollingMicrostructureSnapshot(snapshot({ BTCUSDT: completeRow({
+    absorptionScore: 71,
+    deltaImprovementPct: 4,
+    marketBuyVolumeDominance: 0.61,
+    aggressiveSellsFailed: true,
+    supportRetestHeld: true,
+    spreadAndSlippageHealthy: true,
+    rollingMeasuredAt: new Date(NOW - 500).toISOString(),
+    rollingWindowSec: 300,
+    samples: { aggTrades: 60, depthSnapshots: 2, ignored: 99 },
+    source: 'binance-futures-public',
+  }) }), { nowMs: NOW });
+  const row = s.data.BTCUSDT;
+  assert.equal(row.absorptionScore, 71);
+  assert.equal(row.marketBuyVolumeDominance, 0.61);
+  assert.equal(row.aggressiveSellsFailed, true);
+  assert.equal(row.samples.aggTrades, 60);
+  assert.equal(row.samples.ignored, undefined);
+  assert.equal(row.source, 'binance-futures-public');
+});
+
+
+test('foundation metadata is required and stale or thin readings are dropped before merge', () => {
+  const base = completeRow({
+    absorptionScore: 80,
+    rollingMeasuredAt: new Date(NOW - 500).toISOString(),
+    rollingWindowSec: 300,
+    samples: { aggTrades: 60, depthSnapshots: 2 },
+  });
+  const thin = normalizeRollingMicrostructureSnapshot(snapshot({ BTCUSDT: { ...base, samples: { aggTrades: 9, depthSnapshots: 2 } } }), { nowMs: NOW });
+  assert.equal(thin.data.BTCUSDT.foundationRejected, true);
+  assert.equal(thin.data.BTCUSDT.absorptionScore, undefined);
+  assert.equal(thin.data.BTCUSDT.flow, undefined);
+  const stale = normalizeRollingMicrostructureSnapshot(snapshot({ BTCUSDT: { ...base, rollingMeasuredAt: new Date(NOW - 11 * 60 * 1000).toISOString() } }), { nowMs: NOW });
+  assert.equal(stale.data.BTCUSDT.foundationRejected, true);
+  assert.equal(stale.data.BTCUSDT.bidDepthRebuildPct, undefined);
+});

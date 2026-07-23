@@ -34,7 +34,7 @@ test('returns market buy dominance as a ratio in the inclusive 0..1 range', () =
 test('emits optional fields only from valid supporting evidence', () => {
   const trades = Array.from({ length: 12 }, (_, index) => trade({ m: index % 2 === 0, T: NOW - index * 1_000 }));
   const fields = computeRollingAbsorption({ trades, snapshots: { before: { bidDepth: 100 }, after: { bidDepth: 120 } }, context: { spreadPct: 0.1 } }, NOW);
-  assert.equal(fields.bidDepthRebuildPct, 120);
+  assert.equal(fields.bidDepthRebuildPct, 20);
   assert.equal(fields.spreadAndSlippageHealthy, true);
   assert.equal(fields.supportRetestHeld, undefined);
 });

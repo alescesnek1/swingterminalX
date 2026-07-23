@@ -1,6 +1,6 @@
 # RADAR Rolling Microstructure — Technical Design & Risk Review
 
-> **Status: DESIGN ONLY — not implemented.**
+> **Status: LOCAL FOUNDATION ONLY ? not production active.** A disabled-by-default, one-shot local producer now wraps the pure core. It defaults to zero network/POST; explicit local enablement is dry-run unless a separate post flag plus token/base URL are present. Producer snapshots are trusted:false and cannot activate strict Absorb. No scheduler or production activation is included.
 > This document specifies the next phase (rolling absorption data). No producer,
 > trading-radar, gate, threshold, score, ENTRY_READY, or Telegram code is to be
 > changed by reading or merging this document. It is the companion to the

@@ -1,5 +1,7 @@
 const DEFAULT_TTL_MS = 10 * 60 * 1000;
 const MAX_TOP_N = 50;
+const OPTIONAL_NUMERIC_FIELDS = Object.freeze(['absorptionScore', 'deltaImprovementPct', 'marketBuyVolumeDominance', 'rollingWindowSec']);
+const OPTIONAL_BOOLEAN_FIELDS = Object.freeze(['aggressiveSellsFailed', 'supportRetestHeld', 'supportRetested', 'spreadAndSlippageHealthy']);
 
 export const REQUIRED_ROLLING_FIELDS = Object.freeze([
   'bidDepthRebuildPct',
@@ -83,16 +85,51 @@ function missingFieldsFor(row) {
   return missing;
 }
 
-function normalizeRow(raw) {
+function normalizeRow(raw, opts = {}) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const row = {};
-  for (const key of ['bidDepthRebuildPct', 'marketSellRatio', 'openInterestChangePct', 'longLiquidationSpike']) {
+  for (const key of ['bidDepthRebuildPct', 'marketSellRatio', 'openInterestChangePct', 'longLiquidationSpike', ...OPTIONAL_NUMERIC_FIELDS]) {
     if (!hasOwn(raw, key)) continue;
     const n = finiteNumber(raw[key]);
     if (n !== null) row[key] = n;
   }
   const flow = normalizeFlow(raw.flow);
   if (flow) row.flow = flow;
+  for (const key of OPTIONAL_BOOLEAN_FIELDS) {
+    if (!hasOwn(raw, key)) continue;
+    const value = boolValue(raw[key]);
+    if (value !== undefined) row[key] = value;
+  }
+  const measuredAt = updatedAtMsOf({ updatedAt: raw.rollingMeasuredAt, updatedAtMs: raw.rollingMeasuredAtMs });
+  if (measuredAt !== null) row.rollingMeasuredAtMs = measuredAt;
+  if (raw.samples && typeof raw.samples === 'object' && !Array.isArray(raw.samples)) {
+    const samples = {};
+    for (const key of ['aggTrades', 'depthSnapshots', 'klines']) {
+      const n = finiteNumber(raw.samples[key]);
+      if (n !== null && n >= 0) samples[key] = Math.trunc(n);
+    }
+    if (Object.keys(samples).length) row.samples = samples;
+  }
+  if (typeof raw.source === 'string' && raw.source) row.source = raw.source.slice(0, 64);
+  const foundationPayload = hasOwn(raw, 'rollingMeasuredAt') || hasOwn(raw, 'rollingMeasuredAtMs') || hasOwn(raw, 'rollingWindowSec') || hasOwn(raw, 'samples')
+    || OPTIONAL_NUMERIC_FIELDS.some((key) => hasOwn(raw, key)) || OPTIONAL_BOOLEAN_FIELDS.some((key) => hasOwn(raw, key));
+  if (foundationPayload) {
+    const nowMs = Number(opts.nowMs);
+    const ttlMs = Number(opts.ttlMs);
+    const measuredAtMs = row.rollingMeasuredAtMs;
+    const sampleCount = row.samples && row.samples.aggTrades;
+    const depthCount = row.samples && row.samples.depthSnapshots;
+    const rollingWindowSec = row.rollingWindowSec;
+    const fresh = Number.isFinite(measuredAtMs) && measuredAtMs <= nowMs + 60_000 && nowMs - measuredAtMs <= ttlMs;
+    const sufficient = Number.isFinite(sampleCount) && sampleCount >= 10
+      && (!hasOwn(row, 'bidDepthRebuildPct') || (Number.isFinite(depthCount) && depthCount >= 2));
+    if (!(fresh && rollingWindowSec > 0 && sufficient)) {
+      // New foundation rows are fail-closed as a unit. Never let malformed,
+      // thin, or stale optional rolling readings piggyback into strict gates.
+      for (const key of ['bidDepthRebuildPct', 'marketSellRatio', 'openInterestChangePct', 'longLiquidationSpike', ...OPTIONAL_NUMERIC_FIELDS, ...OPTIONAL_BOOLEAN_FIELDS, 'flow']) delete row[key];
+      row.foundationRejected = true;
+    }
+  }
   if (raw.diagnostics && typeof raw.diagnostics === 'object' && !Array.isArray(raw.diagnostics)) {
     row.diagnostics = { ...raw.diagnostics };
   }
@@ -136,7 +173,7 @@ export function normalizeRollingMicrostructureSnapshot(input, opts = {}) {
         diagnostics.skipped += 1;
         continue;
       }
-      const row = normalizeRow(rawRow);
+      const row = normalizeRow(rawRow, { nowMs, ttlMs });
       if (!row) {
         diagnostics.skipped += 1;
         continue;
