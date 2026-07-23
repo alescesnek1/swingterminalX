@@ -351,3 +351,13 @@ This is a design document only. Implementation is deferred to the phases above
 and must preserve every guardrail: public-only, unsigned, no order/execution
 path, no `local-binance-worker`, no worker session, and no change to
 ENTRY_READY, Telegram, thresholds, gates, or scores.
+
+## Current producer hardening status (2026-07-23, local-only)
+
+The rolling producer now has a safe standalone target path for a future **local machine or VPS** runner whose public Binance Futures egress has been independently verified. It remains disabled by default and no recurring runner is added in this change.
+
+- With explicit `--symbols` or `WORKER_RADAR_ROLLING_SYMBOLS`, only validated futures symbols are used. Otherwise the producer reads the existing worker-token-protected `GET /api/bot/radar-candidates`; fetch failure fails closed.
+- `BOT_WORKER_TOKEN` is sent only as the existing `X-BOT-WORKER-TOKEN` request header and is never logged. `CONTROL_BASE_URL` is required for candidate loading and any POST.
+- POST is refused for zero candidates, zero measured rows, zero trusted rows, invalid rows, missing configuration, or public Binance HTTP 451. A valid snapshot is the only payload that may reach `/api/bot/radar-rolling-microstructure`.
+- GitHub-hosted Actions remains unsuitable for a rolling runner because Binance Futures public egress can return HTTP 451. Do not add a GitHub schedule. A future runner must be local/VPS, conservative, explicitly enabled, and monitored through the existing rolling snapshot freshness/strict diagnostics.
+- This path uses only unsigned public `aggTrades`, `depth`, and `klines`; it has no Telegram, trading, order, session, scheduler, or Binance API-key/secret path.

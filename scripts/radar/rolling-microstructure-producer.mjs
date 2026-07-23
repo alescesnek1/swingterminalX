@@ -13,38 +13,62 @@ function finite(value) { const n = Number(value); return Number.isFinite(n) ? n 
 function positiveInteger(value, fallback, max = Number.MAX_SAFE_INTEGER) { const n = Math.trunc(Number(value)); return Number.isFinite(n) && n > 0 ? Math.min(n, max) : fallback; }
 function bool(env, key) { return env && env[key] === 'true'; }
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
-export function isAllowedBinanceFuturesBaseUrl(value) {
-  try {
-    const url = new URL(String(value));
-    return url.protocol === 'https:' && BINANCE_FUTURES_HOST_ALLOWLIST.has(url.hostname);
-  } catch { return false; }
+export function isAllowedBinanceFuturesBaseUrl(value) { try { const url = new URL(String(value)); return url.protocol === 'https:' && BINANCE_FUTURES_HOST_ALLOWLIST.has(url.hostname); } catch { return false; } }
+function asSymbol(candidate) {
+  for (const key of ['futures_pair', 'futuresPair']) { const value = String(candidate?.[key] ?? '').trim().toUpperCase(); if (SYMBOL_RE.test(value)) return value; }
+  if (candidate?.spot_pair || candidate?.spotPair || candidate?.alphaPair || candidate?.alpha_pair) return null;
+  for (const key of ['pair', 'symbol']) { const value = String(candidate?.[key] ?? '').trim().toUpperCase(); if (SYMBOL_RE.test(value)) return value; }
+  return null;
 }
-function asSymbol(candidate) { for (const key of ['futures_pair', 'futuresPair', 'pair', 'symbol']) { const value = String(candidate?.[key] ?? '').trim().toUpperCase(); if (SYMBOL_RE.test(value)) return value; } return null; }
 export function normalizeRollingProducerOptions({ env = process.env, ...opts } = {}) {
   const baseUrl = String(opts.baseUrl ?? PUBLIC_FAPI_BASE).replace(/\/+$/, '');
   return { enabled: bool(env, 'WORKER_RADAR_ROLLING_ENABLED'), postEnabled: bool(env, 'WORKER_RADAR_ROLLING_POST_ENABLED'), controlUrl: String(opts.controlUrl ?? env.CONTROL_BASE_URL ?? '').replace(/\/+$/, ''), workerToken: String(opts.workerToken ?? env.BOT_WORKER_TOKEN ?? ''), workerId: String(opts.workerId ?? env.WORKER_RADAR_ROLLING_WORKER_ID ?? 'local-rolling-microstructure'), topN: positiveInteger(opts.topN ?? env.WORKER_RADAR_ROLLING_TOP_N, 5, MAX_TOP_N), windowMs: positiveInteger(opts.windowMs ?? env.WORKER_RADAR_ROLLING_WINDOW_MS, DEFAULT_WINDOW_MS), minSamples: positiveInteger(opts.minSamples ?? env.WORKER_RADAR_ROLLING_MIN_SAMPLES, 10, 10_000), depthIntervalMs: Number.isFinite(Number(opts.depthIntervalMs)) && Number(opts.depthIntervalMs) >= 0 ? Number(opts.depthIntervalMs) : DEFAULT_DEPTH_INTERVAL_MS, baseUrl, baseUrlAllowed: isAllowedBinanceFuturesBaseUrl(baseUrl) };
 }
 export function selectRollingTargets(candidates = [], options = {}) { const topN = positiveInteger(options.topN, 5, MAX_TOP_N); const seen = new Set(); return (Array.isArray(candidates) ? candidates : []).flatMap((candidate) => { const symbol = asSymbol(candidate); if (!symbol || seen.has(symbol) || seen.size >= topN) return []; seen.add(symbol); return [{ symbol, candidate }]; }); }
+export function explicitRollingCandidates({ env = process.env, argv = process.argv.slice(2) } = {}) {
+  const arg = Array.isArray(argv) ? argv.find((value, index) => value === '--symbols' ? index >= 0 : String(value).startsWith('--symbols=')) : undefined;
+  const next = Array.isArray(argv) && arg === '--symbols' ? argv[argv.indexOf(arg) + 1] : undefined;
+  const raw = typeof arg === 'string' && arg.startsWith('--symbols=') ? arg.slice('--symbols='.length) : (next ?? env.WORKER_RADAR_ROLLING_SYMBOLS);
+  if (raw === undefined || raw === null || String(raw).trim() === '') return undefined;
+  return String(raw).split(/[\s,]+/).filter(Boolean).map((futures_pair) => ({ futures_pair }));
+}
+export async function fetchRollingCandidates({ controlUrl, workerToken, fetchImpl }) {
+  if (!controlUrl) return { ok: false, reason: 'CONTROL_BASE_URL_REQUIRED' };
+  if (!workerToken) return { ok: false, reason: 'BOT_WORKER_TOKEN_REQUIRED' };
+  try {
+    const response = await fetchImpl(`${controlUrl}/api/bot/radar-candidates`, { method: 'GET', headers: { Accept: 'application/json', 'X-BOT-WORKER-TOKEN': workerToken } });
+    if (!response?.ok) return { ok: false, reason: 'CANDIDATE_FETCH_FAILED_NO_POST' };
+    const body = await response.json();
+    return { ok: true, candidates: Array.isArray(body?.radarCandidates) ? body.radarCandidates : [] };
+  } catch { return { ok: false, reason: 'CANDIDATE_FETCH_FAILED_NO_POST' }; }
+}
 function depthSummary(depth) { const bids = Array.isArray(depth?.bids) ? depth.bids : []; const asks = Array.isArray(depth?.asks) ? depth.asks : []; const bestBid = finite(bids[0]?.[0]); const bestAsk = finite(asks[0]?.[0]); if (!(bestBid > 0 && bestAsk > bestBid)) return null; const mid = (bestBid + bestAsk) / 2; let bidDepth = 0; for (const row of bids) { const price = finite(row?.[0]); const qty = finite(row?.[1]); if (price > 0 && qty > 0 && price >= mid * 0.99) bidDepth += price * qty; } return bidDepth > 0 ? { bidDepth, spreadPct: ((bestAsk - bestBid) / mid) * 100 } : null; }
 async function getJson(fetchImpl, url) { const response = await fetchImpl(url, { method: 'GET', headers: { Accept: 'application/json' } }); if (!response?.ok) throw new Error(`HTTP ${response?.status ?? 'FAILED'}`); return response.json(); }
 function fapiUrl(baseUrl, endpoint, params) { const url = new URL(endpoint, baseUrl); for (const [key, value] of Object.entries(params)) url.searchParams.set(key, String(value)); return url; }
 async function collectSymbol({ fetchImpl, waitFn, baseUrl, symbol, now, windowMs, minSamples, depthIntervalMs }) {
-  const tradeUrl = fapiUrl(baseUrl, '/fapi/v1/aggTrades', { symbol, startTime: now - windowMs, endTime: now, limit: 1000 });
-  const depthUrl = fapiUrl(baseUrl, '/fapi/v1/depth', { symbol, limit: 100 });
-  const klineUrl = fapiUrl(baseUrl, '/fapi/v1/klines', { symbol, interval: '1m', limit: 60 });
-  const [trades, firstDepth, klines] = await Promise.all([getJson(fetchImpl, tradeUrl), getJson(fetchImpl, depthUrl), getJson(fetchImpl, klineUrl)]);
-  await waitFn(depthIntervalMs);
-  const secondDepth = await getJson(fetchImpl, depthUrl);
+  const tradeUrl = fapiUrl(baseUrl, '/fapi/v1/aggTrades', { symbol, startTime: now - windowMs, endTime: now, limit: 1000 }); const depthUrl = fapiUrl(baseUrl, '/fapi/v1/depth', { symbol, limit: 100 }); const klineUrl = fapiUrl(baseUrl, '/fapi/v1/klines', { symbol, interval: '1m', limit: 60 });
+  const [trades, firstDepth, klines] = await Promise.all([getJson(fetchImpl, tradeUrl), getJson(fetchImpl, depthUrl), getJson(fetchImpl, klineUrl)]); await waitFn(depthIntervalMs); const secondDepth = await getJson(fetchImpl, depthUrl);
   const first = depthSummary(firstDepth); const second = depthSummary(secondDepth); const tradeValidation = validateRollingTrades(trades, now, windowMs);
   if (tradeValidation.invalid || tradeValidation.trades.length < minSamples || !first || !second || !Array.isArray(klines) || klines.length < 30) return null;
-  const fields = computeRollingAbsorption({ trades, klines, snapshots: { before: first, after: second }, context: { spreadPct: second.spreadPct }, config: { windowMs, minSamples } }, now);
-  if (!requiredFields.every((key) => Object.hasOwn(fields, key))) return null;
+  const fields = computeRollingAbsorption({ trades, klines, snapshots: { before: first, after: second }, context: { spreadPct: second.spreadPct }, config: { windowMs, minSamples } }, now); if (!requiredFields.every((key) => Object.hasOwn(fields, key))) return null;
   const row = { rollingMeasuredAt: new Date(now).toISOString(), rollingMeasuredAtMs: now, rollingWindowSec: Math.floor(windowMs / 1000), samples: { aggTrades: tradeValidation.trades.length, depthSnapshots: 2, klines: klines.length }, source: 'binance-futures-public', validation: { makerFlagsValid: true, tradesValidated: true, tradesSorted: true, klinesValidated: true }, depthUsdWithin1Pct: second.bidDepth, spreadPct: second.spreadPct, ...fields, supportRetested: fields.supportRetestHeld };
-  const buy = tradeValidation.trades.filter((trade) => trade.side === 'buy').reduce((sum, trade) => sum + trade.price * trade.quantity, 0); const sell = tradeValidation.trades.filter((trade) => trade.side === 'sell').reduce((sum, trade) => sum + trade.price * trade.quantity, 0);
-  row.marketSellRatio = sell / (buy + sell); row.flow = { cumulativeDeltaPct: fields.deltaImprovementPct, takerBuySellRatio: sell > 0 ? buy / sell : undefined, aggressiveSellExhaustion: fields.aggressiveSellsFailed }; if (row.flow.takerBuySellRatio === undefined) delete row.flow.takerBuySellRatio;
+  const buy = tradeValidation.trades.filter((trade) => trade.side === 'buy').reduce((sum, trade) => sum + trade.price * trade.quantity, 0); const sell = tradeValidation.trades.filter((trade) => trade.side === 'sell').reduce((sum, trade) => sum + trade.price * trade.quantity, 0); row.marketSellRatio = sell / (buy + sell); row.flow = { cumulativeDeltaPct: fields.deltaImprovementPct, takerBuySellRatio: sell > 0 ? buy / sell : undefined, aggressiveSellExhaustion: fields.aggressiveSellsFailed }; if (row.flow.takerBuySellRatio === undefined) delete row.flow.takerBuySellRatio;
   return validateTrustedRollingRow(row, { nowMs: now }).ok ? row : null;
 }
 export async function buildRollingSnapshotFromSamples({ candidates = [], fetchImpl, options = {}, now = Date.now(), waitFn = sleep } = {}) { const data = {}; const errors = []; const targets = selectRollingTargets(candidates, options); if (!isAllowedBinanceFuturesBaseUrl(options.baseUrl)) return { provider: 'local-rolling-measured', updatedAtMs: now, trusted: false, data, diagnostics: { requested: targets.length, stored: 0, errors: [{ reason: 'BINANCE_FUTURES_BASE_URL_NOT_ALLOWED' }] } }; for (const { symbol } of targets) { try { const row = await collectSymbol({ fetchImpl, waitFn, baseUrl: options.baseUrl, symbol, now, windowMs: options.windowMs, minSamples: options.minSamples, depthIntervalMs: options.depthIntervalMs }); if (row) data[symbol] = row; else errors.push({ symbol, reason: 'incomplete-or-untrusted-measurement' }); } catch (error) { errors.push({ symbol, reason: error?.message?.slice(0, 120) || 'sample-failed' }); } } return { provider: 'local-rolling-measured', updatedAtMs: now, trusted: Object.keys(data).length > 0, data, diagnostics: { requested: targets.length, stored: Object.keys(data).length, errors } }; }
 export async function postRollingSnapshot({ controlUrl, workerToken, workerId, snapshot, fetchImpl }) { const response = await fetchImpl(`${controlUrl}/api/bot/radar-rolling-microstructure`, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-BOT-WORKER-TOKEN': workerToken }, body: JSON.stringify({ workerId, snapshot }) }); if (!response?.ok) throw new Error(`POST HTTP ${response?.status ?? 'FAILED'}`); return response.json(); }
-export async function runRollingMicrostructureProducer({ env = process.env, fetchImpl = globalThis.fetch, logger = console, candidates = [], now = Date.now(), waitFn = sleep, ...opts } = {}) { const options = normalizeRollingProducerOptions({ env, ...opts }); const log = typeof logger?.log === 'function' ? logger.log.bind(logger) : () => {}; if (!options.enabled) { log('[rolling-microstructure] disabled; set WORKER_RADAR_ROLLING_ENABLED=true for a local one-shot dry run.'); return { ok: true, disabled: true, posted: false, snapshot: null }; } if (!options.baseUrlAllowed) return { ok: false, reason: 'BINANCE_FUTURES_BASE_URL_NOT_ALLOWED', posted: false }; if (options.postEnabled && !options.workerToken) return { ok: false, reason: 'BOT_WORKER_TOKEN_REQUIRED', posted: false }; if (options.postEnabled && !options.controlUrl) return { ok: false, reason: 'CONTROL_BASE_URL_REQUIRED', posted: false }; if (typeof fetchImpl !== 'function') return { ok: false, reason: 'FETCH_IMPLEMENTATION_REQUIRED', posted: false }; const snapshot = await buildRollingSnapshotFromSamples({ candidates, fetchImpl, options, now, waitFn }); if (!options.postEnabled) return { ok: true, dryRun: true, posted: false, snapshot }; const postResult = await postRollingSnapshot({ controlUrl: options.controlUrl, workerToken: options.workerToken, workerId: options.workerId, snapshot, fetchImpl }); return { ok: true, dryRun: false, posted: true, snapshot, postResult }; }
-if (isMainModule()) runRollingMicrostructureProducer().then((result) => { console.log(JSON.stringify({ ok: result.ok, disabled: result.disabled === true, dryRun: result.dryRun === true, posted: result.posted === true, reason: result.reason || null, symbols: Object.keys(result.snapshot?.data || {}) })); if (!result.ok) process.exitCode = 1; }).catch((error) => { console.error(JSON.stringify({ ok: false, reason: error?.message || 'rolling-producer-failed' })); process.exitCode = 1; });
+function noPost(reason, snapshot = null, candidateCount = 0) { return { ok: false, reason, posted: false, snapshot, candidateCount }; }
+export async function runRollingMicrostructureProducer({ env = process.env, fetchImpl = globalThis.fetch, logger = console, candidates, now = Date.now(), waitFn = sleep, ...opts } = {}) {
+  const options = normalizeRollingProducerOptions({ env, ...opts }); const log = typeof logger?.log === 'function' ? logger.log.bind(logger) : () => {};
+  if (!options.enabled) { log('[rolling-microstructure] disabled; set WORKER_RADAR_ROLLING_ENABLED=true for a local one-shot dry run.'); return { ok: true, disabled: true, posted: false, snapshot: null }; }
+  if (!options.baseUrlAllowed) return noPost('BINANCE_FUTURES_BASE_URL_NOT_ALLOWED'); if (typeof fetchImpl !== 'function') return noPost('FETCH_IMPLEMENTATION_REQUIRED');
+  let resolvedCandidates = candidates;
+  if (resolvedCandidates === undefined) { const loaded = await fetchRollingCandidates({ controlUrl: options.controlUrl, workerToken: options.workerToken, fetchImpl }); if (!loaded.ok) return noPost(loaded.reason); resolvedCandidates = loaded.candidates; }
+  const targets = selectRollingTargets(resolvedCandidates, options); if (targets.length === 0) return noPost('NO_CANDIDATES_NO_POST', null, 0);
+  if (options.postEnabled && !options.workerToken) return noPost('BOT_WORKER_TOKEN_REQUIRED', null, targets.length); if (options.postEnabled && !options.controlUrl) return noPost('CONTROL_BASE_URL_REQUIRED', null, targets.length);
+  const snapshot = await buildRollingSnapshotFromSamples({ candidates: resolvedCandidates, fetchImpl, options, now, waitFn });
+  if (!options.postEnabled) return { ok: true, dryRun: true, posted: false, snapshot, candidateCount: targets.length };
+  if (snapshot.trusted !== true || snapshot.diagnostics.stored < 1) { const blocked = snapshot.diagnostics.errors.some((entry) => String(entry?.reason || '').includes('HTTP 451')) ? 'BINANCE_EGRESS_BLOCKED_NO_POST' : 'NO_TRUSTED_ROWS_NO_POST'; return noPost(blocked, snapshot, targets.length); }
+  const postResult = await postRollingSnapshot({ controlUrl: options.controlUrl, workerToken: options.workerToken, workerId: options.workerId, snapshot, fetchImpl }); return { ok: true, dryRun: false, posted: true, snapshot, postResult, candidateCount: targets.length };
+}
+if (isMainModule()) { const candidates = explicitRollingCandidates(); runRollingMicrostructureProducer({ candidates }).then((result) => { console.log(JSON.stringify({ ok: result.ok, disabled: result.disabled === true, dryRun: result.dryRun === true, posted: result.posted === true, reason: result.reason || null, candidateCount: result.candidateCount ?? 0, trustedRowCount: Object.keys(result.snapshot?.data || {}).length })); if (!result.ok) process.exitCode = 1; }).catch((error) => { console.error(JSON.stringify({ ok: false, reason: error?.message || 'rolling-producer-failed' })); process.exitCode = 1; }); }

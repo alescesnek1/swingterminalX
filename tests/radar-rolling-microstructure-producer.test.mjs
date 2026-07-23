@@ -36,3 +36,63 @@ test('hostile base URLs fail closed before any injected fetch and cannot produce
     assert.equal(calls, 0, baseUrl);
   }
 });
+function candidateAwareFetch({ candidateRows = candidates, candidateStatus = 200, rows = trades(), fapiStatus = 200 } = {}) {
+  const calls = []; let depthCalls = 0;
+  let fetchImpl = async (url, init = {}) => {
+    const value = String(url); calls.push({ url: value, method: init.method || 'GET', headers: init.headers || {} });
+    if (value.endsWith('/api/bot/radar-candidates')) return response({ ok: true, radarCandidates: candidateRows }, candidateStatus);
+    if (value.includes('/fapi/v1/')) return response({}, fapiStatus);
+    if (value.endsWith('/api/bot/radar-rolling-microstructure')) return response({ ok: true, stored: true });
+    return response({}, 404);
+  };
+  if (fapiStatus === 200) {
+    fetchImpl = async (url, init = {}) => {
+      const value = String(url); calls.push({ url: value, method: init.method || 'GET', headers: init.headers || {} });
+      if (value.endsWith('/api/bot/radar-candidates')) return response({ ok: true, radarCandidates: candidateRows }, candidateStatus);
+      if (value.includes('/fapi/v1/aggTrades')) return response(rows);
+      if (value.includes('/fapi/v1/klines')) return response(klines());
+      if (value.includes('/fapi/v1/depth')) return response(depth(depthCalls++ === 0 ? 100 : 120));
+      if (value.endsWith('/api/bot/radar-rolling-microstructure')) return response({ ok: true, stored: true });
+      return response({}, 404);
+    };
+  }
+  return { fetchImpl, calls };
+}
+const fetchedEnv = { ...envEnabled, CONTROL_BASE_URL: 'https://control.example', BOT_WORKER_TOKEN: 'test-token-must-not-log' };
+
+test('missing explicit candidates loads token-protected candidates without logging the token', async () => {
+  const { fetchImpl, calls } = candidateAwareFetch(); const logs = [];
+  const result = await runRollingMicrostructureProducer({ env: fetchedEnv, fetchImpl, now: NOW, depthIntervalMs: 0, waitFn: async () => {}, logger: { log(value) { logs.push(String(value)); } } });
+  assert.equal(result.dryRun, true); assert.equal(result.snapshot.trusted, true); const call = calls.find((entry) => entry.url.endsWith('/api/bot/radar-candidates'));
+  assert.equal(call.method, 'GET'); assert.equal(call.headers['X-BOT-WORKER-TOKEN'], fetchedEnv.BOT_WORKER_TOKEN); assert.ok(logs.every((line) => !line.includes(fetchedEnv.BOT_WORKER_TOKEN)));
+});
+
+test('candidate fetch failure and zero candidates fail closed without POST', async () => {
+  for (const variant of [{ candidateStatus: 503, reason: 'CANDIDATE_FETCH_FAILED_NO_POST' }, { candidateRows: [], reason: 'NO_CANDIDATES_NO_POST' }]) {
+    const { fetchImpl, calls } = candidateAwareFetch(variant); const result = await runRollingMicrostructureProducer({ env: { ...fetchedEnv, WORKER_RADAR_ROLLING_POST_ENABLED: 'true' }, fetchImpl, now: NOW, depthIntervalMs: 0, waitFn: async () => {}, logger: { log() {} } });
+    assert.equal(result.reason, variant.reason); assert.equal(result.posted, false); assert.equal(calls.some((entry) => entry.method === 'POST'), false);
+  }
+});
+
+test('empty, invalid, thin, and 451 measurements never POST', async () => {
+  const variants = [
+    { candidateRows: [{ alphaPair: 'ALPHA_BTCUSDT' }, { spot_pair: 'BTCUSDT' }], reason: 'NO_CANDIDATES_NO_POST' },
+    { rows: trades({ thin: true }), reason: 'NO_TRUSTED_ROWS_NO_POST' },
+    { fapiStatus: 451, reason: 'BINANCE_EGRESS_BLOCKED_NO_POST' },
+  ];
+  for (const variant of variants) {
+    const { fetchImpl, calls } = candidateAwareFetch(variant); const result = await runRollingMicrostructureProducer({ env: { ...fetchedEnv, WORKER_RADAR_ROLLING_POST_ENABLED: 'true' }, fetchImpl, now: NOW, depthIntervalMs: 0, waitFn: async () => {}, logger: { log() {} } });
+    assert.equal(result.reason, variant.reason); assert.equal(result.posted, false); assert.equal(calls.some((entry) => entry.method === 'POST'), false);
+  }
+});
+
+test('valid fetched futures candidate posts exactly one trusted snapshot', async () => {
+  const { fetchImpl, calls } = candidateAwareFetch({ candidateRows: [{ alphaPair: 'ALPHA_BTCUSDT' }, { spot_pair: 'BTCUSDT' }, { futures_pair: 'BTCUSDT' }] });
+  const result = await runRollingMicrostructureProducer({ env: { ...fetchedEnv, WORKER_RADAR_ROLLING_POST_ENABLED: 'true' }, fetchImpl, now: NOW, depthIntervalMs: 0, waitFn: async () => {}, logger: { log() {} } });
+  assert.equal(result.snapshot.trusted, true); assert.equal(result.posted, true); assert.equal(result.candidateCount, 1); assert.equal(calls.filter((entry) => entry.method === 'POST' && entry.url.endsWith('/api/bot/radar-rolling-microstructure')).length, 1);
+});
+
+test('explicit symbols bypass candidate fetch and invalid symbols stay fail closed', async () => {
+  const { fetchImpl, calls } = candidateAwareFetch(); const result = await runRollingMicrostructureProducer({ env: envEnabled, candidates: [{ futures_pair: 'BTCUSDT' }], fetchImpl, now: NOW, depthIntervalMs: 0, waitFn: async () => {}, logger: { log() {} } });
+  assert.equal(result.snapshot.trusted, true); assert.equal(calls.some((entry) => entry.url.endsWith('/api/bot/radar-candidates')), false);
+});
