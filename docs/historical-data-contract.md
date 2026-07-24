@@ -33,3 +33,24 @@ Blocking codes: `missing_dataset`, `unsupported_schema_version`, `unsupported_pr
 Warning codes: `futures_field_missing` and `depth_unavailable`. Both explicitly mean `UNKNOWN`, never an assumed positive signal.
 
 The import-free implementation is `scripts/radar/historical-data-contract.mjs`.
+
+## 6. Backtest engine skeleton
+
+`scripts/radar/radar-backtest-engine.mjs` is a pure deterministic simulator
+for one supplied versioned historical candidate fixture and validated dataset. It
+first validates the dataset, candidate, and stored-candidate requirement for
+Strict Absorb/actionability. It then emits an event trail for intent creation,
+risk approval/veto, simulated entry, stop/target/end-close, or explicit unknown
+state.
+
+The skeleton supports spot/futures and separate USDT/USDC quote domains. Its
+only fill choices are candle-close or an explicit configured price. Fees,
+slippage, and spread are supplied assumptions; a long-only single position uses
+the candidate stop and first target, evaluates stop before target when a candle
+contains both, and otherwise stays open or closes at dataset end only when
+requested. Futures default to 1x isolated margin, reject leverage above 2x, and
+report funding/liquidation metadata without inventing it.
+
+This is not an exchange adapter, data fetcher, runner, scheduler, order path,
+or full backtest engine. Future fill models, sizing, multi-position accounting,
+and risk policy require separate approval.
