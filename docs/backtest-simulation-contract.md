@@ -27,3 +27,11 @@ Futures is isolated-margin only, defaults to 1x, and rejects leverage above 2x. 
 ## Portfolio scheduling scenarios
 
 `runRadarPortfolioBacktest(scenario)` consumes versioned synthetic scenarios only. It orders candidate jobs by scheduled timestamp ascending, then configured numeric priority, symbol ascending, and fixture ID ascending. The scheduler carries simulated quote-specific balances, daily realized PnL, and open positions between jobs; it never mixes USDT and USDC. Same-time candidates beyond `maxOpenPositions` receive a stable `max_open_positions_exceeded` veto. Candle arrays are normalized by UTC open time before deterministic fills; stale/unknown candidates fail before sizing or fills.
+
+## Edge-case portfolio policy
+
+Synthetic edge scenarios use the explicit versioned fixture contract in `tests/fixtures/radar-portfolio-edge-scenarios.mjs`. A partial entry uses `partialFillRatio` (default `1`): only the filled notional/quantity pays entry fees and the remainder is deterministically cancelled. A partial stop/target exit uses `partialExitRatio` (default `1`): realized PnL and exit fees apply only to the filled quantity; the remainder stays open and is marked at the final supplied candle under `mark_to_dataset_end`. There is no invented liquidity or random fill.
+
+`gapPolicy` defaults to `reject`. Any declared/validated candle gap causes a `candle_gap` unknown/fail-closed result before an entry; the engine never assumes an optimistic stop or target fill through a gap. `candidateFreshnessAtFill: true` adds an explicit fill-time freshness veto using the supplied clock, candidate timestamp, and `candidateMaxAgeMs`.
+
+Portfolio daily boundaries are UTC only. Per-quote daily realized loss resets when the scheduled timestamp crosses a UTC day, so USDT loss does not consume USDC loss. An explicit `riskLimits.globalDailyLoss` additionally blocks all quotes/products once cumulative portfolio loss reaches its limit; it resets at the same UTC boundary. Futures funding is charged only from supplied `fundingEvents` (or the legacy supplied `fundingRate`); absent funding yields `funding_unknown` and zero fabricated charge. Dataset-end handling remains explicit: `closeAtDatasetEnd: true` closes at the final supplied candle, otherwise the position remains open with reported unrealized PnL.
