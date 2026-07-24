@@ -1,4 +1,4 @@
-﻿// Public, bounded Binance REST source. This module has no credentials, signed
+// Public, bounded Binance REST source. This module has no credentials, signed
 // endpoints, CoinGecko fallback, or trading thresholds. DEX/non-Binance assets
 // are simply absent from this context and must be shown as UNSUPPORTED later.
 export const BINANCE_SPOT_ORIGIN = 'https://api.binance.com';
@@ -100,7 +100,7 @@ async function collectMicrostructurePair(market, ticker, fetchImpl) {
     failureCode: firstFailure ? failureCode(firstFailure.reason) : null, klines1m: klines.status === 'fulfilled' && Array.isArray(klines.value) ? klines.value.slice(0, 120) : [],
     depthSummary: depth.status === 'fulfilled' ? depthSummary(depth.value) : {}, tradesSummary: summary,
     windowStart: summary.windowStart, windowEnd: summary.windowEnd, missingInputs,
-    payload: { depth: depth.status === 'fulfilled' ? { bids: Array.isArray(depth.value?.bids) ? depth.value.bids.slice(0, 100) : [], asks: Array.isArray(depth.value?.asks) ? depth.value.asks.slice(0, 100) : [] } : {}, aggTrades: trades.status === 'fulfilled' && Array.isArray(trades.value) ? trades.value.slice(0, 500) : [], funding: { dataStatus: 'unsupported' }, openInterest: { dataStatus: 'unsupported' } },
+    orderBook: depth.status === 'fulfilled' ? { lastUpdateId: depth.value?.lastUpdateId ?? null, bids: Array.isArray(depth.value?.bids) ? depth.value.bids.slice(0, 100) : [], asks: Array.isArray(depth.value?.asks) ? depth.value.asks.slice(0, 100) : [] } : {}, aggTrades: trades.status === 'fulfilled' && Array.isArray(trades.value) ? trades.value.slice(0, 500) : [],
   };
 }
 async function mapBounded(items, limit, callback) {
