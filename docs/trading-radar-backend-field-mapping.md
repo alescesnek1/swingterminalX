@@ -238,9 +238,10 @@ The future system must not:
 
 ## 9. Recommended next coding task
 
-Create only the exchange-neutral, pure **RADAR candidate schema and validation
-module**, with no fetches, credentials, KuCoin adapter, scheduler, runner, or
-order path. It should validate provenance/freshness, distinguish V1 truth from
-advisory context, reject missing/unknown prerequisites, and have unit tests for
-all documented fail-closed cases. Review that isolated module before beginning
-historical-data or backtest work.
+The pure validator now exists at
+scripts/radar/trade-intent-candidate-validation.mjs. It is not wired into
+RADAR, Telegram, a worker, or an exchange path.
+
+Next, add versioned, in-memory historical RADAR candidate fixtures and replay
+contract tests only. That work must remain free of fetches, credentials,
+exchange adapters, schedulers, runners, databases, and order paths.
