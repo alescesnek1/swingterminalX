@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { buildRollingSnapshotFromSamples, isAllowedBinanceFuturesBaseUrl, normalizeRollingProducerOptions, runRollingMicrostructureProducer, selectRollingTargets } from '../scripts/radar/rolling-microstructure-producer.mjs';
+import { buildRollingSnapshotFromSamples, isAllowedBinanceFuturesBaseUrl, isAllowedControlBaseUrl, normalizeRollingProducerOptions, runRollingMicrostructureProducer, selectRollingTargets } from '../scripts/radar/rolling-microstructure-producer.mjs';
 const NOW = 1_800_000_000_000; const envEnabled = { WORKER_RADAR_ROLLING_ENABLED: 'true' }; const candidates = [{ futures_pair: 'BTCUSDT' }];
 const response = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
 const depth = (total) => ({ bids: [['100', String(total)]], asks: [['100.05', '1']] });
@@ -58,7 +58,28 @@ function candidateAwareFetch({ candidateRows = candidates, candidateStatus = 200
   }
   return { fetchImpl, calls };
 }
-const fetchedEnv = { ...envEnabled, CONTROL_BASE_URL: 'https://control.example', BOT_WORKER_TOKEN: 'test-token-must-not-log' };
+const fetchedEnv = { ...envEnabled, CONTROL_BASE_URL: 'https://swingterminalx.netlify.app', BOT_WORKER_TOKEN: 'test-token-must-not-log' };
+
+test('worker-token control URLs allow only the production origin and loopback development hosts', () => {
+  for (const trusted of ['https://swingterminalx.netlify.app', 'http://localhost:8888', 'https://localhost:3443', 'http://127.0.0.1:8888']) assert.equal(isAllowedControlBaseUrl(trusted), true, trusted);
+  for (const hostile of ['https://evil.example.com', 'https://swingterminalx.netlify.app.evil.example.com', 'https://evil.example.com@swingterminalx.netlify.app', 'https://swingterminalx.netlify.app@evil.example.com', 'https://swingterminalx.netlify.app/path', 'https://swingterminalx.netlify.app//', 'https://swingterminalx.netlify.app?next=https://evil.example.com', 'file:///tmp/control', 'ftp://localhost:21', '://malformed', '//swingterminalx.netlify.app']) assert.equal(isAllowedControlBaseUrl(hostile), false, hostile);
+});
+
+test('untrusted control URLs fail before fetch and never attach the worker token', async () => {
+  const hostileUrls = ['https://evil.example.com', 'https://swingterminalx.netlify.app.evil.example.com', 'https://evil.example.com@swingterminalx.netlify.app', 'https://swingterminalx.netlify.app//', 'file:///tmp/control', 'ftp://localhost:21', '://malformed'];
+  for (const controlUrl of hostileUrls) {
+    const calls = []; const logs = []; const workerToken = 'test-token-must-not-log';
+    const result = await runRollingMicrostructureProducer({ env: { ...envEnabled, WORKER_RADAR_ROLLING_POST_ENABLED: 'true', CONTROL_BASE_URL: controlUrl, BOT_WORKER_TOKEN: workerToken }, fetchImpl: async (url, init = {}) => { calls.push({ url: String(url), headers: init.headers || {} }); return response({}); }, now: NOW, depthIntervalMs: 0, waitFn: async () => {}, logger: { log(value) { logs.push(String(value)); } } });
+    assert.equal(result.reason, 'CONTROL_BASE_URL_NOT_ALLOWED', controlUrl);
+    assert.equal(result.posted, false, controlUrl);
+    assert.equal(calls.length, 0, controlUrl);
+    assert.ok(logs.every((line) => !line.includes(workerToken)), controlUrl);
+    const explicitCandidateResult = await runRollingMicrostructureProducer({ env: { ...envEnabled, WORKER_RADAR_ROLLING_POST_ENABLED: 'true', CONTROL_BASE_URL: controlUrl, BOT_WORKER_TOKEN: workerToken }, candidates, fetchImpl: async (url, init = {}) => { calls.push({ url: String(url), headers: init.headers || {} }); return response({}); }, now: NOW, depthIntervalMs: 0, waitFn: async () => {}, logger: { log(value) { logs.push(String(value)); } } });
+    assert.equal(explicitCandidateResult.reason, 'CONTROL_BASE_URL_NOT_ALLOWED', controlUrl);
+    assert.equal(explicitCandidateResult.posted, false, controlUrl);
+    assert.equal(calls.length, 0, controlUrl);
+  }
+});
 
 test('missing explicit candidates loads token-protected candidates without logging the token', async () => {
   const { fetchImpl, calls } = candidateAwareFetch(); const logs = [];

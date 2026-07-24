@@ -63,7 +63,10 @@
 > rejected before merge. The producer is still dry-run unless the separately
 > opt-in POST flag, token, and control URL are supplied; no scheduler, workflow,
 > production configuration, private/signed endpoint, trading, Telegram, or
-> gate/ENTRY_READY threshold changed. A valid local row reaches only the existing
+> gate/ENTRY_READY threshold changed. Token-bearing candidate/POST calls now require
+> the exact `https://swingterminalx.netlify.app` control origin or loopback local
+> development (`localhost`/`127.0.0.1`, HTTP(S)); malformed, userinfo, path/query,
+> scheme, suffix, and arbitrary-host URLs fail before fetch. A valid local row reaches only the existing
 > Strict-Absorb gate; Telegram remains subject to all existing independent gates.> _RADAR Focus checklist layout hotfix (2026-07-23, local-only):_ The emoji-free checklist had one right-aligned flex value column, which could split `DATA OFF` and `ADVISORY` vertically. It now uses stable left-aligned grid columns **Gate / Status / Meaning**, with non-wrapping status badges; all wording, gate values, and advisory boundaries remain unchanged. Technical details remain collapsed by default and the STALE explanation remains inside it. Cache-bust is **`?v=6i5` -> `?v=6i6`**. No backend, strict-Absorb runtime, scoring, ENTRY_READY, Telegram, producer, endpoint, or trading change.
 >
 > _RADAR STALE-vs-advisory wording clarity (2026-07-23, local-only on top of

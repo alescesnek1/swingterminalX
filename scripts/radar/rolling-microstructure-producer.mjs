@@ -6,6 +6,8 @@ import { computeRollingAbsorption, validateRollingTrades } from './rolling-micro
 import { validateTrustedRollingRow } from './rolling-microstructure-snapshot.mjs';
 const PUBLIC_FAPI_BASE = 'https://fapi.binance.com';
 export const BINANCE_FUTURES_HOST_ALLOWLIST = new Set(['fapi.binance.com']);
+export const CONTROL_BASE_URL_PRODUCTION_ORIGIN = 'https://swingterminalx.netlify.app';
+const CONTROL_BASE_URL_LOCAL_HOSTS = new Set(['localhost', '127.0.0.1']);
 const SYMBOL_RE = /^[A-Z0-9]{2,24}(USDT|USDC)$/; const DEFAULT_WINDOW_MS = 300_000; const DEFAULT_DEPTH_INTERVAL_MS = 15_000; const MAX_TOP_N = 10;
 const requiredFields = ['absorptionScore', 'bidDepthRebuildPct', 'aggressiveSellsFailed', 'deltaImprovementPct', 'marketBuyVolumeDominance', 'supportRetestHeld', 'spreadAndSlippageHealthy'];
 function isMainModule() { return Boolean(process.argv[1]) && path.resolve(fileURLToPath(import.meta.url)) === path.resolve(process.argv[1]); }
@@ -14,6 +16,19 @@ function positiveInteger(value, fallback, max = Number.MAX_SAFE_INTEGER) { const
 function bool(env, key) { return env && env[key] === 'true'; }
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 export function isAllowedBinanceFuturesBaseUrl(value) { try { const url = new URL(String(value)); return url.protocol === 'https:' && BINANCE_FUTURES_HOST_ALLOWLIST.has(url.hostname); } catch { return false; } }
+// Worker-token requests may only target the production control plane or a loopback
+// development server. Require a bare origin so userinfo, paths, queries, and
+// fragments cannot redirect the token-bearing request to an unexpected destination.
+export function isAllowedControlBaseUrl(value) {
+  const raw = String(value ?? '');
+  if (!raw || raw !== raw.trim()) return false;
+  try {
+    const url = new URL(raw);
+    if ((url.protocol !== 'https:' && url.protocol !== 'http:') || url.username || url.password || url.pathname !== '/' || url.search || url.hash) return false;
+    if (url.origin === CONTROL_BASE_URL_PRODUCTION_ORIGIN) return true;
+    return CONTROL_BASE_URL_LOCAL_HOSTS.has(url.hostname) && (url.protocol === 'http:' || url.protocol === 'https:');
+  } catch { return false; }
+}
 function asSymbol(candidate) {
   for (const key of ['futures_pair', 'futuresPair']) { const value = String(candidate?.[key] ?? '').trim().toUpperCase(); if (SYMBOL_RE.test(value)) return value; }
   if (candidate?.spot_pair || candidate?.spotPair || candidate?.alphaPair || candidate?.alpha_pair) return null;
@@ -22,7 +37,9 @@ function asSymbol(candidate) {
 }
 export function normalizeRollingProducerOptions({ env = process.env, ...opts } = {}) {
   const baseUrl = String(opts.baseUrl ?? PUBLIC_FAPI_BASE).replace(/\/+$/, '');
-  return { enabled: bool(env, 'WORKER_RADAR_ROLLING_ENABLED'), postEnabled: bool(env, 'WORKER_RADAR_ROLLING_POST_ENABLED'), controlUrl: String(opts.controlUrl ?? env.CONTROL_BASE_URL ?? '').replace(/\/+$/, ''), workerToken: String(opts.workerToken ?? env.BOT_WORKER_TOKEN ?? ''), workerId: String(opts.workerId ?? env.WORKER_RADAR_ROLLING_WORKER_ID ?? 'local-rolling-microstructure'), topN: positiveInteger(opts.topN ?? env.WORKER_RADAR_ROLLING_TOP_N, 5, MAX_TOP_N), windowMs: positiveInteger(opts.windowMs ?? env.WORKER_RADAR_ROLLING_WINDOW_MS, DEFAULT_WINDOW_MS), minSamples: positiveInteger(opts.minSamples ?? env.WORKER_RADAR_ROLLING_MIN_SAMPLES, 10, 10_000), depthIntervalMs: Number.isFinite(Number(opts.depthIntervalMs)) && Number(opts.depthIntervalMs) >= 0 ? Number(opts.depthIntervalMs) : DEFAULT_DEPTH_INTERVAL_MS, baseUrl, baseUrlAllowed: isAllowedBinanceFuturesBaseUrl(baseUrl) };
+  const controlUrlRaw = String(opts.controlUrl ?? env.CONTROL_BASE_URL ?? '');
+  const controlUrl = controlUrlRaw.replace(/\/+$/, '');
+  return { enabled: bool(env, 'WORKER_RADAR_ROLLING_ENABLED'), postEnabled: bool(env, 'WORKER_RADAR_ROLLING_POST_ENABLED'), controlUrl, controlUrlAllowed: isAllowedControlBaseUrl(controlUrlRaw), workerToken: String(opts.workerToken ?? env.BOT_WORKER_TOKEN ?? ''), workerId: String(opts.workerId ?? env.WORKER_RADAR_ROLLING_WORKER_ID ?? 'local-rolling-microstructure'), topN: positiveInteger(opts.topN ?? env.WORKER_RADAR_ROLLING_TOP_N, 5, MAX_TOP_N), windowMs: positiveInteger(opts.windowMs ?? env.WORKER_RADAR_ROLLING_WINDOW_MS, DEFAULT_WINDOW_MS), minSamples: positiveInteger(opts.minSamples ?? env.WORKER_RADAR_ROLLING_MIN_SAMPLES, 10, 10_000), depthIntervalMs: Number.isFinite(Number(opts.depthIntervalMs)) && Number(opts.depthIntervalMs) >= 0 ? Number(opts.depthIntervalMs) : DEFAULT_DEPTH_INTERVAL_MS, baseUrl, baseUrlAllowed: isAllowedBinanceFuturesBaseUrl(baseUrl) };
 }
 export function selectRollingTargets(candidates = [], options = {}) { const topN = positiveInteger(options.topN, 5, MAX_TOP_N); const seen = new Set(); return (Array.isArray(candidates) ? candidates : []).flatMap((candidate) => { const symbol = asSymbol(candidate); if (!symbol || seen.has(symbol) || seen.size >= topN) return []; seen.add(symbol); return [{ symbol, candidate }]; }); }
 export function explicitRollingCandidates({ env = process.env, argv = process.argv.slice(2) } = {}) {
@@ -34,6 +51,7 @@ export function explicitRollingCandidates({ env = process.env, argv = process.ar
 }
 export async function fetchRollingCandidates({ controlUrl, workerToken, fetchImpl }) {
   if (!controlUrl) return { ok: false, reason: 'CONTROL_BASE_URL_REQUIRED' };
+  if (!isAllowedControlBaseUrl(controlUrl)) return { ok: false, reason: 'CONTROL_BASE_URL_NOT_ALLOWED' };
   if (!workerToken) return { ok: false, reason: 'BOT_WORKER_TOKEN_REQUIRED' };
   try {
     const response = await fetchImpl(`${controlUrl}/api/bot/radar-candidates`, { method: 'GET', headers: { Accept: 'application/json', 'X-BOT-WORKER-TOKEN': workerToken } });
@@ -56,16 +74,16 @@ async function collectSymbol({ fetchImpl, waitFn, baseUrl, symbol, now, windowMs
   return validateTrustedRollingRow(row, { nowMs: now }).ok ? row : null;
 }
 export async function buildRollingSnapshotFromSamples({ candidates = [], fetchImpl, options = {}, now = Date.now(), waitFn = sleep } = {}) { const data = {}; const errors = []; const targets = selectRollingTargets(candidates, options); if (!isAllowedBinanceFuturesBaseUrl(options.baseUrl)) return { provider: 'local-rolling-measured', updatedAtMs: now, trusted: false, data, diagnostics: { requested: targets.length, stored: 0, errors: [{ reason: 'BINANCE_FUTURES_BASE_URL_NOT_ALLOWED' }] } }; for (const { symbol } of targets) { try { const row = await collectSymbol({ fetchImpl, waitFn, baseUrl: options.baseUrl, symbol, now, windowMs: options.windowMs, minSamples: options.minSamples, depthIntervalMs: options.depthIntervalMs }); if (row) data[symbol] = row; else errors.push({ symbol, reason: 'incomplete-or-untrusted-measurement' }); } catch (error) { errors.push({ symbol, reason: error?.message?.slice(0, 120) || 'sample-failed' }); } } return { provider: 'local-rolling-measured', updatedAtMs: now, trusted: Object.keys(data).length > 0, data, diagnostics: { requested: targets.length, stored: Object.keys(data).length, errors } }; }
-export async function postRollingSnapshot({ controlUrl, workerToken, workerId, snapshot, fetchImpl }) { const response = await fetchImpl(`${controlUrl}/api/bot/radar-rolling-microstructure`, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-BOT-WORKER-TOKEN': workerToken }, body: JSON.stringify({ workerId, snapshot }) }); if (!response?.ok) throw new Error(`POST HTTP ${response?.status ?? 'FAILED'}`); return response.json(); }
+export async function postRollingSnapshot({ controlUrl, workerToken, workerId, snapshot, fetchImpl }) { if (!isAllowedControlBaseUrl(controlUrl)) throw new Error('CONTROL_BASE_URL_NOT_ALLOWED'); const response = await fetchImpl(`${controlUrl}/api/bot/radar-rolling-microstructure`, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-BOT-WORKER-TOKEN': workerToken }, body: JSON.stringify({ workerId, snapshot }) }); if (!response?.ok) throw new Error(`POST HTTP ${response?.status ?? 'FAILED'}`); return response.json(); }
 function noPost(reason, snapshot = null, candidateCount = 0) { return { ok: false, reason, posted: false, snapshot, candidateCount }; }
 export async function runRollingMicrostructureProducer({ env = process.env, fetchImpl = globalThis.fetch, logger = console, candidates, now = Date.now(), waitFn = sleep, ...opts } = {}) {
   const options = normalizeRollingProducerOptions({ env, ...opts }); const log = typeof logger?.log === 'function' ? logger.log.bind(logger) : () => {};
   if (!options.enabled) { log('[rolling-microstructure] disabled; set WORKER_RADAR_ROLLING_ENABLED=true for a local one-shot dry run.'); return { ok: true, disabled: true, posted: false, snapshot: null }; }
   if (!options.baseUrlAllowed) return noPost('BINANCE_FUTURES_BASE_URL_NOT_ALLOWED'); if (typeof fetchImpl !== 'function') return noPost('FETCH_IMPLEMENTATION_REQUIRED');
   let resolvedCandidates = candidates;
-  if (resolvedCandidates === undefined) { const loaded = await fetchRollingCandidates({ controlUrl: options.controlUrl, workerToken: options.workerToken, fetchImpl }); if (!loaded.ok) return noPost(loaded.reason); resolvedCandidates = loaded.candidates; }
+  if (resolvedCandidates === undefined) { if (!options.controlUrlAllowed) return noPost('CONTROL_BASE_URL_NOT_ALLOWED'); const loaded = await fetchRollingCandidates({ controlUrl: options.controlUrl, workerToken: options.workerToken, fetchImpl }); if (!loaded.ok) return noPost(loaded.reason); resolvedCandidates = loaded.candidates; }
   const targets = selectRollingTargets(resolvedCandidates, options); if (targets.length === 0) return noPost('NO_CANDIDATES_NO_POST', null, 0);
-  if (options.postEnabled && !options.workerToken) return noPost('BOT_WORKER_TOKEN_REQUIRED', null, targets.length); if (options.postEnabled && !options.controlUrl) return noPost('CONTROL_BASE_URL_REQUIRED', null, targets.length);
+  if (options.postEnabled && !options.workerToken) return noPost('BOT_WORKER_TOKEN_REQUIRED', null, targets.length); if (options.postEnabled && !options.controlUrl) return noPost('CONTROL_BASE_URL_REQUIRED', null, targets.length); if (options.postEnabled && !options.controlUrlAllowed) return noPost('CONTROL_BASE_URL_NOT_ALLOWED', null, targets.length);
   const snapshot = await buildRollingSnapshotFromSamples({ candidates: resolvedCandidates, fetchImpl, options, now, waitFn });
   if (!options.postEnabled) return { ok: true, dryRun: true, posted: false, snapshot, candidateCount: targets.length };
   if (snapshot.trusted !== true || snapshot.diagnostics.stored < 1) { const blocked = snapshot.diagnostics.errors.some((entry) => String(entry?.reason || '').includes('HTTP 451')) ? 'BINANCE_EGRESS_BLOCKED_NO_POST' : 'NO_TRUSTED_ROWS_NO_POST'; return noPost(blocked, snapshot, targets.length); }
