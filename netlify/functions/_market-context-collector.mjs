@@ -33,5 +33,7 @@ export async function runMarketContextCollector(deps = {}) {
     return { ok: true, runKey, runId: run.runId, dataStatus: collected.dataStatus, futuresEnabled: options.includeFutures, ...written };
   }, { getDbImpl: deps.getDbImpl });
   if (!tx?.ok) { console.warn('[MARKET_CONTEXT] cycle_failed', { reason: tx?.reason || 'DB_UNAVAILABLE', runKey }); return outcome(503, { ok: false, reason: tx?.reason || 'DB_UNAVAILABLE', runKey }); }
-  return outcome(200, tx.skipped ? { ok: true, skipped: true, reason: tx.reason, runKey } : { ok: true, skipped: false, runKey: tx.runKey, runId: tx.runId, dataStatus: tx.dataStatus, futuresEnabled: tx.futuresEnabled, tickerCount: tx.tickerCount, candleCount: tx.candleCount, orderBookLevelCount: tx.orderBookLevelCount, aggTradeCount: tx.aggTradeCount, measurementCount: tx.measurementCount });
+  const body = tx.skipped ? { ok: true, skipped: true, reason: tx.reason, runKey } : { ok: true, skipped: false, runKey: tx.runKey, runId: tx.runId, dataStatus: tx.dataStatus, futuresEnabled: tx.futuresEnabled, tickerCount: tx.tickerCount, candleCount: tx.candleCount, orderBookLevelCount: tx.orderBookLevelCount, aggTradeCount: tx.aggTradeCount, measurementCount: tx.measurementCount };
+  if (!tx.skipped) console.info('[MARKET_CONTEXT] cycle_completed', { runKey: body.runKey, runId: body.runId, dataStatus: body.dataStatus, futuresEnabled: body.futuresEnabled, tickerCount: body.tickerCount, candleCount: body.candleCount, orderBookLevelCount: body.orderBookLevelCount, aggTradeCount: body.aggTradeCount, measurementCount: body.measurementCount });
+  return outcome(200, body);
 }

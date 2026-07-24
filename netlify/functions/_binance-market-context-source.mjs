@@ -125,15 +125,16 @@ export async function collectBinanceMarketContext(options = {}) {
   let spot;
   try { spot = await collectVenue('spot', { fetchImpl, microstructureTopN: topN }); }
   catch (error) { return { ok: false, reason: failureCode(error), dataStatus: 'unavailable' }; }
-  let futures = { tickers: [], microstructures: [], status: 'unsupported' };
+  let futures = { tickers: [], microstructures: [], status: 'unsupported', failureCode: null };
   if (options.includeFutures === true) {
-    try { const collected = await collectVenue('futures', { fetchImpl, microstructureTopN: topN }); futures = { ...collected, status: 'complete' }; }
-    catch (error) { return { ok: false, reason: failureCode(error), dataStatus: 'unavailable' }; }
+    try { const collected = await collectVenue('futures', { fetchImpl, microstructureTopN: topN }); futures = { ...collected, status: 'complete', failureCode: null }; }
+    catch (error) { futures = { tickers: [], microstructures: [], status: 'unavailable', failureCode: failureCode(error) }; }
   }
   const microstructures = [...spot.microstructures, ...futures.microstructures];
+  const allMicrostructureComplete = microstructures.every((row) => row.dataStatus === 'complete');
   return {
-    ok: true, observedAt: new Date(), collectedAt: new Date(), dataStatus: microstructures.every((row) => row.dataStatus === 'complete') ? 'complete' : 'partial',
+    ok: true, observedAt: new Date(), collectedAt: new Date(), dataStatus: futures.status === 'complete' && allMicrostructureComplete ? 'complete' : 'partial',
     rows: [...spot.tickers, ...futures.tickers], microstructure: microstructures,
-    diagnostics: { spotTickerCount: spot.tickers.length, futuresTickerCount: futures.tickers.length, microstructureCount: microstructures.length, futuresStatus: futures.status, microstructureTopN: topN },
+    diagnostics: { spotTickerCount: spot.tickers.length, futuresTickerCount: futures.tickers.length, microstructureCount: microstructures.length, futuresStatus: futures.status, futuresFailureCode: futures.failureCode, microstructureTopN: topN },
   };
 }
