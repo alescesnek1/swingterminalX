@@ -52,5 +52,5 @@ requested. Futures default to 1x isolated margin, reject leverage above 2x, and
 report funding/liquidation metadata without inventing it.
 
 This is not an exchange adapter, data fetcher, runner, scheduler, order path,
-or full backtest engine. Future fill models, sizing, multi-position accounting,
-and risk policy require separate approval.
+or full backtest engine. Deterministic fill, sizing, multi-position, and risk
+semantics are now documented in [backtest-simulation-contract.md](backtest-simulation-contract.md); future live/paper policy still requires separate approval.

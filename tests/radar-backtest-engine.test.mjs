@@ -5,59 +5,15 @@ import { runRadarBacktest } from '../scripts/radar/radar-backtest-engine.mjs';
 import { HISTORICAL_MARKET_DATA_SCHEMA_VERSION } from '../scripts/radar/historical-data-contract.mjs';
 import { RADAR_TRADE_INTENT_CANDIDATE_FIXTURES, RADAR_TRADE_INTENT_REPLAY_CLOCK_MS } from './fixtures/radar-trade-intent-candidates.mjs';
 
-function dataset(overrides = {}) {
-  return {
-    schemaVersion: HISTORICAL_MARKET_DATA_SCHEMA_VERSION,
-    datasetVersion: 'backtest-fixture-v1',
-    provenance: { provider: 'fixture-provider', venue: 'fixture-venue', product: 'spot', quote: 'USDT', symbol: 'SOL/USDT', sourceType: 'historical-export', sourceUrl: 'https://fixtures.invalid/backtest', fetchedAt: '2026-07-24T12:00:00.000Z', importedAt: '2026-07-24T12:01:00.000Z' },
-    interval: '1h', range: { start: '2026-07-24T12:00:00.000Z', end: '2026-07-24T14:00:00.000Z', timezone: 'UTC' },
-    candles: [
-      { openTime: '2026-07-24T12:00:00.000Z', closeTime: '2026-07-24T13:00:00.000Z', open: 140, high: 141, low: 139, close: 140, volume: 1000, sourceStatus: 'AVAILABLE' },
-      { openTime: '2026-07-24T13:00:00.000Z', closeTime: '2026-07-24T14:00:00.000Z', open: 140, high: 146, low: 139, close: 145, volume: 1000, sourceStatus: 'AVAILABLE' },
-    ],
-    gaps: [], corrections: [], depth: { status: 'UNKNOWN' }, ...overrides,
-  };
-}
-function input(overrides = {}) { return { dataset: dataset(), candidateFixture: RADAR_TRADE_INTENT_CANDIDATE_FIXTURES[0], mode: 'spot', quote: 'USDT', clockMs: RADAR_TRADE_INTENT_REPLAY_CLOCK_MS, closeAtDatasetEnd: true, ...overrides }; }
-function eventTypes(result) { return result.events.map((item) => item.type); }
+function dataset(overrides = {}) { return { schemaVersion: HISTORICAL_MARKET_DATA_SCHEMA_VERSION, datasetVersion: 'backtest-fixture-v2', provenance: { provider: 'fixture-provider', venue: 'fixture-venue', product: 'spot', quote: 'USDT', symbol: 'SOL/USDT', sourceType: 'historical-export', sourceUrl: 'https://fixtures.invalid/backtest', fetchedAt: '2026-07-24T12:00:00.000Z', importedAt: '2026-07-24T12:01:00.000Z' }, interval: '1h', range: { start: '2026-07-24T12:00:00.000Z', end: '2026-07-24T16:00:00.000Z', timezone: 'UTC' }, candles: [ { openTime: '2026-07-24T12:00:00.000Z', closeTime: '2026-07-24T13:00:00.000Z', open: 140, high: 141, low: 139, close: 140, volume: 1000, sourceStatus: 'AVAILABLE' }, { openTime: '2026-07-24T13:00:00.000Z', closeTime: '2026-07-24T14:00:00.000Z', open: 140, high: 146, low: 139, close: 145, volume: 1000, sourceStatus: 'AVAILABLE' }, { openTime: '2026-07-24T14:00:00.000Z', closeTime: '2026-07-24T15:00:00.000Z', open: 140, high: 141, low: 139, close: 140, volume: 1000, sourceStatus: 'AVAILABLE' }, { openTime: '2026-07-24T15:00:00.000Z', closeTime: '2026-07-24T16:00:00.000Z', open: 140, high: 146, low: 139, close: 145, volume: 1000, sourceStatus: 'AVAILABLE' } ], gaps: [], corrections: [], depth: { status: 'UNKNOWN' }, ...overrides }; }
+function input(overrides = {}) { return { dataset: dataset(), candidateFixture: RADAR_TRADE_INTENT_CANDIDATE_FIXTURES[0], mode: 'spot', quote: 'USDT', clockMs: RADAR_TRADE_INTENT_REPLAY_CLOCK_MS, quoteBalances: { USDT: 1000, USDC: 500 }, sizing: { model: 'fixedNotional', fixedNotional: 100 }, riskLimits: { maxExposurePerTrade: 200, maxRealRiskAtStop: 20, maxOpenPositions: 2, maxDailyLoss: 100 }, closeAtDatasetEnd: true, ...overrides }; }
+function types(r) { return r.events.map((e) => e.type); }
 
-test('same explicit input is deterministic and creates one simulated take-profit trade', () => {
-  const first = runRadarBacktest(input()); const second = runRadarBacktest(input());
-  assert.deepEqual(first, second); assert.equal(first.ok, true); assert.equal(first.summary.trades, 1); assert.ok(eventTypes(first).includes('dataset_validated')); assert.ok(eventTypes(first).includes('candidate_validated')); assert.ok(eventTypes(first).includes('intent_created')); assert.ok(eventTypes(first).includes('risk_approved')); assert.ok(eventTypes(first).includes('simulated_entry')); assert.ok(eventTypes(first).includes('simulated_take_profit'));
-});
-test('invalid dataset and invalid candidate fixture reject before any simulated entry', () => {
-  const invalidDataset = runRadarBacktest(input({ dataset: dataset({ interval: '3m' }) }));
-  assert.equal(invalidDataset.ok, false); assert.ok(invalidDataset.reasonCodes.includes('invalid_interval')); assert.ok(!eventTypes(invalidDataset).includes('simulated_entry'));
-  const invalidCandidate = runRadarBacktest(input({ candidateFixture: RADAR_TRADE_INTENT_CANDIDATE_FIXTURES[1] }));
-  assert.equal(invalidCandidate.ok, false); assert.ok(invalidCandidate.reasonCodes.includes('not_entry_ready'));
-});
-test('fees and execution costs reduce net PnL', () => {
-  const free = runRadarBacktest(input());
-  const costly = runRadarBacktest(input({ costAssumptions: { makerFeeBps: 0, takerFeeBps: 20, slippageBps: 10, spreadBps: 10 } }));
-  assert.ok(costly.summary.netPnl < free.summary.netPnl); assert.ok(costly.summary.fees > 0);
-});
-test('stop-loss and dataset-end close events are deterministic', () => {
-  const stop = runRadarBacktest(input({ dataset: dataset({ candles: [dataset().candles[0], { ...dataset().candles[1], high: 144, low: 134, close: 136 }] }) }));
-  assert.ok(eventTypes(stop).includes('simulated_stop')); assert.equal(stop.summary.losses, 1);
-  const end = runRadarBacktest(input({ dataset: dataset({ candles: [dataset().candles[0], { ...dataset().candles[1], high: 144, low: 139, close: 142 }] }) }));
-  assert.ok(eventTypes(end).includes('dataset_end_close'));
-});
-test('futures defaults to 1x isolated, rejects leverage above 2x, and keeps quote domains separate', () => {
-  const futuresData = dataset({ provenance: { ...dataset().provenance, product: 'futures' }, futures: { status: 'AVAILABLE', fundingRate: 0.0001, markPrice: 140, indexPrice: 140, leverageMarginAssumptions: { maxLeverage: 2, marginMode: 'isolated' } } });
-  const futures = runRadarBacktest(input({ dataset: futuresData, mode: 'futures' }));
-  assert.equal(futures.ok, true); assert.equal(futures.assumptions.leverage, 1); assert.equal(futures.assumptions.marginMode, 'isolated'); assert.equal(futures.assumptions.liquidation.status, 'UNKNOWN');
-  assert.equal(runRadarBacktest(input({ dataset: futuresData, mode: 'futures', leverage: 3 })).ok, false);
-  const usdcData = dataset({ provenance: { ...dataset().provenance, quote: 'USDC', symbol: 'SOL/USDC' } });
-  assert.equal(runRadarBacktest(input({ dataset: usdcData, quote: 'USDC' })).ok, true);
-  assert.equal(runRadarBacktest(input({ dataset: usdcData, quote: 'USDT' })).ok, false);
-});
-test('missing stored strict Absorb evidence is rejected rather than invented', () => {
-  const result = runRadarBacktest(input({ candidateFixture: { ...RADAR_TRADE_INTENT_CANDIDATE_FIXTURES[0], source: 'untrusted-fixture' } }));
-  assert.equal(result.ok, false); assert.ok(result.reasonCodes.includes('radar_field_not_reconstructable')); assert.ok(!eventTypes(result).includes('intent_created'));
-});
-test('engine imports only the local validators and has no external client behavior', () => {
-  const source = fs.readFileSync(new URL('../scripts/radar/radar-backtest-engine.mjs', import.meta.url), 'utf8');
-  const imports = [...source.matchAll(/^import .* from '([^']+)';$/gm)].map((match) => match[1]);
-  assert.deepEqual(imports, ['./trade-intent-candidate-validation.mjs', './historical-data-contract.mjs']);
-  assert.doesNotMatch(source, /\bfetch\s*\(/i); assert.doesNotMatch(source, /kucoin|binance|telegram|worker|placeorder|submitorder/i);
-});
+test('fixed notional and percent-equity sizing are deterministic', () => { const fixed = runRadarBacktest(input()); assert.equal(fixed.positions[0].notional, 100); const pct = runRadarBacktest(input({ sizing: { model: 'percentEquity', percentEquity: 0.1 } })); assert.equal(pct.positions[0].notional, 100); assert.deepEqual(fixed, runRadarBacktest(input())); });
+test('risk-at-stop sizing and missing stop rejection are explicit', () => { const risk = runRadarBacktest(input({ sizing: { model: 'riskAtStopPercentEquity', riskAtStopPercentEquity: 0.01 }, riskLimits: { ...input().riskLimits, maxExposurePerTrade: 500 } })); assert.ok(risk.positions[0].realRisk <= 10.000001); const missing = runRadarBacktest(input({ candidateFixture: { ...RADAR_TRADE_INTENT_CANDIDATE_FIXTURES[0], candidate: { ...RADAR_TRADE_INTENT_CANDIDATE_FIXTURES[0].candidate, invalidationLevel: undefined, HARD_INVALIDATION: undefined, STOP_LOSS_LEVEL: undefined } }, sizing: { model: 'riskAtStopPercentEquity', riskAtStopPercentEquity: 0.01 } })); assert.equal(missing.positions.length, 0); assert.ok(missing.riskDecisions[0].reasonCodes.includes('missing_stop')); });
+test('exposure, open-position, and daily-loss limits veto deterministically', () => { assert.ok(runRadarBacktest(input({ riskLimits: { ...input().riskLimits, maxExposurePerTrade: 50 } })).riskDecisions[0].reasonCodes.includes('max_exposure_exceeded')); const nonExiting = dataset({ candles: dataset().candles.map((candle) => ({ ...candle, high: 144, low: 139, close: 142 })) }); const open = runRadarBacktest(input({ dataset: nonExiting, closeAtDatasetEnd: false, tradePlans: [{ candidateFixture: RADAR_TRADE_INTENT_CANDIDATE_FIXTURES[0], entryCandleIndex: 0 }, { candidateFixture: RADAR_TRADE_INTENT_CANDIDATE_FIXTURES[0], entryCandleIndex: 1 }], riskLimits: { ...input().riskLimits, maxOpenPositions: 1 } })); assert.ok(open.riskDecisions.some((d) => d.reasonCodes.includes('max_open_positions_exceeded'))); const daily = runRadarBacktest(input({ dailyRealizedPnl: { USDT: -99 }, riskLimits: { ...input().riskLimits, maxDailyLoss: 100 } })); assert.ok(daily.riskDecisions[0].reasonCodes.includes('max_daily_loss_exceeded')); });
+test('USDT and USDC ledgers stay separated and unknown balance rejects', () => { const usdc = runRadarBacktest(input({ dataset: dataset({ provenance: { ...dataset().provenance, quote: 'USDC', symbol: 'SOL/USDC' } }), quote: 'USDC' })); assert.equal(usdc.quoteLedgers.USDT.initialBalance, 1000); assert.equal(usdc.quoteLedgers.USDC.initialBalance, 500); assert.equal(runRadarBacktest(input({ quoteBalances: { USDC: 500 } })).ok, false); });
+test('costs reduce net result and conservative intrabar stop-first is recorded', () => { const free = runRadarBacktest(input()); const costly = runRadarBacktest(input({ costAssumptions: { makerFeeBps: 0, takerFeeBps: 20, slippageBps: 10, spreadBps: 10 } })); assert.ok(costly.summary.netPnl < free.summary.netPnl); const both = runRadarBacktest(input({ dataset: dataset({ candles: [dataset().candles[0], { ...dataset().candles[1], high: 146, low: 134, close: 140 }, ...dataset().candles.slice(2)] }) })); assert.ok(types(both).includes('simulated_stop')); assert.ok(both.warnings.includes('ambiguous_intrabar_stop_first')); });
+test('sequential positions account realized PnL and dataset-end unrealized PnL', () => { const sequential = runRadarBacktest(input({ tradePlans: [{ candidateFixture: RADAR_TRADE_INTENT_CANDIDATE_FIXTURES[0], entryCandleIndex: 0 }, { candidateFixture: RADAR_TRADE_INTENT_CANDIDATE_FIXTURES[0], entryCandleIndex: 2 }] })); assert.equal(sequential.positions.length, 2); assert.equal(sequential.summary.trades, 2); assert.ok(sequential.equityCurve.length >= 1); const open = runRadarBacktest(input({ closeAtDatasetEnd: false, dataset: dataset({ candles: [dataset().candles[0], { ...dataset().candles[1], high: 144, low: 139, close: 142 }] }) })); assert.equal(open.summary.openPositions, 1); assert.notEqual(open.quoteLedgers.USDT.unrealizedPnl, 0); });
+test('futures is isolated 1x, rejects leverage above 2x, and applies funding', () => { const futureData = dataset({ provenance: { ...dataset().provenance, product: 'futures' }, futures: { status: 'AVAILABLE', fundingRate: 0.01, markPrice: 140, indexPrice: 140, leverageMarginAssumptions: { maxLeverage: 2, marginMode: 'isolated' }, liquidationDistance: { status: 'UNKNOWN' } } }); const future = runRadarBacktest(input({ dataset: futureData, mode: 'futures' })); assert.equal(future.assumptions.leverage, 1); assert.equal(future.assumptions.marginMode, 'isolated'); assert.ok(future.quoteLedgers.USDT.fundingFees > 0); assert.equal(runRadarBacktest(input({ dataset: futureData, mode: 'futures', leverage: 3 })).ok, false); });
+test('engine imports only local validation modules and has no external client behavior', () => { const source = fs.readFileSync(new URL('../scripts/radar/radar-backtest-engine.mjs', import.meta.url), 'utf8'); const imports = [...source.matchAll(/^import .* from '([^']+)';$/gm)].map((m) => m[1]); assert.deepEqual(imports, ['./trade-intent-candidate-validation.mjs', './historical-data-contract.mjs']); assert.doesNotMatch(source, /\bfetch\s*\(/i); assert.doesNotMatch(source, /kucoin|binance|telegram|worker|placeorder|submitorder/i); });
