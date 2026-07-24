@@ -143,6 +143,10 @@ cross-venue, or UI-only information remains `UNKNOWN` and produces no intent.
 - The exact historic availability/retention of KuCoin EU public data must be
   measured before claiming a backtest horizon.
 
+### Historical-data ingestion contract
+
+The pure versioned contract is documented in [historical-data-contract.md](historical-data-contract.md) and implemented only as import-free validation/helpers in `scripts/radar/historical-data-contract.mjs`. It creates no adapter, fetch, persistence, scheduler, or backtest engine. Candles, depth, Futures metadata, and stored RADAR candidates remain separate evidence classes; unavailable data is `UNKNOWN`, and strict Absorb/actionability are `NOT_RECONSTRUCTABLE` without a compatible stored candidate.
+
 ## 4. Backtesting-first plan
 
 Build a deterministic RADAR-driven simulator before credentials or live API
