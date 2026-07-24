@@ -1,4 +1,4 @@
-﻿-- Netlify-only canonical Context Store, shadow foundation. No reader is cut
+-- Netlify-only canonical Context Store, shadow foundation. No reader is cut
 -- over by this migration; all revisions are immutable and the one global head
 -- is the only publication pointer.
 
