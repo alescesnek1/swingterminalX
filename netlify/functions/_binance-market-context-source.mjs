@@ -1,7 +1,7 @@
 // Public, bounded Binance REST source. This module has no credentials, signed
 // endpoints, CoinGecko fallback, or trading thresholds. DEX/non-Binance assets
 // are simply absent from this context and must be shown as UNSUPPORTED later.
-export const BINANCE_SPOT_ORIGIN = 'https://api.binance.com';
+export const BINANCE_SPOT_ORIGIN = 'https://data-api.binance.vision';
 export const BINANCE_FUTURES_ORIGIN = 'https://fapi.binance.com';
 export const DEFAULT_MICROSTRUCTURE_TOP_N = 5; // TODO calibrate only after shadow soak.
 export const MAX_MICROSTRUCTURE_TOP_N = 8;
