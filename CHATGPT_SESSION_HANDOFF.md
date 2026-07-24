@@ -804,6 +804,7 @@ Keep this as operational memory, not a full changelog.
   then backtesting and simulated/paper trading. Normal users need no local
   worker; Netlify is UI/control plane, not an always-on Futures daemon. Initial
   Telegram is notification-only; no IP rotation/bypass and no Telegram commands.
+- **RADAR backend-field mapping complete (documentation only):** docs/trading-radar-backend-field-mapping.md verifies that V1 STATUS plus actionability, allRadarConditionsPassed, gates, safety, freshness, and levels are the future source of truth. Matrix labels, UI summaries, and advisory context cannot drive a TradeIntent; stale/unknown strict Absorb is never positive automated-entry evidence. No current RADAR or Telegram behavior changed.
 - **No live trading by default** — live is opt-in, admin-only, micro-cap, gated.
 - **STOCKS is a SEPARATE project** (`stock-terminal-X`), *not* a mode/page inside
   this terminal. Do not add stock features here. _(From project memory; verify if
