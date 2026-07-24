@@ -68,7 +68,7 @@ export function runRadarBacktest(input) {
   if (!datasetResult.ok) return result(false, datasetResult.reasonCodes, warnings, summary, events, assumptions, riskDecisions, equityCurve, ledgers, positions);
   if (input.dataset.provenance.product !== mode || input.dataset.provenance.quote !== quote) { const code = input.dataset.provenance.product !== mode ? 'unsupported_product' : 'unsupported_quote'; events.push(event('unknown_state', { reasonCodes: [code] })); return result(false, [code], warnings, summary, events, assumptions, riskDecisions, equityCurve, ledgers, positions); }
 
-  const candles = input.dataset.candles; const feeBps = feeModel === 'maker' ? costs.makerFeeBps : costs.takerFeeBps; const executionBps = costs.slippageBps + costs.spreadBps / 2; let dailyPnl = num(input.dailyRealizedPnl?.[quote]) ? input.dailyRealizedPnl[quote] : 0;
+  const candles = [...input.dataset.candles].sort((a, b) => String(a.openTime).localeCompare(String(b.openTime))); const feeBps = feeModel === 'maker' ? costs.makerFeeBps : costs.takerFeeBps; const executionBps = costs.slippageBps + costs.spreadBps / 2; let dailyPnl = num(input.dailyRealizedPnl?.[quote]) ? input.dailyRealizedPnl[quote] : 0;
   for (let planIndex = 0; planIndex < plans.length; planIndex += 1) {
     const plan = record(plans[planIndex]) ? plans[planIndex] : {}; const fixture = plan.candidateFixture; const candidate = fixture?.candidate;
     const candidateResult = validateRadarCandidateForTradeIntent(candidate, { nowMs: clockMs, maxAgeMs: input.candidateMaxAgeMs ?? 120000, symbolMapping: fixture?.symbolMapping });
@@ -108,4 +108,32 @@ export function runRadarBacktest(input) {
   for (const q of Object.keys(ledgers)) { const l = ledgers[q]; l.equity = round(l.initialBalance + l.realizedPnl + l.unrealizedPnl); l.availableBalance = round(l.equity - l.marginUsed); }
   const relevant = ledgers[quote]; const closed = positions.filter((p) => p.status === 'CLOSED'); summary.trades = positions.length; summary.wins = closed.filter((p) => p.realizedPnl > 0).length; summary.losses = closed.filter((p) => p.realizedPnl < 0).length; summary.winRate = summary.trades ? summary.wins / summary.trades : 0; summary.grossPnl = round(closed.reduce((sum, p) => sum + p.realizedPnl + p.entryFee + p.exitFee + p.fundingFee, 0)); summary.fees = round(relevant?.fees ?? 0); summary.netPnl = round((relevant?.realizedPnl ?? 0) + (relevant?.unrealizedPnl ?? 0)); let peakEquity = -Infinity; let maxDrawdown = 0; for (const point of equityCurve.filter((point) => point.quote === quote)) { peakEquity = Math.max(peakEquity, point.equity); maxDrawdown = Math.max(maxDrawdown, peakEquity - point.equity); } summary.maxDrawdown = round(maxDrawdown); summary.openPositions = positions.filter((p) => p.status === 'OPEN').length;
   return result(true, reasonCodes, warnings, summary, events, assumptions, riskDecisions, equityCurve, ledgers, positions);
+}
+
+
+export function runRadarPortfolioBacktest(scenario) {
+  const events = []; const riskDecisions = []; const reasonCodes = []; const warnings = [];
+  if (!record(scenario) || scenario.schemaVersion !== 'radar-portfolio-scenario/v1' || scenario.scenarioVersion !== 1 || !Array.isArray(scenario.tradePlans)) return { ok: false, reasonCodes: ['unknown_state'], warnings, events: [event('unknown_state', { reasonCodes: ['unknown_state'] })], riskDecisions, quoteLedgers: {}, results: [], assumptions: {} };
+  const assumptions = { ...scenario.assumptions, tieBreaker: 'timestamp_ascending_then_priority_then_symbol_then_fixture_id' };
+  const balances = { ...(scenario.assumptions?.quoteBalances ?? {}) }; const daily = {}; const active = []; const results = [];
+  const jobs = [...scenario.tradePlans].sort((a, b) => {
+    const ta = Date.parse(a.scheduledAt ?? scenario.createdAt); const tb = Date.parse(b.scheduledAt ?? scenario.createdAt);
+    if (ta !== tb) return ta - tb; const pa = a.priority ?? 0; const pb = b.priority ?? 0;
+    if (pa !== pb) return pa - pb; const sa = String(a.symbol ?? ''); const sb = String(b.symbol ?? '');
+    if (sa !== sb) return sa.localeCompare(sb); return String(a.fixtureId ?? '').localeCompare(String(b.fixtureId ?? ''));
+  });
+  for (const job of jobs) {
+    const maxOpen = scenario.assumptions?.riskLimits?.maxOpenPositions;
+    if (Number.isFinite(maxOpen) && active.length >= maxOpen) {
+      const veto = { job: job.fixtureId, decision: 'vetoed', reasonCodes: ['max_open_positions_exceeded'] }; riskDecisions.push(veto); events.push(event('risk_vetoed', veto)); results.push({ job, ok: false, reasonCodes: veto.reasonCodes }); continue;
+    }
+    const run = runRadarBacktest({ ...scenario.assumptions, ...job, dataset: job.dataset, candidateFixture: job.candidateFixture, quoteBalances: balances, dailyRealizedPnl: daily, tradePlans: job.tradePlans, riskLimits: scenario.assumptions.riskLimits });
+    results.push({ job, ...run }); events.push(...run.events.map((entry) => ({ ...entry, symbol: job.symbol, fixtureId: job.fixtureId }))); riskDecisions.push(...run.riskDecisions.map((entry) => ({ ...entry, symbol: job.symbol, fixtureId: job.fixtureId })));
+    for (const [quote, ledger] of Object.entries(run.quoteLedgers)) if (ledger && Number.isFinite(ledger.equity)) balances[quote] = ledger.equity;
+    for (const position of run.positions) if (position.status === 'CLOSED') daily[position.quote] = (daily[position.quote] ?? 0) + position.realizedPnl; else if (position.status === 'OPEN') active.push(position);
+    if (!run.ok) reasonCodes.push(...run.reasonCodes);
+    warnings.push(...run.warnings.filter((code) => !warnings.includes(code)));
+  }
+  const quoteLedgers = Object.fromEntries(Object.entries(balances).map(([quote, equity]) => [quote, { equity, dailyRealizedPnl: daily[quote] ?? 0, openPositions: active.filter((p) => p.quote === quote).length }]));
+  return { ok: reasonCodes.length === 0, reasonCodes: [...new Set(reasonCodes)], warnings, events, riskDecisions, quoteLedgers, results, assumptions };
 }

@@ -23,3 +23,7 @@ Futures is isolated-margin only, defaults to 1x, and rejects leverage above 2x. 
 ## Stable risk codes
 
 `max_exposure_exceeded`, `max_real_risk_exceeded`, `max_open_positions_exceeded`, `max_daily_loss_exceeded`, `missing_stop`, `unknown_balance`, `unsupported_quote`, `unsupported_product`, `leverage_too_high`, `liquidation_unknown`, `invalid_sizing_model`, and `ambiguous_intrabar_stop_first` are stable machine-readable simulation/risk codes. `liquidation_unknown` is reported as an unknown warning for the skeleton; it never manufactures liquidation evidence.
+
+## Portfolio scheduling scenarios
+
+`runRadarPortfolioBacktest(scenario)` consumes versioned synthetic scenarios only. It orders candidate jobs by scheduled timestamp ascending, then configured numeric priority, symbol ascending, and fixture ID ascending. The scheduler carries simulated quote-specific balances, daily realized PnL, and open positions between jobs; it never mixes USDT and USDC. Same-time candidates beyond `maxOpenPositions` receive a stable `max_open_positions_exceeded` veto. Candle arrays are normalized by UTC open time before deterministic fills; stale/unknown candidates fail before sizing or fills.
