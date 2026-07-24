@@ -795,7 +795,15 @@ Keep this as operational memory, not a full changelog.
   region-blocked from Netlify/GitHub egress; the team will **not** chase
   proxies/extra servers/Render to work around it. `MARKET_DATA_PROVIDER=none` is
   the intended production default.
-- **No futures / margin / leverage / withdrawals** — Spot only, permanently.
+- **Existing Binance scope remains Spot only** — no Binance futures, margin,
+  leverage, or withdrawals. KuCoin EU Spot + Futures is a separate,
+  documentation-first, backtest/paper-first direction and remains LIVE_LOCKED
+  until a later explicit owner approval; see docs/kucoin-architecture.md.
+- **KuCoin EU bot direction (documentation only):** target Spot + Futures and
+  USDT + USDC; Alpaca is dropped. Start from server-side Trading RADAR V1 gates,
+  then backtesting and simulated/paper trading. Normal users need no local
+  worker; Netlify is UI/control plane, not an always-on Futures daemon. Initial
+  Telegram is notification-only; no IP rotation/bypass and no Telegram commands.
 - **No live trading by default** — live is opt-in, admin-only, micro-cap, gated.
 - **STOCKS is a SEPARATE project** (`stock-terminal-X`), *not* a mode/page inside
   this terminal. Do not add stock features here. _(From project memory; verify if
