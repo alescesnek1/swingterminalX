@@ -242,6 +242,13 @@ The pure validator now exists at
 scripts/radar/trade-intent-candidate-validation.mjs. It is not wired into
 RADAR, Telegram, a worker, or an exchange path.
 
-Next, add versioned, in-memory historical RADAR candidate fixtures and replay
-contract tests only. That work must remain free of fetches, credentials,
-exchange adapters, schedulers, runners, databases, and order paths.
+Versioned, in-memory fixture/replay coverage now lives in
+`tests/fixtures/radar-trade-intent-candidates.mjs` and
+`tests/radar-trade-intent-candidate-replay.test.mjs`. It replays sanitized
+backend candidate truth with an explicit clock, schema version, and stable
+reason-code contract; it has no fetches, credentials, exchange adapters,
+schedulers, runners, databases, or order paths.
+
+Next, define a separate, versioned historical data-ingestion contract only
+(source provenance, interval, correction/gap metadata, and unknown-state
+representation) before any backtesting engine or exchange integration.
