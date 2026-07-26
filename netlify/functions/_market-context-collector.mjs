@@ -5,11 +5,16 @@ export const MARKET_CONTEXT_FUTURES_ENV_FLAG = 'MARKET_CONTEXT_FUTURES_ENABLED';
 export const MARKET_CONTEXT_TOP_N_ENV_FLAG = 'MARKET_CONTEXT_MICROSTRUCTURE_TOP_N';
 export const MARKET_CONTEXT_MULTI_TF_ENV_FLAG = 'MARKET_CONTEXT_MULTI_TF_ENABLED';
 export const MARKET_CONTEXT_MULTI_TF_TOP_N_ENV_FLAG = 'MARKET_CONTEXT_MULTI_TF_TOP_N';
+export const MARKET_CONTEXT_CONCURRENCY_ENV_FLAG = 'MARKET_CONTEXT_MICROSTRUCTURE_CONCURRENCY';
+export const MARKET_CONTEXT_RAW_SAMPLE_ENV_FLAG = 'MARKET_CONTEXT_RAW_SAMPLE_TOP_N';
 
 async function loadStore() { return await import('./_market-context-store.mjs'); }
 async function loadSource() { return await import('./_binance-market-context-source.mjs'); }
 async function loadAbsorb() { return await import('./_market-context-absorb.mjs'); }
-function topN(value) { const n = Number(value); return Number.isFinite(n) && n > 0 ? Math.min(Math.trunc(n), 8) : 5; }
+// Ceiling matches MAX_MICROSTRUCTURE_TOP_N in the source module: the whole
+// USD-stable universe is reachable, but only from the background collector — the
+// 30s scheduled path cannot fetch that many symbols and should stay configured small.
+function topN(value) { const n = Number(value); return Number.isFinite(n) && n > 0 ? Math.min(Math.trunc(n), 600) : 5; }
 function outcome(status, body) { return { status, body: { endpoint: 'market_context_collect_scheduled', ...body } }; }
 
 // Private three-minute coordinator. A collection run is audit metadata only;
@@ -21,7 +26,8 @@ export async function runMarketContextCollector(deps = {}) {
   const observedAt = typeof deps.now === 'function' ? new Date(deps.now()) : new Date();
   const runKey = store.makeRunKey ? store.makeRunKey(observedAt) : makeRunKey(observedAt);
   const multiTfTopN = Number(env[MARKET_CONTEXT_MULTI_TF_TOP_N_ENV_FLAG]);
-  const options = { includeFutures: env[MARKET_CONTEXT_FUTURES_ENV_FLAG] === 'true', microstructureTopN: topN(env[MARKET_CONTEXT_TOP_N_ENV_FLAG]), includeMultiTimeframe: env[MARKET_CONTEXT_MULTI_TF_ENV_FLAG] === 'true', multiTimeframeTopN: Number.isFinite(multiTfTopN) && multiTfTopN > 0 ? multiTfTopN : undefined, fetchImpl: deps.fetchImpl };
+  const options = { includeFutures: env[MARKET_CONTEXT_FUTURES_ENV_FLAG] === 'true', microstructureTopN: topN(env[MARKET_CONTEXT_TOP_N_ENV_FLAG]), includeMultiTimeframe: env[MARKET_CONTEXT_MULTI_TF_ENV_FLAG] === 'true', multiTimeframeTopN: Number.isFinite(multiTfTopN) && multiTfTopN > 0 ? multiTfTopN : undefined, microstructureConcurrency: Number(env[MARKET_CONTEXT_CONCURRENCY_ENV_FLAG]) || undefined, fetchImpl: deps.fetchImpl };
+  const rawSampleTopN = Number(env[MARKET_CONTEXT_RAW_SAMPLE_ENV_FLAG]);
   const transaction = deps.withTransaction || store.withContextTransaction || withContextTransaction;
   const tx = await transaction(async (db) => {
     const run = await store.upsertCollectionRunByKey(db, { runKey, observedAt, diagnostics: { source: 'binance_public_rest', futuresEnabled: options.includeFutures } });
@@ -43,7 +49,7 @@ export async function runMarketContextCollector(deps = {}) {
       microstructure = attached.rows;
       absorbDiagnostics = attached.diagnostics;
     }
-    const written = await store.insertAtomicMarketRecords(db, { runId: run.runId, observedAt: collected.observedAt, rows: collected.rows, microstructure });
+    const written = await store.insertAtomicMarketRecords(db, { runId: run.runId, observedAt: collected.observedAt, rows: collected.rows, microstructure, rawSampleTopN: Number.isFinite(rawSampleTopN) && rawSampleTopN >= 0 ? rawSampleTopN : undefined });
     if (!written.ok) return written;
     const completed = await store.completeCollectionRun(db, { runId: run.runId, completedAt: collected.collectedAt, diagnostics: { ...collected.diagnostics, ...absorbDiagnostics, dataStatus: collected.dataStatus, tickerCount: written.tickerCount, candleCount: written.candleCount, orderBookLevelCount: written.orderBookLevelCount, aggTradeCount: written.aggTradeCount, measurementCount: written.measurementCount } });
     if (!completed.ok) return completed;

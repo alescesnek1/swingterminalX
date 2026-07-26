@@ -3,9 +3,16 @@
 // are simply absent from this context and must be shown as UNSUPPORTED later.
 export const BINANCE_SPOT_ORIGIN = 'https://data-api.binance.vision';
 export const BINANCE_FUTURES_ORIGIN = 'https://fapi.binance.com';
-export const DEFAULT_MICROSTRUCTURE_TOP_N = 5; // TODO calibrate only after shadow soak.
-export const MAX_MICROSTRUCTURE_TOP_N = 8;
-export const MICROSTRUCTURE_CONCURRENCY = 2;
+export const DEFAULT_MICROSTRUCTURE_TOP_N = 5; // Conservative default; the ceiling below is what the background collector uses.
+// Each measured symbol costs 3 public GETs (klines/depth/aggTrades) and ~9 request
+// weight. A full USD-stable universe is ~500 symbols = ~4.5k weight per cycle,
+// inside Binance's 6000/min budget. What it does NOT fit is the 30s scheduled
+// function limit, so the large universe is only reachable from the background
+// collector; the scheduled path stays small.
+export const MAX_MICROSTRUCTURE_TOP_N = 600;
+export const DEFAULT_MICROSTRUCTURE_CONCURRENCY = 2;
+export const MAX_MICROSTRUCTURE_CONCURRENCY = 32;
+export const MICROSTRUCTURE_CONCURRENCY = DEFAULT_MICROSTRUCTURE_CONCURRENCY;
 // Multi-timeframe (1h/4h/12h/7d) comes from Binance rolling-window ticker, which
 // is per-symbol (weight 4/symbol, capped at 200 for >50 symbols, max 100 symbols
 // per request). Full-universe multi-TF would blow the 6000/min weight budget, so
@@ -132,14 +139,19 @@ async function mapBounded(items, limit, callback) {
   });
   await Promise.all(workers); return result;
 }
-async function collectVenue(market, { fetchImpl, microstructureTopN }) {
+function boundedConcurrency(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.min(Math.trunc(n), MAX_MICROSTRUCTURE_CONCURRENCY) : DEFAULT_MICROSTRUCTURE_CONCURRENCY;
+}
+
+async function collectVenue(market, { fetchImpl, microstructureTopN, concurrency }) {
   const [info, tickersPayload] = await Promise.all([fetchBinancePublicJson(buildBinancePublicUrl(market, 'exchangeInfo'), { fetchImpl }), fetchBinancePublicJson(buildBinancePublicUrl(market, 'ticker'), { fetchImpl })]);
   const tickers = normalizeTickers(market, tickersPayload, instrumentIndex(market, info));
   if (!tickers.length) throw new Error('BINANCE_EMPTY_TICKER_UNIVERSE');
   const rankable = rankByQuoteVolume(tickers);
   if (!rankable.length) console.warn('[MARKET_CONTEXT] microstructure_universe_empty', { market, tickerCount: tickers.length, quotes: RANKABLE_QUOTE_ASSETS });
   const candidates = rankable.slice(0, boundedTopN(microstructureTopN));
-  const microstructures = await mapBounded(candidates, MICROSTRUCTURE_CONCURRENCY, (ticker) => collectMicrostructurePair(market, ticker, fetchImpl));
+  const microstructures = await mapBounded(candidates, boundedConcurrency(concurrency), (ticker) => collectMicrostructurePair(market, ticker, fetchImpl));
   return { tickers, microstructures };
 }
 
@@ -174,12 +186,13 @@ export async function collectMultiTimeframe(market, tickers, { fetchImpl = fetch
 export async function collectBinanceMarketContext(options = {}) {
   const fetchImpl = options.fetchImpl || fetch;
   const topN = boundedTopN(options.microstructureTopN);
+  const concurrency = boundedConcurrency(options.microstructureConcurrency);
   let spot;
-  try { spot = await collectVenue('spot', { fetchImpl, microstructureTopN: topN }); }
+  try { spot = await collectVenue('spot', { fetchImpl, microstructureTopN: topN, concurrency }); }
   catch (error) { return { ok: false, reason: failureCode(error), dataStatus: 'unavailable' }; }
   let futures = { tickers: [], microstructures: [], status: 'unsupported', failureCode: null };
   if (options.includeFutures === true) {
-    try { const collected = await collectVenue('futures', { fetchImpl, microstructureTopN: topN }); futures = { ...collected, status: 'complete', failureCode: null }; }
+    try { const collected = await collectVenue('futures', { fetchImpl, microstructureTopN: topN, concurrency }); futures = { ...collected, status: 'complete', failureCode: null }; }
     catch (error) { futures = { tickers: [], microstructures: [], status: 'unavailable', failureCode: failureCode(error) }; }
   }
   const microstructures = [...spot.microstructures, ...futures.microstructures];

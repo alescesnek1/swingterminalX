@@ -1,5 +1,8 @@
 const DEFAULT_TTL_MS = 10 * 60 * 1000;
-const MAX_TOP_N = 50;
+// Every measured symbol must survive normalization: a cap here silently drops
+// symbols the collector paid to measure, and the dropped ones would then look
+// like "no microstructure" rather than "not measured".
+const MAX_TOP_N = 600;
 const EXPECTED_WINDOW_SEC = 300;
 // Additive second trusted provider: the Netlify 3-minute atomic collector. It is
 // spot, and its rolling window is the REAL elapsed time between two consecutive

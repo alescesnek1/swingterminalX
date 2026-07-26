@@ -128,16 +128,36 @@ export async function getMicrostructureBaseline(db, observedAt) {
   } catch (error) { dbError('absorb_baseline_failed', error); return { ok: false, reason: 'DB_UNAVAILABLE' }; }
 }
 
+// How many symbols keep their RAW agg trades and order-book levels. Every measured
+// symbol always stores its derived measurement row (including the absorb row);
+// this bound applies only to the raw audit sample kept alongside it.
+//
+// Raw retention is what does NOT scale: 500 trades x 100 book levels per symbol is
+// ~350k rows per cycle across a full universe, while the derived rows are one per
+// symbol. Since absorption is now computed at collection time, nothing READS the
+// raw rows on the hot path — they exist so a signal can be audited after the fact.
+export const DEFAULT_RAW_SAMPLE_TOP_N = 10;
+
 export async function insertAtomicMarketRecords(db, payload = {}) {
   const runId = Number(payload.runId); if (!Number.isInteger(runId) || runId <= 0) return { ok: false, reason: 'INVALID_RUN' };
   const observedAt = asDate(payload.observedAt); const tickers = (payload.rows || []).map((row) => normalizeTicker(row, observedAt)).filter(Boolean); const micro = (payload.microstructure || []).map((row) => normalizedMicro(row, observedAt)).filter(Boolean);
+  const rawSampleTopN = Number.isFinite(Number(payload.rawSampleTopN)) && Number(payload.rawSampleTopN) >= 0 ? Math.trunc(Number(payload.rawSampleTopN)) : DEFAULT_RAW_SAMPLE_TOP_N;
+  // Busiest venues first, so the audit sample is the symbols most likely to be
+  // questioned. Ranking uses taker quote flow, which is already comparable here
+  // because the measured universe is USD-stable quoted only.
+  const takerTotal = (row) => (numberOrNull(row.tradesSummary?.takerBuyQuote) || 0) + (numberOrNull(row.tradesSummary?.takerSellQuote) || 0);
+  const rawSample = new Set([...micro].sort((a, b) => takerTotal(b) - takerTotal(a)).slice(0, rawSampleTopN).map((row) => `${row.market}:${row.symbol}`));
+  const sampled = micro.filter((row) => rawSample.has(`${row.market}:${row.symbol}`));
   try {
     await upsertInstruments(db, tickers); await insertTickers(db, runId, tickers);
+    // Candles are kept for EVERY measured symbol: structural reclaim reads them and
+    // they are deduplicated by (market,symbol,open_time), so successive runs add
+    // only the few newly closed minutes rather than the whole window again.
     const candles = micro.flatMap((row) => row.klines.map((kline) => normalKline(row, kline)).filter(Boolean));
-    const levels = micro.flatMap((row) => [...normalLevels(row, 'bid', row.bids), ...normalLevels(row, 'ask', row.asks)]);
-    const trades = micro.flatMap(normalTrades);
+    const levels = sampled.flatMap((row) => [...normalLevels(row, 'bid', row.bids), ...normalLevels(row, 'ask', row.asks)]);
+    const trades = sampled.flatMap(normalTrades);
     await insertCandles(db, runId, candles); await insertLevels(db, runId, levels); await insertTrades(db, runId, trades); await insertMeasurements(db, runId, micro);
-    return { ok: true, tickerCount: tickers.length, candleCount: candles.length, orderBookLevelCount: levels.length, aggTradeCount: trades.length, measurementCount: micro.length, droppedTickerCount: (payload.rows || []).length - tickers.length, droppedMicrostructureCount: (payload.microstructure || []).length - micro.length };
+    return { ok: true, tickerCount: tickers.length, candleCount: candles.length, orderBookLevelCount: levels.length, aggTradeCount: trades.length, measurementCount: micro.length, rawSampleCount: sampled.length, droppedTickerCount: (payload.rows || []).length - tickers.length, droppedMicrostructureCount: (payload.microstructure || []).length - micro.length };
   } catch (error) { dbError('atomic_insert_failed', error); return { ok: false, reason: 'DB_UNAVAILABLE' }; }
 }
 
@@ -179,7 +199,7 @@ const num = (value) => (value === null || value === undefined ? null : (Number.i
 // microstructure symbols, the raw agg trades / 1m candles / depth (N and N-1) so
 // STRICT_ABSORB can be measured honestly from the database.
 export async function getRadarInputBundle(db, options = {}) {
-  const topN = Math.min(Math.max(Number(options.topN) || 8, 1), 50);
+  const topN = Math.min(Math.max(Number(options.topN) || 8, 1), 600);
   const tickerLimit = Math.min(Math.max(Number(options.tickerLimit) || 1000, 1), 2000);
   const candleLimit = Math.min(Math.max(Number(options.candleLimit) || 60, 30), 120);
   try {

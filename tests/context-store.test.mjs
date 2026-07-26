@@ -45,6 +45,24 @@ test('atomic persistence writes ticker, candle, book level, trade and measuremen
   assert.doesNotMatch(sql, /context_heads|market_context_snapshots|revision_id/i);
 });
 
+// Derived rows scale with the universe; raw trades and book levels do not. Every
+// measured symbol keeps its measurement, only the raw audit sample is bounded.
+test('raw trades and book levels are bounded to the busiest symbols; measurements are not', async () => {
+  const calls = []; const db = { query: async (sql, values = []) => { calls.push({ sql, values }); return { rows: [] }; } };
+  const micro = (symbol, takerBuyQuote) => ({ market: 'spot', symbol, dataStatus: 'complete', klines1m: [[1721822340000, '99', '101', '98', '100', '5', 1721822399999, '500', 7]], orderBook: { lastUpdateId: 4, bids: [['99', '1']], asks: [['101', '2']] }, aggTrades: [{ a: 11, p: '100', q: '1', m: false, T: 1721822399000, M: true }], depthSummary: { levels: { bids: 1, asks: 1 }, bestBid: 99, bestAsk: 101, spreadBps: 200, bidQuote: 99, askQuote: 202 }, tradesSummary: { count: 1, takerBuyQuote, takerSellQuote: 0 } });
+  const result = await insertAtomicMarketRecords(db, { runId: 7, observedAt: new Date('2026-07-24T12:00:00.000Z'), rows: [], rawSampleTopN: 2, microstructure: [micro('AUSDT', 10), micro('BUSDT', 300), micro('CUSDT', 200)] });
+  assert.equal(result.ok, true);
+  assert.equal(result.measurementCount, 3, 'every measured symbol keeps its derived row');
+  assert.equal(result.candleCount, 3, 'candles are kept for every symbol (structural reclaim reads them)');
+  assert.equal(result.rawSampleCount, 2);
+  assert.equal(result.aggTradeCount, 2, 'raw trades only for the busiest two');
+  assert.equal(result.orderBookLevelCount, 4, 'two levels each for the busiest two');
+  // The thinnest symbol is the one dropped from the raw sample, not an arbitrary one.
+  const rawSql = calls.filter((c) => /market_agg_trades|market_order_book_levels/.test(c.sql)).map((c) => c.values.join(',')).join('|');
+  assert.doesNotMatch(rawSql, /AUSDT/);
+  assert.match(rawSql, /BUSDT/);
+});
+
 test('read returns the latest published run and atomized ticker and measurement rows', async () => {
   const db = { query: async (sql) => {
     if (sql.includes('FROM market_collection_runs')) return { rows: [{ id: 9, run_key: 'global:2026-07-24T12:00:00.000Z', observed_at: new Date().toISOString(), completed_at: new Date().toISOString(), diagnostics: { tickerCount: 1 } }] };

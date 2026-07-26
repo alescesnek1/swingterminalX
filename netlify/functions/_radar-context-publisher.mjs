@@ -15,7 +15,10 @@ async function loadRadar() { return await import('../../scripts/radar/trading-ra
 async function loadBridge() { return await import('../../scripts/radar/collector-absorb-bridge.mjs'); }
 async function loadRolling() { return await import('../../scripts/radar/rolling-microstructure-snapshot.mjs'); }
 
-function topN(env) { const n = Number(env[MARKET_CONTEXT_TOP_N_ENV_FLAG]); return Number.isFinite(n) && n > 0 ? Math.min(Math.trunc(n), 8) : 5; }
+// Ceiling matches the collector: every symbol the collector measured should be
+// eligible for RADAR, otherwise EXECUTION_SCORE has no order-book/flow evidence
+// for the rest and they can never reach ENTRY_READY.
+function topN(env) { const n = Number(env[MARKET_CONTEXT_TOP_N_ENV_FLAG]); return Number.isFinite(n) && n > 0 ? Math.min(Math.trunc(n), 600) : 5; }
 function outcome(status, body) { return { status, body: { endpoint: 'radar_context_publish', ...body } }; }
 function num(value) { return value === null || value === undefined || !Number.isFinite(Number(value)) ? null : Number(value); }
 
