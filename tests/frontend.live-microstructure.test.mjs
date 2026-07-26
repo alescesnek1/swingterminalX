@@ -51,12 +51,15 @@ test('advisory text states it is advisory-read-only and does not satisfy strict 
   assert.match(text, /server gate/i);
 });
 
-// ── 4. Cache token fully bumped to 6i8 ───────────────────────
-test('all versioned assets in index.html are bumped to exactly one token: 6i8', () => {
+// ── 4. Cache token is bumped as ONE set ───────────────────────
+// Asserts the invariant, not a specific value: a half-bumped set is the bug (a
+// returning browser then mixes fresh and hour-old cached assets). Pinning the
+// literal token here only meant editing this test on every release.
+test('all versioned assets in index.html share exactly one cache-bust token', () => {
   const versions = Array.from(indexHtml.matchAll(/\?v=([a-z0-9]+)/g)).map((x) => x[1]);
   assert.ok(versions.length >= 10, 'expected the full versioned asset set');
-  assert.ok(versions.every((v) => v === '6i8'), `all asset versions must be 6i8, saw: ${[...new Set(versions)].join(',')}`);
-  assert.doesNotMatch(indexHtml, /\?v=6i7\b/, 'the previous cache-bust token must be gone');
+  const distinct = [...new Set(versions)];
+  assert.equal(distinct.length, 1, `every asset must carry the same token, saw: ${distinct.join(',')}`);
 });
 
 // ── 5. No inline <script> injected for this feature ──────────

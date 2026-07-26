@@ -1770,8 +1770,19 @@ function _canonicalContextEnabled() {
 // getTimeframePct returns null — never a fabricated value.
 function _mapCanonicalTicker(t) {
   const n = (v) => (v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v));
+  // `symbol` must be the BASE asset (BTC), not the pair (BTCUSDT). isOnBinance()
+  // falls back to looking up `symbol + 'USDT'`, so a pair here became
+  // "BTCUSDTUSDT", matched nothing, and every canonical row — Bitcoin included —
+  // rendered with the DEX "not on Binance" badge and no order book. These rows
+  // come straight from Binance, so binance_available is stated outright rather
+  // than left to be inferred.
+  const pair = String(t.symbol || '').toUpperCase();
+  const quote = String(t.quote_asset || '').toUpperCase();
+  const base = String(t.base_asset || '').toUpperCase() || (quote && pair.endsWith(quote) ? pair.slice(0, -quote.length) : pair);
   const row = {
-    symbol: String(t.symbol || '').toUpperCase(), id: String(t.symbol || '').toLowerCase(), market: t.market || 'spot',
+    symbol: base, id: base.toLowerCase(), pair, market: t.market || 'spot',
+    binance_available: true, binance_market: t.market === 'futures' ? 'futures' : 'spot',
+    quote_asset: quote || null,
     exchange: 'Binance', source: 'canonical', listingSource: 'Binance',
     current_price: n(t.last_price) ?? 0, price_change_percentage_24h: n(t.price_change_percent) ?? 0,
     total_volume: n(t.quote_volume) ?? 0, high_24h: n(t.high_price), low_24h: n(t.low_price),

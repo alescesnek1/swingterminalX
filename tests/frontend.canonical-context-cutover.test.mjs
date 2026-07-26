@@ -35,6 +35,40 @@ test('canonical RADAR + provider status are exposed for the RADAR/Absorb panels'
   assert.match(terminalJs, /window\.__canonicalContext = \{ radar: j\.radar/);
 });
 
+// Pulls a top-level function out of terminal.js so its BEHAVIOUR can be asserted
+// rather than its source text.
+function extractFunction(name) {
+  const start = terminalJs.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `${name} exists`);
+  let depth = 0; let i = terminalJs.indexOf('{', start);
+  for (let j = i; j < terminalJs.length; j += 1) {
+    if (terminalJs[j] === '{') depth += 1;
+    else if (terminalJs[j] === '}') { depth -= 1; if (depth === 0) return terminalJs.slice(start, j + 1); }
+  }
+  throw new Error(`unbalanced ${name}`);
+}
+
+// Regression: the mapper put the PAIR in `symbol`, so isOnBinance looked up
+// "BTCUSDTUSDT", found nothing, and every canonical row rendered as an
+// off-Binance DEX asset with no order book — Bitcoin included.
+test('canonical rows identify as Binance assets, keyed by base symbol not pair', () => {
+  const sandbox = { BINANCE_USDT_PAIRS: new Set(['BTCUSDT']), BINANCE_USDC_PAIRS: new Set() };
+  const make = new Function('BINANCE_USDT_PAIRS', 'BINANCE_USDC_PAIRS', `${extractFunction('_mapCanonicalTicker')}\n${extractFunction('isOnBinance')}\nreturn { _mapCanonicalTicker, isOnBinance };`);
+  const { _mapCanonicalTicker, isOnBinance } = make(sandbox.BINANCE_USDT_PAIRS, sandbox.BINANCE_USDC_PAIRS);
+
+  const row = _mapCanonicalTicker({ symbol: 'BTCUSDT', base_asset: 'BTC', quote_asset: 'USDT', market: 'spot', last_price: '101', price_change_percent: '-3', quote_volume: '9e8' });
+  assert.equal(row.symbol, 'BTC', 'base asset, not the pair');
+  assert.equal(row.pair, 'BTCUSDT', 'the pair is kept for order book lookups');
+  assert.equal(row.binance_available, true);
+  assert.equal(isOnBinance(row), true, 'a canonical Binance row must never read as DEX');
+
+  // Without base_asset the pair is still split by its quote, not passed through.
+  const derived = _mapCanonicalTicker({ symbol: 'ETHUSDC', quote_asset: 'USDC', market: 'spot', last_price: '3000' });
+  assert.equal(derived.symbol, 'ETH');
+  // Futures rows are tagged so the ALPHA badge resolves instead of DEX.
+  assert.equal(_mapCanonicalTicker({ symbol: 'SOLUSDT', base_asset: 'SOL', quote_asset: 'USDT', market: 'futures' }).binance_market, 'futures');
+});
+
 const terminalCss = fs.readFileSync(new URL('../apps/edge/public/css/terminal.css', import.meta.url), 'utf8');
 
 test('Provider Status + Absorb Diagnostics panels render from canonical radar', () => {

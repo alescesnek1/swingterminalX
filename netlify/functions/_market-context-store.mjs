@@ -12,6 +12,10 @@ const INSERT_CHUNK = 500;
 // Must match the collector band in scripts/radar/rolling-microstructure-snapshot.mjs
 // (validateTrustedRollingRow). Picking a depth baseline outside this band yields a
 // windowSec the STRICT validator will reject for every symbol of the run.
+// Same USD-stable quote set the collector ranks by and the RADAR universe accepts
+// (scripts/radar/trading-radar.mjs QUOTES). Kept here so the read path cannot
+// drift from what is actually measurable and scoreable.
+export const RANKABLE_QUOTE_ASSETS = ['USDT', 'USDC'];
 const COLLECTOR_WINDOW_MIN_SEC = 120;
 const COLLECTOR_WINDOW_MAX_SEC = 900;
 const SECRET_KEY = /token|secret|authorization|cookie|password|api[_-]?key|header|bearer/i;
@@ -168,12 +172,26 @@ export async function completeCollectionRun(db, payload = {}) {
 }
 
 export async function getAtomizedMarketContext(db, options = {}) {
-  const tickerLimit = Math.min(Math.max(Number(options.tickerLimit) || 500, 1), 1000); const microLimit = Math.min(Math.max(Number(options.microLimit) || 50, 1), 200);
+  const tickerLimit = Math.min(Math.max(Number(options.tickerLimit) || 500, 1), 2000); const microLimit = Math.min(Math.max(Number(options.microLimit) || 50, 1), 600);
   try {
     const runRes = await db.query(`SELECT id,run_key,observed_at,completed_at,diagnostics FROM market_collection_runs WHERE scope_id=$1 AND status='published' ORDER BY observed_at DESC LIMIT 1`, [CONTEXT_SCOPE_ID]); const run = runRes.rows[0];
     if (!run) return { ok: true, contextVersion: null, run: null, market: null, radar: { status: 'PENDING' } };
     const [tickers, micro] = await Promise.all([
-      db.query(`SELECT market,symbol,last_price,price_change_percent,high_price,low_price,base_volume,quote_volume,trade_count,change_1h_pct,change_4h_pct,change_12h_pct,change_7d_pct,observed_at,data_status,diagnostics FROM market_ticker_observations WHERE run_id=$1 ORDER BY quote_volume DESC NULLS LAST LIMIT $2`, [run.id,tickerLimit]),
+      // Joined to the instrument so every row carries its base/quote asset, and
+      // restricted to USD-stable quotes.
+      //
+      // Both matter for what the terminal shows. `quote_volume` is denominated in
+      // the QUOTE asset, so ordering it across mixed quotes ranks by exchange rate:
+      // IDR (~16k/USD) and TRY pairs filled the top of the list and pushed every
+      // real major out of it. And without base_asset the reader cannot tell that
+      // "BTCUSDT" is BTC, so it treated every canonical row as an unknown
+      // off-Binance asset. Restricting to the quotes RADAR accepts fixes both and
+      // matches the universe RADAR can actually score.
+      db.query(`SELECT t.market,t.symbol,i.base_asset,i.quote_asset,t.last_price,t.price_change_percent,t.high_price,t.low_price,t.base_volume,t.quote_volume,t.trade_count,t.change_1h_pct,t.change_4h_pct,t.change_12h_pct,t.change_7d_pct,t.observed_at,t.data_status,t.diagnostics
+           FROM market_ticker_observations t
+           JOIN market_instruments i ON i.market = t.market AND i.symbol = t.symbol
+          WHERE t.run_id=$1 AND i.quote_asset = ANY($3)
+          ORDER BY t.quote_volume DESC NULLS LAST LIMIT $2`, [run.id,tickerLimit,RANKABLE_QUOTE_ASSETS]),
       db.query(`SELECT market,symbol,observed_at,window_start,window_end,data_status,failure_code,missing_inputs,candle_count,order_book_bid_levels,order_book_ask_levels,best_bid,best_ask,spread_bps,bid_quote_depth,ask_quote_depth,agg_trade_count,taker_buy_quote,taker_sell_quote FROM market_microstructure_measurements WHERE run_id=$1 ORDER BY market,symbol LIMIT $2`, [run.id,microLimit]),
     ]);
     const ageMs = Date.now() - new Date(run.observed_at).getTime(); const freshness = !Number.isFinite(ageMs) ? 'MISSING' : ageMs <= 6 * 60 * 1000 ? 'FRESH' : 'STALE';
