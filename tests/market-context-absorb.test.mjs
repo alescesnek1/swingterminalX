@@ -62,3 +62,24 @@ test('a missing baseline does not throw and leaves every row honestly non-truste
   assert.equal(diagnostics.absorbWindowSec, null);
   assert.equal(validateTrustedRollingRow(rows[0].absorb, { nowMs: NOW }).reason, 'window-invalid');
 });
+
+// Regression: request pacing spreads a cycle over minutes, but absorption was
+// measured against the run's single observedAt — stamped only once every symbol
+// was done. Symbols read early then had every trade fall outside the window,
+// producing rows with NO absorption fields, and STRICT coverage went to zero.
+test('each symbol is measured against its own read time, not the cycle end', () => {
+  const fiveMinutesLater = NOW + 5 * 60_000;
+  const early = { ...micro(), fetchedAtMs: NOW };
+  const baseline = { windowSec: 180, bidDepth: new Map([['spot:BTCUSDT', 1_000_000]]) };
+
+  const { rows, diagnostics } = attachAbsorbRows([early], baseline, new Date(fiveMinutesLater).toISOString());
+  assert.equal(diagnostics.absorbSkewedSymbols, 1, 'the skew is measured and reported');
+  assert.equal(validateTrustedRollingRow(rows[0].absorb, { nowMs: NOW }).ok, true, 'still a complete measurement');
+  for (const field of ['absorptionScore', 'bidDepthRebuildPct', 'aggressiveSellsFailed', 'deltaImprovementPct', 'marketBuyVolumeDominance']) {
+    assert.ok(Object.prototype.hasOwnProperty.call(rows[0].absorb, field), `${field} survives the skew`);
+  }
+
+  // Without the per-symbol time the same input yields nothing at all.
+  const naive = buildMeasurementAbsorb(micro(), { bidQuoteDepthBefore: 1_000_000, windowSec: 180, observedAtMs: fiveMinutesLater });
+  assert.equal(Object.prototype.hasOwnProperty.call(naive, 'absorptionScore'), false);
+});

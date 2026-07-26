@@ -49,13 +49,21 @@ export function attachAbsorbRows(microstructure, baseline, observedAt) {
   const windowSec = finite(baseline?.windowSec);
   let computed = 0;
   let withBaseline = 0;
+  const fallbackMs = Number.isFinite(observedAtMs) ? observedAtMs : Date.now();
+  let skewedSymbols = 0;
   const rows = (Array.isArray(microstructure) ? microstructure : []).map((micro) => {
     const key = `${micro?.market}:${micro?.symbol}`;
     const before = bidDepth.has(key) ? bidDepth.get(key) : null;
     if (before !== null) withBaseline += 1;
-    const absorb = buildMeasurementAbsorb(micro, { bidQuoteDepthBefore: before, windowSec, observedAtMs: Number.isFinite(observedAtMs) ? observedAtMs : Date.now() });
+    // Measure each symbol against ITS OWN read time. Request pacing spreads a
+    // cycle over minutes, so the run's single observedAt is far in the future for
+    // symbols read early — and every one of their trades then falls outside the
+    // window, yielding a row with no absorption fields at all.
+    const measuredAtMs = Number.isFinite(Number(micro?.fetchedAtMs)) ? Number(micro.fetchedAtMs) : fallbackMs;
+    if (Math.abs(fallbackMs - measuredAtMs) > 30_000) skewedSymbols += 1;
+    const absorb = buildMeasurementAbsorb(micro, { bidQuoteDepthBefore: before, windowSec, observedAtMs: measuredAtMs });
     if (absorb) computed += 1;
     return absorb ? { ...micro, absorb } : micro;
   });
-  return { rows, diagnostics: { absorbComputed: computed, absorbWithDepthBaseline: withBaseline, absorbWindowSec: windowSec } };
+  return { rows, diagnostics: { absorbComputed: computed, absorbWithDepthBaseline: withBaseline, absorbWindowSec: windowSec, absorbSkewedSymbols: skewedSymbols } };
 }

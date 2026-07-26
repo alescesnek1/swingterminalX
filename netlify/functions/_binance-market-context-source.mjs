@@ -125,6 +125,11 @@ async function collectMicrostructurePair(market, ticker, fetchImpl) {
   const firstFailure = [klines, depth, trades].find((item) => item.status === 'rejected');
   const summary = trades.status === 'fulfilled' ? tradesSummary(trades.value) : { count: 0, takerBuyQuote: 0, takerSellQuote: 0, windowStart: null, windowEnd: null };
   return {
+    // When THIS symbol's data was actually read. The cycle's single observedAt is
+    // stamped after every symbol is done, and with request pacing that can be
+    // minutes later — measuring an early symbol's trades against it puts them all
+    // outside the window, leaving zero samples and no absorption fields at all.
+    fetchedAtMs: Date.now(),
     market, symbol: ticker.symbol, dataStatus: missingInputs.length === 0 ? 'complete' : 'partial',
     failureCode: firstFailure ? failureCode(firstFailure.reason) : null, klines1m: klines.status === 'fulfilled' && Array.isArray(klines.value) ? klines.value.slice(0, 120) : [],
     depthSummary: depth.status === 'fulfilled' ? depthSummary(depth.value) : {}, tradesSummary: summary,
