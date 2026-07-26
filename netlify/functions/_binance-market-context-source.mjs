@@ -6,13 +6,22 @@ export const BINANCE_FUTURES_ORIGIN = 'https://fapi.binance.com';
 export const DEFAULT_MICROSTRUCTURE_TOP_N = 5; // TODO calibrate only after shadow soak.
 export const MAX_MICROSTRUCTURE_TOP_N = 8;
 export const MICROSTRUCTURE_CONCURRENCY = 2;
+// Multi-timeframe (1h/4h/12h/7d) comes from Binance rolling-window ticker, which
+// is per-symbol (weight 4/symbol, capped at 200 for >50 symbols, max 100 symbols
+// per request). Full-universe multi-TF would blow the 6000/min weight budget, so
+// it is bounded to the top-N by 24h quote volume; every other symbol stays
+// UNKNOWN for these fields (never faked).
+export const DEFAULT_MULTI_TF_TOP_N = 300;
+export const MAX_MULTI_TF_TOP_N = 500;
+const MULTI_TF_BATCH = 100;
+const MULTI_TF_WINDOWS = Object.freeze([{ key: 'change1hPct', windowSize: '1h' }, { key: 'change4hPct', windowSize: '4h' }, { key: 'change12hPct', windowSize: '12h' }, { key: 'change7dPct', windowSize: '7d' }]);
 
 const TIMEOUT_MS = 4_500;
 const VENUES = {
-  spot: { origin: BINANCE_SPOT_ORIGIN, exchangeInfo: '/api/v3/exchangeInfo', ticker: '/api/v3/ticker/24hr', klines: '/api/v3/klines', depth: '/api/v3/depth', trades: '/api/v3/aggTrades' },
+  spot: { origin: BINANCE_SPOT_ORIGIN, exchangeInfo: '/api/v3/exchangeInfo', ticker: '/api/v3/ticker/24hr', rollingTicker: '/api/v3/ticker', klines: '/api/v3/klines', depth: '/api/v3/depth', trades: '/api/v3/aggTrades' },
   futures: { origin: BINANCE_FUTURES_ORIGIN, exchangeInfo: '/fapi/v1/exchangeInfo', ticker: '/fapi/v1/ticker/24hr', klines: '/fapi/v1/klines', depth: '/fapi/v1/depth', trades: '/fapi/v1/aggTrades' },
 };
-const ALLOWED_PATHS = new Set(Object.values(VENUES).flatMap((venue) => [venue.exchangeInfo, venue.ticker, venue.klines, venue.depth, venue.trades]));
+const ALLOWED_PATHS = new Set(Object.values(VENUES).flatMap((venue) => [venue.exchangeInfo, venue.ticker, venue.rollingTicker, venue.klines, venue.depth, venue.trades]).filter(Boolean));
 
 function boundedTopN(value) {
   const number = Number(value);
@@ -119,6 +128,34 @@ async function collectVenue(market, { fetchImpl, microstructureTopN }) {
   return { tickers, microstructures };
 }
 
+function chunkList(items, size) { const out = []; for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size)); return out; }
+
+// One rolling window (e.g. 1h) for a bounded symbol list, batched to respect the
+// 100-symbols-per-request limit. A failed batch leaves its symbols UNKNOWN for
+// this window — it is never backfilled from another source or invented.
+async function fetchRollingWindow(market, symbols, windowSize, fetchImpl) {
+  const map = new Map();
+  for (const batch of chunkList(symbols, MULTI_TF_BATCH)) {
+    let payload;
+    try { payload = await fetchBinancePublicJson(buildBinancePublicUrl(market, 'rollingTicker', { symbols: JSON.stringify(batch), windowSize }), { fetchImpl }); }
+    catch { continue; }
+    for (const row of Array.isArray(payload) ? payload : []) { const pct = finite(row?.priceChangePercent); if (row?.symbol && pct !== null) map.set(row.symbol, pct); }
+  }
+  return map;
+}
+
+// Multi-timeframe (1h/4h/12h/7d) % change for the top-N symbols by 24h quote
+// volume. Windows are fetched sequentially to stay well inside the weight budget.
+export async function collectMultiTimeframe(market, tickers, { fetchImpl = fetch, topN = DEFAULT_MULTI_TF_TOP_N } = {}) {
+  const bounded = Math.min(Math.max(Math.trunc(Number(topN) || DEFAULT_MULTI_TF_TOP_N), 1), MAX_MULTI_TF_TOP_N);
+  const symbols = [...tickers].sort((a, b) => (finite(b.quoteVolume) || 0) - (finite(a.quoteVolume) || 0)).slice(0, bounded).map((t) => t.symbol);
+  const byWindow = {};
+  for (const window of MULTI_TF_WINDOWS) byWindow[window.key] = await fetchRollingWindow(market, symbols, window.windowSize, fetchImpl);
+  const result = new Map();
+  for (const symbol of symbols) { const entry = {}; for (const window of MULTI_TF_WINDOWS) { const value = byWindow[window.key].get(symbol); if (value !== undefined) entry[window.key] = value; } if (Object.keys(entry).length) result.set(symbol, entry); }
+  return { symbols: result, requested: symbols.length, covered: result.size, windows: MULTI_TF_WINDOWS.map((window) => window.windowSize) };
+}
+
 export async function collectBinanceMarketContext(options = {}) {
   const fetchImpl = options.fetchImpl || fetch;
   const topN = boundedTopN(options.microstructureTopN);
@@ -132,9 +169,17 @@ export async function collectBinanceMarketContext(options = {}) {
   }
   const microstructures = [...spot.microstructures, ...futures.microstructures];
   const allMicrostructureComplete = microstructures.every((row) => row.dataStatus === 'complete');
+  // Bounded multi-timeframe enrichment (spot only). Symbols outside the top-N
+  // keep no 1h/4h/12h/7d fields → the reader surfaces them as UNKNOWN.
+  let multiTf = { symbols: new Map(), requested: 0, covered: 0 };
+  if (options.includeMultiTimeframe === true) {
+    try { multiTf = await collectMultiTimeframe('spot', spot.tickers, { fetchImpl, topN: options.multiTimeframeTopN }); }
+    catch (error) { multiTf = { symbols: new Map(), requested: 0, covered: 0, failureCode: failureCode(error) }; }
+    for (const row of spot.tickers) { const entry = multiTf.symbols.get(row.symbol); if (entry) Object.assign(row, entry); }
+  }
   return {
     ok: true, observedAt: new Date(), collectedAt: new Date(), dataStatus: futures.status === 'complete' && allMicrostructureComplete ? 'complete' : 'partial',
     rows: [...spot.tickers, ...futures.tickers], microstructure: microstructures,
-    diagnostics: { spotTickerCount: spot.tickers.length, futuresTickerCount: futures.tickers.length, microstructureCount: microstructures.length, futuresStatus: futures.status, futuresFailureCode: futures.failureCode, microstructureTopN: topN },
+    diagnostics: { spotTickerCount: spot.tickers.length, futuresTickerCount: futures.tickers.length, microstructureCount: microstructures.length, futuresStatus: futures.status, futuresFailureCode: futures.failureCode, microstructureTopN: topN, multiTimeframeRequested: multiTf.requested, multiTimeframeCovered: multiTf.covered },
   };
 }

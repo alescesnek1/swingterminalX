@@ -25,6 +25,7 @@ function tickerToMarket(t) {
     lastPrice: num(t.last_price), price: num(t.last_price),
     quoteVolume: num(t.quote_volume), quoteVolume24h: num(t.quote_volume), volume: num(t.quote_volume),
     priceChangePercent: num(t.price_change_percent), change24hPct: num(t.price_change_percent),
+    change1hPct: num(t.change_1h_pct), change4hPct: num(t.change_4h_pct), change12hPct: num(t.change_12h_pct), change7dPct: num(t.change_7d_pct),
     highPrice: num(t.high_price), lowPrice: num(t.low_price), baseVolume: num(t.base_volume), tradeCount: t.trade_count ?? null,
   };
 }

@@ -16,6 +16,8 @@ cutover (a separate, later step).
 | `MARKET_CONTEXT_COLLECT_ENABLED` | `false` | Master switch for the 3-minute collector (writes atomic market records to Postgres). |
 | `MARKET_CONTEXT_FUTURES_ENABLED` | `false` | **Keep false.** Binance futures egress from Netlify is unverified; spot only for now. |
 | `MARKET_CONTEXT_MICROSTRUCTURE_TOP_N` | `5` | How many top-volume symbols get deep microstructure (depth/trades/klines). Max 8. Calibrate only after shadow soak. |
+| `MARKET_CONTEXT_MULTI_TF_ENABLED` | `false` | Collect 1h/4h/12h/7d % change (Binance rolling-window ticker) for the top-N symbols. Off = scanner shows only 24h; 1h/4h/12h/7d are UNKNOWN. |
+| `MARKET_CONTEXT_MULTI_TF_TOP_N` | `300` | How many top-volume symbols get multi-timeframe change. Max 500. Bounded by the Binance rate-limit budget; the long tail stays UNKNOWN. |
 | `MARKET_CONTEXT_RADAR_ENABLED` | `false` | Master switch for the server RADAR publisher (computes + persists RADAR per published run). |
 | `MARKET_CONTEXT_RETENTION_ENABLED` | `false` | Master switch for the hourly retention sweep. |
 | `MARKET_CONTEXT_RETENTION_MARKET_HOURS` | `48` | How long to keep heavy market rows (min 6h floor). |

@@ -3,6 +3,8 @@ import { makeRunKey, withContextTransaction } from './_market-context-store.mjs'
 export const MARKET_CONTEXT_COLLECT_ENV_FLAG = 'MARKET_CONTEXT_COLLECT_ENABLED';
 export const MARKET_CONTEXT_FUTURES_ENV_FLAG = 'MARKET_CONTEXT_FUTURES_ENABLED';
 export const MARKET_CONTEXT_TOP_N_ENV_FLAG = 'MARKET_CONTEXT_MICROSTRUCTURE_TOP_N';
+export const MARKET_CONTEXT_MULTI_TF_ENV_FLAG = 'MARKET_CONTEXT_MULTI_TF_ENABLED';
+export const MARKET_CONTEXT_MULTI_TF_TOP_N_ENV_FLAG = 'MARKET_CONTEXT_MULTI_TF_TOP_N';
 
 async function loadStore() { return await import('./_market-context-store.mjs'); }
 async function loadSource() { return await import('./_binance-market-context-source.mjs'); }
@@ -17,7 +19,8 @@ export async function runMarketContextCollector(deps = {}) {
   let store; try { store = deps.store || await (deps.loadStore || loadStore)(); } catch { return outcome(503, { ok: false, reason: 'DB_UNAVAILABLE' }); }
   const observedAt = typeof deps.now === 'function' ? new Date(deps.now()) : new Date();
   const runKey = store.makeRunKey ? store.makeRunKey(observedAt) : makeRunKey(observedAt);
-  const options = { includeFutures: env[MARKET_CONTEXT_FUTURES_ENV_FLAG] === 'true', microstructureTopN: topN(env[MARKET_CONTEXT_TOP_N_ENV_FLAG]), fetchImpl: deps.fetchImpl };
+  const multiTfTopN = Number(env[MARKET_CONTEXT_MULTI_TF_TOP_N_ENV_FLAG]);
+  const options = { includeFutures: env[MARKET_CONTEXT_FUTURES_ENV_FLAG] === 'true', microstructureTopN: topN(env[MARKET_CONTEXT_TOP_N_ENV_FLAG]), includeMultiTimeframe: env[MARKET_CONTEXT_MULTI_TF_ENV_FLAG] === 'true', multiTimeframeTopN: Number.isFinite(multiTfTopN) && multiTfTopN > 0 ? multiTfTopN : undefined, fetchImpl: deps.fetchImpl };
   const transaction = deps.withTransaction || store.withContextTransaction || withContextTransaction;
   const tx = await transaction(async (db) => {
     const run = await store.upsertCollectionRunByKey(db, { runKey, observedAt, diagnostics: { source: 'binance_public_rest', futuresEnabled: options.includeFutures } });
