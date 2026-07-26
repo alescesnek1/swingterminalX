@@ -1,6 +1,16 @@
 const DEFAULT_TTL_MS = 10 * 60 * 1000;
 const MAX_TOP_N = 50;
 const EXPECTED_WINDOW_SEC = 300;
+// Additive second trusted provider: the Netlify 3-minute atomic collector. It is
+// spot, and its rolling window is the REAL elapsed time between two consecutive
+// stored depth observations (N-1 → N), which is ~3-6 min rather than the futures
+// feed's fixed 300s. Every other trust bar below (freshness, sample counts,
+// validation flags, all TRUSTED_ROLLING_FIELDS, static measurements) applies to
+// BOTH sources identically — the collector is not held to a weaker standard, only
+// a truthfully different window. See scripts/radar/collector-absorb-bridge.mjs.
+const COLLECTOR_ROLLING_SOURCE = 'netlify-atomic-collector';
+const COLLECTOR_WINDOW_MIN_SEC = 120;
+const COLLECTOR_WINDOW_MAX_SEC = 900;
 const MIN_TRADE_SAMPLES = 10;
 const MIN_DEPTH_SNAPSHOTS = 2;
 const MIN_KLINE_SAMPLES = 30;
@@ -39,8 +49,14 @@ function normalizeValidation(raw) {
 export function validateTrustedRollingRow(row, { nowMs = Date.now(), ttlMs = DEFAULT_TTL_MS } = {}) {
   const fail = (reason) => ({ ok: false, reason });
   if (!row || typeof row !== 'object') return fail('row-invalid');
-  if (row.source !== 'binance-futures-public') return fail('source-invalid');
-  if (Number(row.rollingWindowSec) !== EXPECTED_WINDOW_SEC) return fail('window-invalid');
+  if (row.source === 'binance-futures-public') {
+    if (Number(row.rollingWindowSec) !== EXPECTED_WINDOW_SEC) return fail('window-invalid');
+  } else if (row.source === COLLECTOR_ROLLING_SOURCE) {
+    const windowSec = Number(row.rollingWindowSec);
+    if (!(Number.isFinite(windowSec) && windowSec >= COLLECTOR_WINDOW_MIN_SEC && windowSec <= COLLECTOR_WINDOW_MAX_SEC)) return fail('window-invalid');
+  } else {
+    return fail('source-invalid');
+  }
   const measuredAtMs = Number(row.rollingMeasuredAtMs);
   if (!Number.isFinite(measuredAtMs) || measuredAtMs > nowMs + 60_000 || nowMs - measuredAtMs > ttlMs) return fail('measurement-stale');
   const samples = row.samples || {};

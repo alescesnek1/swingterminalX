@@ -125,11 +125,121 @@ export async function getAtomizedMarketContext(db, options = {}) {
       db.query(`SELECT market,symbol,observed_at,window_start,window_end,data_status,failure_code,missing_inputs,candle_count,order_book_bid_levels,order_book_ask_levels,best_bid,best_ask,spread_bps,bid_quote_depth,ask_quote_depth,agg_trade_count,taker_buy_quote,taker_sell_quote FROM market_microstructure_measurements WHERE run_id=$1 ORDER BY market,symbol LIMIT $2`, [run.id,microLimit]),
     ]);
     const ageMs = Date.now() - new Date(run.observed_at).getTime(); const freshness = !Number.isFinite(ageMs) ? 'MISSING' : ageMs <= 6 * 60 * 1000 ? 'FRESH' : 'STALE';
-    return { ok: true, contextVersion: null, run: { id: run.id, key: run.run_key, observedAt: run.observed_at, completedAt: run.completed_at }, market: { observedAt: run.observed_at, freshness, tickers: tickers.rows, microstructure: micro.rows, dataQuality: sanitizeDiagnostics(run.diagnostics || {}) }, radar: { status: 'PENDING' } };
+    const radar = await readRadarForRun(db, run.id);
+    return { ok: true, contextVersion: null, run: { id: run.id, key: run.run_key, observedAt: run.observed_at, completedAt: run.completed_at }, market: { observedAt: run.observed_at, freshness, tickers: tickers.rows, microstructure: micro.rows, dataQuality: sanitizeDiagnostics(run.diagnostics || {}) }, radar };
   } catch (error) { dbError('atomic_context_read_failed', error); return { ok: false, reason: 'DB_UNAVAILABLE' }; }
 }
 
 export async function getContextDiagnostics(db) {
   try { const result = await db.query(`SELECT id,run_key,observed_at,completed_at,(SELECT count(*) FROM market_ticker_observations t WHERE t.run_id=r.id) AS ticker_count,(SELECT count(*) FROM market_microstructure_measurements m WHERE m.run_id=r.id) AS measurement_count FROM market_collection_runs r WHERE scope_id=$1 AND status='published' ORDER BY observed_at DESC LIMIT 1`, [CONTEXT_SCOPE_ID]); const row=result.rows[0]; return { ok:true, diagnostics: row ? { runId:row.id,runKey:row.run_key,observedAt:row.observed_at,completedAt:row.completed_at,tickerCount:Number(row.ticker_count),measurementCount:Number(row.measurement_count) } : { runId:null, tickerCount:0, measurementCount:0 } }; }
   catch (error) { dbError('diagnostics_read_failed', error); return { ok:false, reason:'DB_UNAVAILABLE' }; }
+}
+
+// ── RADAR result persistence (derived, disposable, keyed by run) ─────────────
+// A RADAR result is computed by the publisher over ONE published market run and
+// is the canonical read for that run. There is no revision head / CAS here: the
+// published market run IS the head, and the result that references it is the read.
+
+const num = (value) => (value === null || value === undefined ? null : (Number.isFinite(Number(value)) ? Number(value) : null));
+
+// Reads everything the RADAR publisher needs for the latest published run: the
+// full ticker universe (for regime/stage/breadth) plus, for the collected top-N
+// microstructure symbols, the raw agg trades / 1m candles / depth (N and N-1) so
+// STRICT_ABSORB can be measured honestly from the database.
+export async function getRadarInputBundle(db, options = {}) {
+  const topN = Math.min(Math.max(Number(options.topN) || 8, 1), 50);
+  const tickerLimit = Math.min(Math.max(Number(options.tickerLimit) || 1000, 1), 2000);
+  const candleLimit = Math.min(Math.max(Number(options.candleLimit) || 60, 30), 120);
+  try {
+    const runsRes = await db.query(`SELECT id, observed_at FROM market_collection_runs WHERE scope_id=$1 AND status='published' ORDER BY observed_at DESC LIMIT 2`, [CONTEXT_SCOPE_ID]);
+    const latest = runsRes.rows[0];
+    if (!latest) return { ok: true, run: null, windowSec: null, tickers: [], microSymbols: [] };
+    const prev = runsRes.rows[1] || null;
+    const windowSec = prev ? Math.round((new Date(latest.observed_at).getTime() - new Date(prev.observed_at).getTime()) / 1000) : null;
+    const [tickRes, measRes] = await Promise.all([
+      db.query(`SELECT market,symbol,last_price,price_change_percent,high_price,low_price,base_volume,quote_volume,trade_count,observed_at,data_status FROM market_ticker_observations WHERE run_id=$1 ORDER BY quote_volume DESC NULLS LAST LIMIT $2`, [latest.id, tickerLimit]),
+      db.query(`SELECT market,symbol,observed_at,window_start,window_end,data_status,spread_bps,bid_quote_depth,ask_quote_depth,taker_buy_quote,taker_sell_quote,best_bid,best_ask,agg_trade_count FROM market_microstructure_measurements WHERE run_id=$1 ORDER BY (COALESCE(taker_buy_quote,0)+COALESCE(taker_sell_quote,0)) DESC LIMIT $2`, [latest.id, topN]),
+    ]);
+    let prevDepth = new Map();
+    if (prev) { const prevRes = await db.query(`SELECT market,symbol,bid_quote_depth FROM market_microstructure_measurements WHERE run_id=$1`, [prev.id]); prevDepth = new Map(prevRes.rows.map((r) => [`${r.market}:${r.symbol}`, num(r.bid_quote_depth)])); }
+    const microSymbols = [];
+    for (const m of measRes.rows) {
+      const [tradesRes, klRes] = await Promise.all([
+        db.query(`SELECT event_time,price,quantity,buyer_is_maker FROM market_agg_trades WHERE run_id=$1 AND market=$2 AND symbol=$3 ORDER BY event_time`, [latest.id, m.market, m.symbol]),
+        db.query(`SELECT open_time,close_time,open_price,high_price,low_price,close_price,base_volume FROM market_candles_1m WHERE market=$1 AND symbol=$2 ORDER BY open_time DESC LIMIT $3`, [m.market, m.symbol, candleLimit]),
+      ]);
+      const askDepth = num(m.ask_quote_depth) || 0; const bidDepth = num(m.bid_quote_depth) || 0;
+      microSymbols.push({
+        market: m.market, symbol: m.symbol, observedAtMs: new Date(m.observed_at).getTime(), windowSec,
+        spreadPct: num(m.spread_bps) === null ? null : num(m.spread_bps) / 100,
+        depthUsdWithin1Pct: bidDepth + askDepth > 0 ? bidDepth + askDepth : null,
+        bidQuoteDepthAfter: num(m.bid_quote_depth), bidQuoteDepthBefore: prevDepth.has(`${m.market}:${m.symbol}`) ? prevDepth.get(`${m.market}:${m.symbol}`) : null,
+        takerBuyQuote: num(m.taker_buy_quote), takerSellQuote: num(m.taker_sell_quote),
+        aggTrades: tradesRes.rows.map((t) => ({ T: new Date(t.event_time).getTime(), p: num(t.price), q: num(t.quantity), m: t.buyer_is_maker })),
+        // [openMs, open, high, low, close, volume, closeMs] — element 6 (closeTime)
+        // is required by the klines-snapshot candle normalizer; the absorb bridge
+        // only reads [0],[3],[4], so the extra element is inert there.
+        klines: klRes.rows.map((k) => [new Date(k.open_time).getTime(), num(k.open_price), num(k.high_price), num(k.low_price), num(k.close_price), num(k.base_volume), new Date(k.close_time).getTime()]).reverse(),
+      });
+    }
+    return { ok: true, run: { id: latest.id, observedAt: latest.observed_at }, previousRun: prev ? { id: prev.id, observedAt: prev.observed_at } : null, windowSec, tickers: tickRes.rows, microSymbols };
+  } catch (error) { dbError('radar_input_bundle_failed', error); return { ok: false, reason: 'DB_UNAVAILABLE' }; }
+}
+
+export async function insertRadarRunResult(db, payload = {}) {
+  const runId = Number(payload.runId); if (!Number.isInteger(runId) || runId <= 0) return { ok: false, reason: 'INVALID_RUN' };
+  const status = ['ready', 'pending', 'failed', 'unknown'].includes(payload.status) ? payload.status : 'unknown';
+  const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
+  try {
+    await db.query(
+      `INSERT INTO radar_run_snapshots (run_id,status,source,computed_at,candidate_count,entry_ready_count,market_regime,pipeline,absorb_funnel,universe_diagnostics,provider_status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       ON CONFLICT (run_id) DO UPDATE SET status=EXCLUDED.status, source=EXCLUDED.source, computed_at=EXCLUDED.computed_at, candidate_count=EXCLUDED.candidate_count, entry_ready_count=EXCLUDED.entry_ready_count, market_regime=EXCLUDED.market_regime, pipeline=EXCLUDED.pipeline, absorb_funnel=EXCLUDED.absorb_funnel, universe_diagnostics=EXCLUDED.universe_diagnostics, provider_status=EXCLUDED.provider_status`,
+      [runId, status, typeof payload.source === 'string' ? payload.source.slice(0, 64) : 'canonical_context', asDate(payload.computedAt), candidates.length, Number(payload.entryReadyCount) || 0, safeJson(payload.marketRegime || {}), safeJson(payload.pipeline || {}), safeJson(sanitizeDiagnostics(payload.absorbFunnel || {})), safeJson(sanitizeDiagnostics(payload.universeDiagnostics || {})), safeJson(sanitizeDiagnostics(payload.providerStatus || {}))],
+    );
+    await db.query(`DELETE FROM radar_run_candidates WHERE run_id=$1`, [runId]);
+    for (const chunk of chunks(candidates)) {
+      const values = [];
+      for (const c of chunk) {
+        const market = c.market === 'futures' ? 'futures' : 'spot';
+        values.push(runId, market, upper(c.symbol || '', 32), c.stage ?? null, c.v1Status ?? c.entryStatus ?? c.status ?? null, c.ABSORB_STATUS ?? null, c.ABSORB_MODE ?? null, c.STRICT_ABSORB_STATUS ?? null, c.PROXY_ABSORB_STATUS ?? null, num(c.STRICT_ABSORB_SCORE), num(c.PROXY_ABSORB_SCORE), c.STRICT_ABSORB_CONFIRMED === true, c.RECLAIM_STATUS ?? c.reclaimStatus ?? null, ['ready', 'pending', 'unknown'].includes(c.dataStatus) ? c.dataStatus : 'ready', safeJson(sanitizeDiagnostics(c)));
+      }
+      await db.query(`INSERT INTO radar_run_candidates (run_id,market,symbol,stage,entry_status,absorb_status,absorb_mode,strict_absorb_status,proxy_absorb_status,strict_absorb_score,proxy_absorb_score,strict_absorb_confirmed,reclaim_status,data_status,payload) VALUES ${valuesSql(chunk.length, 15)} ON CONFLICT (run_id,market,symbol) DO NOTHING`, values);
+    }
+    return { ok: true, runId, candidateCount: candidates.length };
+  } catch (error) { dbError('radar_result_insert_failed', error); return { ok: false, reason: 'DB_UNAVAILABLE' }; }
+}
+
+async function readRadarForRun(db, runId) {
+  const snapRes = await db.query(`SELECT run_id,status,source,computed_at,candidate_count,entry_ready_count,market_regime,pipeline,absorb_funnel,universe_diagnostics,provider_status FROM radar_run_snapshots WHERE run_id=$1`, [runId]);
+  const snap = snapRes.rows[0];
+  if (!snap) return { status: 'PENDING', runId, candidates: [] };
+  const candRes = await db.query(`SELECT market,symbol,stage,entry_status,absorb_status,absorb_mode,strict_absorb_status,proxy_absorb_status,strict_absorb_score,proxy_absorb_score,strict_absorb_confirmed,reclaim_status,data_status,payload FROM radar_run_candidates WHERE run_id=$1 ORDER BY strict_absorb_confirmed DESC, COALESCE(strict_absorb_score,0) DESC`, [runId]);
+  return { status: String(snap.status).toUpperCase(), runId, source: snap.source, computedAt: snap.computed_at, candidateCount: Number(snap.candidate_count), entryReadyCount: Number(snap.entry_ready_count), marketRegime: snap.market_regime || {}, pipeline: snap.pipeline || {}, absorbFunnel: snap.absorb_funnel || {}, universeDiagnostics: snap.universe_diagnostics || {}, providerStatus: snap.provider_status || {}, candidates: candRes.rows };
+}
+
+export async function getPublishedRadar(db) {
+  try {
+    const runRes = await db.query(`SELECT id FROM market_collection_runs WHERE scope_id=$1 AND status='published' ORDER BY observed_at DESC LIMIT 1`, [CONTEXT_SCOPE_ID]);
+    const run = runRes.rows[0]; if (!run) return { ok: true, radar: { status: 'PENDING', candidates: [] } };
+    return { ok: true, radar: await readRadarForRun(db, run.id) };
+  } catch (error) { dbError('radar_read_failed', error); return { ok: false, reason: 'DB_UNAVAILABLE' }; }
+}
+
+// 24h / 7d Absorb funnel history: aggregates the stored per-run funnels by joining
+// to each run's observed_at. Pure read; used by the diagnostics endpoint only.
+export async function getRadarFunnelHistory(db, options = {}) {
+  const sinceMs = Number(options.sinceMs) > 0 ? Number(options.sinceMs) : 24 * 60 * 60 * 1000;
+  const since = new Date(Date.now() - sinceMs);
+  try {
+    const res = await db.query(`SELECT s.absorb_funnel, s.candidate_count, s.entry_ready_count FROM radar_run_snapshots s JOIN market_collection_runs r ON r.id=s.run_id WHERE r.observed_at >= $1`, [since]);
+    const totals = { runs: res.rows.length, candidateCount: 0, entryReadyCount: 0, funnel: {} };
+    for (const row of res.rows) {
+      totals.candidateCount += Number(row.candidate_count) || 0;
+      totals.entryReadyCount += Number(row.entry_ready_count) || 0;
+      const funnel = row.absorb_funnel && typeof row.absorb_funnel === 'object' ? row.absorb_funnel : {};
+      for (const [key, value] of Object.entries(funnel)) if (Number.isFinite(Number(value))) totals.funnel[key] = (totals.funnel[key] || 0) + Number(value);
+    }
+    return { ok: true, sinceMs, totals };
+  } catch (error) { dbError('radar_funnel_read_failed', error); return { ok: false, reason: 'DB_UNAVAILABLE' }; }
 }

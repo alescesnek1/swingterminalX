@@ -26,8 +26,12 @@ test('read returns the latest published run and atomized ticker and measurement 
     if (sql.includes('FROM market_collection_runs')) return { rows: [{ id: 9, run_key: 'global:2026-07-24T12:00:00.000Z', observed_at: new Date().toISOString(), completed_at: new Date().toISOString(), diagnostics: { tickerCount: 1 } }] };
     if (sql.includes('FROM market_ticker_observations')) return { rows: [{ market: 'spot', symbol: 'BTCUSDT', last_price: '100', data_status: 'complete' }] };
     if (sql.includes('FROM market_microstructure_measurements')) return { rows: [{ market: 'spot', symbol: 'BTCUSDT', data_status: 'partial', missing_inputs: ['DEPTH'] }] };
+    if (sql.includes('FROM radar_run_snapshots')) return { rows: [] };
+    if (sql.includes('FROM radar_run_candidates')) return { rows: [] };
     throw new Error('unexpected query');
   } };
   const context = await getAtomizedMarketContext(db);
   assert.equal(context.ok, true); assert.equal(context.contextVersion, null); assert.equal(context.run.id, 9); assert.equal(context.market.freshness, 'FRESH'); assert.equal(context.market.tickers[0].symbol, 'BTCUSDT'); assert.equal(context.market.microstructure[0].data_status, 'partial');
+  // A run with no computed RADAR result reads back as PENDING (never a fake ready).
+  assert.equal(context.radar.status, 'PENDING');
 });
