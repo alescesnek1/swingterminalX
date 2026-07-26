@@ -935,6 +935,12 @@
     </div>
   </div>
 
+  <!-- Canonical Context Store read cutover. true = Scanner/RADAR read /api/context
+       (server-computed RADAR, Provider Status + Absorb Diagnostics panels, data
+       refreshed every ~3 min). Set to false to fall back to the legacy
+       /api/markets + Fleet path, which stays fully intact. index.html is never
+       cached, so flipping this takes effect on the next page load. -->
+  <script>window.RADAR_CANONICAL_CONTEXT_READ = true;</script>
   <script src="js/toast.js?v=6i8"></script>
   <script type="module" src="/js/ai-analysis.js?v=6i8"></script>
   <script type="module" src="/js/freshness-badge.js?v=6i8"></script>
