@@ -53,7 +53,7 @@ function normalizedMicro(raw, observedAt) {
   const market = raw?.market === 'futures' ? 'futures' : raw?.market === 'spot' ? 'spot' : null; const symbol = upper(raw?.symbol || raw?.pair);
   if (!market || !symbol) return null;
   const depth = raw.orderBook && typeof raw.orderBook === 'object' ? raw.orderBook : {};
-  return { market, symbol, observedAt: asDate(observedAt), windowStart: raw.windowStart ? asDate(raw.windowStart) : null, windowEnd: raw.windowEnd ? asDate(raw.windowEnd) : null, dataStatus: safeStatus(raw.dataStatus, 'partial'), failureCode: typeof raw.failureCode === 'string' ? upper(raw.failureCode, 80) || null : null, missingInputs: Array.isArray(raw.missingInputs) ? raw.missingInputs.map((v) => upper(v, 80)).filter(Boolean).slice(0, 20) : [], klines: Array.isArray(raw.klines1m) ? raw.klines1m.slice(0, 120) : [], bids: Array.isArray(depth.bids) ? depth.bids.slice(0, 100) : [], asks: Array.isArray(depth.asks) ? depth.asks.slice(0, 100) : [], depthUpdateId: integerOrNull(depth.lastUpdateId), aggTrades: Array.isArray(raw.aggTrades) ? raw.aggTrades.slice(0, 500) : [], depthSummary: raw.depthSummary || {}, tradesSummary: raw.tradesSummary || {} };
+  return { market, symbol, observedAt: asDate(observedAt), windowStart: raw.windowStart ? asDate(raw.windowStart) : null, windowEnd: raw.windowEnd ? asDate(raw.windowEnd) : null, dataStatus: safeStatus(raw.dataStatus, 'partial'), failureCode: typeof raw.failureCode === 'string' ? upper(raw.failureCode, 80) || null : null, missingInputs: Array.isArray(raw.missingInputs) ? raw.missingInputs.map((v) => upper(v, 80)).filter(Boolean).slice(0, 20) : [], klines: Array.isArray(raw.klines1m) ? raw.klines1m.slice(0, 120) : [], bids: Array.isArray(depth.bids) ? depth.bids.slice(0, 100) : [], asks: Array.isArray(depth.asks) ? depth.asks.slice(0, 100) : [], depthUpdateId: integerOrNull(depth.lastUpdateId), aggTrades: Array.isArray(raw.aggTrades) ? raw.aggTrades.slice(0, 500) : [], depthSummary: raw.depthSummary || {}, tradesSummary: raw.tradesSummary || {}, absorb: raw.absorb && typeof raw.absorb === 'object' && !Array.isArray(raw.absorb) ? raw.absorb : null };
 }
 function normalKline(micro, row) {
   if (!Array.isArray(row)) return null; const openMs = numberOrNull(row[0]); const closeMs = numberOrNull(row[6]);
@@ -104,7 +104,28 @@ async function insertTrades(db, runId, rows) {
   for (const chunk of chunks(rows)) { const values=[]; for (const row of chunk) values.push(runId,row.market,row.symbol,row.aggTradeId,row.eventTime,row.price,row.quantity,row.quoteQuantity,row.buyerIsMaker,row.isBestMatch); await db.query(`INSERT INTO market_agg_trades (run_id,market,symbol,agg_trade_id,event_time,price,quantity,quote_quantity,buyer_is_maker,is_best_match) VALUES ${valuesSql(chunk.length,10)} ON CONFLICT (market,symbol,agg_trade_id) DO NOTHING`, values); }
 }
 async function insertMeasurements(db, runId, rows) {
-  for (const chunk of chunks(rows)) { const values=[]; for (const row of chunk) { const depth=row.depthSummary||{}; const trades=row.tradesSummary||{}; values.push(runId,row.market,row.symbol,row.observedAt,row.windowStart,row.windowEnd,row.dataStatus,row.failureCode,row.missingInputs,row.klines.length,integerOrNull(depth?.levels?.bids)||0,integerOrNull(depth?.levels?.asks)||0,numberOrNull(depth.bestBid),numberOrNull(depth.bestAsk),numberOrNull(depth.spreadBps),numberOrNull(depth.bidQuote),numberOrNull(depth.askQuote),integerOrNull(trades.count)||0,numberOrNull(trades.takerBuyQuote),numberOrNull(trades.takerSellQuote)); } await db.query(`INSERT INTO market_microstructure_measurements (run_id,market,symbol,observed_at,window_start,window_end,data_status,failure_code,missing_inputs,candle_count,order_book_bid_levels,order_book_ask_levels,best_bid,best_ask,spread_bps,bid_quote_depth,ask_quote_depth,agg_trade_count,taker_buy_quote,taker_sell_quote) VALUES ${valuesSql(chunk.length,20)} ON CONFLICT (run_id,market,symbol) DO NOTHING`, values); }
+  for (const chunk of chunks(rows)) { const values=[]; for (const row of chunk) { const depth=row.depthSummary||{}; const trades=row.tradesSummary||{}; values.push(runId,row.market,row.symbol,row.observedAt,row.windowStart,row.windowEnd,row.dataStatus,row.failureCode,row.missingInputs,row.klines.length,integerOrNull(depth?.levels?.bids)||0,integerOrNull(depth?.levels?.asks)||0,numberOrNull(depth.bestBid),numberOrNull(depth.bestAsk),numberOrNull(depth.spreadBps),numberOrNull(depth.bidQuote),numberOrNull(depth.askQuote),integerOrNull(trades.count)||0,numberOrNull(trades.takerBuyQuote),numberOrNull(trades.takerSellQuote),row.absorb ? safeJson(sanitizeDiagnostics(row.absorb)) : null); } await db.query(`INSERT INTO market_microstructure_measurements (run_id,market,symbol,observed_at,window_start,window_end,data_status,failure_code,missing_inputs,candle_count,order_book_bid_levels,order_book_ask_levels,best_bid,best_ask,spread_bps,bid_quote_depth,ask_quote_depth,agg_trade_count,taker_buy_quote,taker_sell_quote,absorb) VALUES ${valuesSql(chunk.length,21)} ON CONFLICT (run_id,market,symbol) DO NOTHING`, values); }
+}
+
+// Newest published run that is far enough back to be an honest depth baseline,
+// plus that run's per-symbol bid depth. Shared by the collector (which computes
+// absorption at collection time) and the RADAR bundle so both agree on what
+// "previous" means; picking a drifted run seconds away yields a window the STRICT
+// validator rejects for every symbol at once.
+export async function getMicrostructureBaseline(db, observedAt) {
+  const atMs = new Date(observedAt).getTime();
+  if (!Number.isFinite(atMs)) return { ok: false, reason: 'INVALID_OBSERVED_AT' };
+  try {
+    const runsRes = await db.query(`SELECT id, observed_at FROM market_collection_runs WHERE scope_id=$1 AND status='published' AND observed_at < $2 ORDER BY observed_at DESC LIMIT 12`, [CONTEXT_SCOPE_ID, new Date(atMs)]);
+    const elapsedSec = (row) => Math.round((atMs - new Date(row.observed_at).getTime()) / 1000);
+    const run = runsRes.rows.find((row) => { const sec = elapsedSec(row); return sec >= COLLECTOR_WINDOW_MIN_SEC && sec <= COLLECTOR_WINDOW_MAX_SEC; }) || null;
+    if (!run) {
+      if (runsRes.rows.length) console.warn('[ATOMIC_MARKET_STORE] no_absorb_baseline_in_window', { candidates: runsRes.rows.length, nearestSec: elapsedSec(runsRes.rows[0]), band: [COLLECTOR_WINDOW_MIN_SEC, COLLECTOR_WINDOW_MAX_SEC] });
+      return { ok: true, run: null, windowSec: null, bidDepth: new Map() };
+    }
+    const depthRes = await db.query(`SELECT market,symbol,bid_quote_depth FROM market_microstructure_measurements WHERE run_id=$1`, [run.id]);
+    return { ok: true, run: { id: run.id, observedAt: run.observed_at }, windowSec: elapsedSec(run), bidDepth: new Map(depthRes.rows.map((r) => [`${r.market}:${r.symbol}`, num(r.bid_quote_depth)])) };
+  } catch (error) { dbError('absorb_baseline_failed', error); return { ok: false, reason: 'DB_UNAVAILABLE' }; }
 }
 
 export async function insertAtomicMarketRecords(db, payload = {}) {
@@ -183,28 +204,66 @@ export async function getRadarInputBundle(db, options = {}) {
       // consumes is keyed by symbol alone, so returning both venues of one symbol
       // would spend two of the topN slots on a single measured symbol and silently
       // drop one of them at merge time. DISTINCT ON keeps the busier venue.
-      db.query(`SELECT * FROM (SELECT DISTINCT ON (symbol) market,symbol,observed_at,window_start,window_end,data_status,spread_bps,bid_quote_depth,ask_quote_depth,taker_buy_quote,taker_sell_quote,best_bid,best_ask,agg_trade_count, (COALESCE(taker_buy_quote,0)+COALESCE(taker_sell_quote,0)) AS taker_total FROM market_microstructure_measurements WHERE run_id=$1 ORDER BY symbol, taker_total DESC) m ORDER BY m.taker_total DESC LIMIT $2`, [latest.id, topN]),
+      db.query(`SELECT * FROM (SELECT DISTINCT ON (symbol) market,symbol,observed_at,window_start,window_end,data_status,spread_bps,bid_quote_depth,ask_quote_depth,taker_buy_quote,taker_sell_quote,best_bid,best_ask,agg_trade_count,absorb, (COALESCE(taker_buy_quote,0)+COALESCE(taker_sell_quote,0)) AS taker_total FROM market_microstructure_measurements WHERE run_id=$1 ORDER BY symbol, taker_total DESC) m ORDER BY m.taker_total DESC LIMIT $2`, [latest.id, topN]),
     ]);
     let prevDepth = new Map();
     if (prev) { const prevRes = await db.query(`SELECT market,symbol,bid_quote_depth FROM market_microstructure_measurements WHERE run_id=$1`, [prev.id]); prevDepth = new Map(prevRes.rows.map((r) => [`${r.market}:${r.symbol}`, num(r.bid_quote_depth)])); }
+
+    // Candles for EVERY measured symbol in one windowed query. The previous
+    // per-symbol query cost one round trip per symbol, which caps the universe at
+    // a handful; a per-partition ROW_NUMBER returns the same rows in a single
+    // trip regardless of how many symbols were measured.
+    const keys = measRes.rows.map((m) => `${m.market}:${m.symbol}`);
+    const klinesByKey = new Map();
+    if (keys.length) {
+      const klRes = await db.query(
+        `SELECT market,symbol,open_time,close_time,open_price,high_price,low_price,close_price,base_volume FROM (
+           SELECT market,symbol,open_time,close_time,open_price,high_price,low_price,close_price,base_volume,
+                  ROW_NUMBER() OVER (PARTITION BY market,symbol ORDER BY open_time DESC) AS rn
+             FROM market_candles_1m WHERE market || ':' || symbol = ANY($1)
+         ) c WHERE c.rn <= $2 ORDER BY market,symbol,open_time`,
+        [keys, candleLimit],
+      );
+      for (const k of klRes.rows) {
+        const key = `${k.market}:${k.symbol}`;
+        if (!klinesByKey.has(key)) klinesByKey.set(key, []);
+        klinesByKey.get(key).push([new Date(k.open_time).getTime(), num(k.open_price), num(k.high_price), num(k.low_price), num(k.close_price), num(k.base_volume), new Date(k.close_time).getTime()]);
+      }
+    }
+
+    // Raw agg trades are only needed to REBUILD absorption for rows written before
+    // it was computed at collection time. Rows that already carry a stored absorb
+    // row need no trades at all — which is what lets raw trade retention shrink to
+    // a small audit sample instead of the whole universe.
+    const legacy = measRes.rows.filter((m) => !m.absorb);
+    const tradesByKey = new Map();
+    if (legacy.length) {
+      const tradeRes = await db.query(`SELECT market,symbol,event_time,price,quantity,buyer_is_maker FROM market_agg_trades WHERE run_id=$1 AND market || ':' || symbol = ANY($2) ORDER BY market,symbol,event_time`, [latest.id, legacy.map((m) => `${m.market}:${m.symbol}`)]);
+      for (const t of tradeRes.rows) {
+        const key = `${t.market}:${t.symbol}`;
+        if (!tradesByKey.has(key)) tradesByKey.set(key, []);
+        tradesByKey.get(key).push({ T: new Date(t.event_time).getTime(), p: num(t.price), q: num(t.quantity), m: t.buyer_is_maker });
+      }
+    }
+
     const microSymbols = [];
     for (const m of measRes.rows) {
-      const [tradesRes, klRes] = await Promise.all([
-        db.query(`SELECT event_time,price,quantity,buyer_is_maker FROM market_agg_trades WHERE run_id=$1 AND market=$2 AND symbol=$3 ORDER BY event_time`, [latest.id, m.market, m.symbol]),
-        db.query(`SELECT open_time,close_time,open_price,high_price,low_price,close_price,base_volume FROM market_candles_1m WHERE market=$1 AND symbol=$2 ORDER BY open_time DESC LIMIT $3`, [m.market, m.symbol, candleLimit]),
-      ]);
+      const key = `${m.market}:${m.symbol}`;
       const askDepth = num(m.ask_quote_depth) || 0; const bidDepth = num(m.bid_quote_depth) || 0;
       microSymbols.push({
         market: m.market, symbol: m.symbol, observedAtMs: new Date(m.observed_at).getTime(), windowSec,
+        // Computed at collection time from the raw data while it was in memory.
+        // When present the consumer uses it as-is and never rebuilds from trades.
+        absorb: m.absorb && typeof m.absorb === 'object' && !Array.isArray(m.absorb) ? m.absorb : null,
         spreadPct: num(m.spread_bps) === null ? null : num(m.spread_bps) / 100,
         depthUsdWithin1Pct: bidDepth + askDepth > 0 ? bidDepth + askDepth : null,
-        bidQuoteDepthAfter: num(m.bid_quote_depth), bidQuoteDepthBefore: prevDepth.has(`${m.market}:${m.symbol}`) ? prevDepth.get(`${m.market}:${m.symbol}`) : null,
+        bidQuoteDepthAfter: num(m.bid_quote_depth), bidQuoteDepthBefore: prevDepth.has(key) ? prevDepth.get(key) : null,
         takerBuyQuote: num(m.taker_buy_quote), takerSellQuote: num(m.taker_sell_quote),
-        aggTrades: tradesRes.rows.map((t) => ({ T: new Date(t.event_time).getTime(), p: num(t.price), q: num(t.quantity), m: t.buyer_is_maker })),
+        aggTrades: tradesByKey.get(key) || [],
         // [openMs, open, high, low, close, volume, closeMs] — element 6 (closeTime)
         // is required by the klines-snapshot candle normalizer; the absorb bridge
         // only reads [0],[3],[4], so the extra element is inert there.
-        klines: klRes.rows.map((k) => [new Date(k.open_time).getTime(), num(k.open_price), num(k.high_price), num(k.low_price), num(k.close_price), num(k.base_volume), new Date(k.close_time).getTime()]).reverse(),
+        klines: klinesByKey.get(key) || [],
       });
     }
     return { ok: true, run: { id: latest.id, observedAt: latest.observed_at }, previousRun: prev ? { id: prev.id, observedAt: prev.observed_at } : null, windowSec, tickers: tickRes.rows, microSymbols };

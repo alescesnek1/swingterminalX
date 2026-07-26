@@ -113,7 +113,16 @@ export function buildCollectorRollingSnapshot(symbols = [], opts = {}) {
   const updatedAtMs = Number.isFinite(Number(opts.updatedAtMs)) ? Number(opts.updatedAtMs) : nowMs;
   const data = {};
   let measured = 0;
+  let precomputed = 0;
   for (const input of Array.isArray(symbols) ? symbols : []) {
+    // A row computed at COLLECTION time is used as-is: recomputing it here would
+    // need the raw trades read back per symbol, which is exactly the cost the
+    // stored row removes. It came from the same buildCollectorRollingRow, so the
+    // provenance and the trust bar are identical — nothing is relaxed.
+    if (input?.absorb && typeof input.absorb === 'object' && !Array.isArray(input.absorb)) {
+      const symbol = typeof input.symbol === 'string' ? input.symbol.trim().toUpperCase() : '';
+      if (symbol) { data[symbol] = input.absorb; measured += 1; precomputed += 1; continue; }
+    }
     const built = buildCollectorRollingRow(input, nowMs);
     if (!built) continue;
     data[built.symbol] = built.row;
@@ -127,6 +136,6 @@ export function buildCollectorRollingSnapshot(symbols = [], opts = {}) {
     timeframe: 'rolling',
     ttlMs: 10 * 60 * 1000,
     data,
-    diagnostics: { requested: Array.isArray(symbols) ? symbols.length : 0, measured },
+    diagnostics: { requested: Array.isArray(symbols) ? symbols.length : 0, measured, precomputed },
   };
 }

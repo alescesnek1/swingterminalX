@@ -8,6 +8,7 @@ export const MARKET_CONTEXT_MULTI_TF_TOP_N_ENV_FLAG = 'MARKET_CONTEXT_MULTI_TF_T
 
 async function loadStore() { return await import('./_market-context-store.mjs'); }
 async function loadSource() { return await import('./_binance-market-context-source.mjs'); }
+async function loadAbsorb() { return await import('./_market-context-absorb.mjs'); }
 function topN(value) { const n = Number(value); return Number.isFinite(n) && n > 0 ? Math.min(Math.trunc(n), 8) : 5; }
 function outcome(status, body) { return { status, body: { endpoint: 'market_context_collect_scheduled', ...body } }; }
 
@@ -29,15 +30,32 @@ export async function runMarketContextCollector(deps = {}) {
     let source; try { source = deps.source || await (deps.loadSource || loadSource)(); } catch { return { ok: false, reason: 'MARKET_SOURCE_UNAVAILABLE' }; }
     const collected = await source.collectBinanceMarketContext(options);
     if (!collected?.ok) return { ok: false, reason: collected?.reason || 'MARKET_FETCH_FAILED' };
-    const written = await store.insertAtomicMarketRecords(db, { runId: run.runId, observedAt: collected.observedAt, rows: collected.rows, microstructure: collected.microstructure });
+    // Absorption is computed HERE, while the raw trades and candles are still in
+    // memory, and stored as one derived row per symbol. Recomputing it on read
+    // costs two queries per symbol, which does not scale past a handful.
+    let absorb; try { absorb = deps.absorb || await (deps.loadAbsorb || loadAbsorb)(); } catch { absorb = null; }
+    let microstructure = collected.microstructure;
+    let absorbDiagnostics = { absorbComputed: 0, absorbWithDepthBaseline: 0, absorbWindowSec: null };
+    if (absorb && typeof store.getMicrostructureBaseline === 'function') {
+      const baseline = await store.getMicrostructureBaseline(db, collected.observedAt);
+      if (!baseline?.ok) console.warn('[MARKET_CONTEXT] absorb_baseline_unavailable', { reason: baseline?.reason || 'DB_UNAVAILABLE' });
+      const attached = absorb.attachAbsorbRows(collected.microstructure, baseline?.ok ? baseline : null, collected.observedAt);
+      microstructure = attached.rows;
+      absorbDiagnostics = attached.diagnostics;
+    }
+    const written = await store.insertAtomicMarketRecords(db, { runId: run.runId, observedAt: collected.observedAt, rows: collected.rows, microstructure });
     if (!written.ok) return written;
-    const completed = await store.completeCollectionRun(db, { runId: run.runId, completedAt: collected.collectedAt, diagnostics: { ...collected.diagnostics, dataStatus: collected.dataStatus, tickerCount: written.tickerCount, candleCount: written.candleCount, orderBookLevelCount: written.orderBookLevelCount, aggTradeCount: written.aggTradeCount, measurementCount: written.measurementCount } });
+    const completed = await store.completeCollectionRun(db, { runId: run.runId, completedAt: collected.collectedAt, diagnostics: { ...collected.diagnostics, ...absorbDiagnostics, dataStatus: collected.dataStatus, tickerCount: written.tickerCount, candleCount: written.candleCount, orderBookLevelCount: written.orderBookLevelCount, aggTradeCount: written.aggTradeCount, measurementCount: written.measurementCount } });
     if (!completed.ok) return completed;
-    return { ok: true, runKey, runId: run.runId, dataStatus: collected.dataStatus, futuresEnabled: options.includeFutures, futuresStatus: collected.diagnostics?.futuresStatus ?? null, futuresFailureCode: collected.diagnostics?.futuresFailureCode ?? null, futuresTickerCount: collected.diagnostics?.futuresTickerCount ?? 0, multiTimeframeCovered: collected.diagnostics?.multiTimeframeCovered ?? 0, ...written };
+    return { ok: true, runKey, runId: run.runId, dataStatus: collected.dataStatus, futuresEnabled: options.includeFutures, futuresStatus: collected.diagnostics?.futuresStatus ?? null, futuresFailureCode: collected.diagnostics?.futuresFailureCode ?? null, futuresTickerCount: collected.diagnostics?.futuresTickerCount ?? 0, multiTimeframeCovered: collected.diagnostics?.multiTimeframeCovered ?? 0, ...absorbDiagnostics, ...written };
   }, { getDbImpl: deps.getDbImpl });
   if (!tx?.ok) { console.warn('[MARKET_CONTEXT] cycle_failed', { reason: tx?.reason || 'DB_UNAVAILABLE', runKey }); return outcome(503, { ok: false, reason: tx?.reason || 'DB_UNAVAILABLE', runKey }); }
-  const body = tx.skipped ? { ok: true, skipped: true, reason: tx.reason, runKey } : { ok: true, skipped: false, runKey: tx.runKey, runId: tx.runId, dataStatus: tx.dataStatus, futuresEnabled: tx.futuresEnabled, futuresStatus: tx.futuresStatus, futuresFailureCode: tx.futuresFailureCode, futuresTickerCount: tx.futuresTickerCount, multiTimeframeCovered: tx.multiTimeframeCovered, tickerCount: tx.tickerCount, candleCount: tx.candleCount, orderBookLevelCount: tx.orderBookLevelCount, aggTradeCount: tx.aggTradeCount, measurementCount: tx.measurementCount };
-  if (!tx.skipped) console.info('[MARKET_CONTEXT] cycle_completed', { runKey: body.runKey, runId: body.runId, dataStatus: body.dataStatus, futuresEnabled: body.futuresEnabled, futuresStatus: body.futuresStatus, futuresFailureCode: body.futuresFailureCode, futuresTickerCount: body.futuresTickerCount, multiTimeframeCovered: body.multiTimeframeCovered, tickerCount: body.tickerCount, candleCount: body.candleCount, orderBookLevelCount: body.orderBookLevelCount, aggTradeCount: body.aggTradeCount, measurementCount: body.measurementCount });
+  const body = tx.skipped ? { ok: true, skipped: true, reason: tx.reason, runKey } : { ok: true, skipped: false, runKey: tx.runKey, runId: tx.runId, dataStatus: tx.dataStatus, futuresEnabled: tx.futuresEnabled, futuresStatus: tx.futuresStatus, futuresFailureCode: tx.futuresFailureCode, futuresTickerCount: tx.futuresTickerCount, multiTimeframeCovered: tx.multiTimeframeCovered, tickerCount: tx.tickerCount, candleCount: tx.candleCount, orderBookLevelCount: tx.orderBookLevelCount, aggTradeCount: tx.aggTradeCount, measurementCount: tx.measurementCount, absorbComputed: tx.absorbComputed, absorbWithDepthBaseline: tx.absorbWithDepthBaseline, absorbWindowSec: tx.absorbWindowSec };
+  if (!tx.skipped) console.info('[MARKET_CONTEXT] cycle_completed', { runKey: body.runKey, runId: body.runId, dataStatus: body.dataStatus, futuresEnabled: body.futuresEnabled, futuresStatus: body.futuresStatus, futuresFailureCode: body.futuresFailureCode, futuresTickerCount: body.futuresTickerCount, multiTimeframeCovered: body.multiTimeframeCovered, tickerCount: body.tickerCount, candleCount: body.candleCount, orderBookLevelCount: body.orderBookLevelCount, aggTradeCount: body.aggTradeCount, measurementCount: body.measurementCount, absorbComputed: tx.absorbComputed, absorbWithDepthBaseline: tx.absorbWithDepthBaseline, absorbWindowSec: tx.absorbWindowSec });
+  // Measured symbols with no usable N-1 depth cannot yield a depth-rebuild input,
+  // so STRICT can never confirm for them. Silent low coverage would look identical
+  // to a quiet market, so the shortfall is reported.
+  if (!tx.skipped && tx.measurementCount > 0 && (tx.absorbWithDepthBaseline || 0) < tx.measurementCount) console.warn('[MARKET_CONTEXT] absorb_baseline_shortfall', { runKey: body.runKey, measured: tx.measurementCount, withBaseline: tx.absorbWithDepthBaseline || 0, windowSec: tx.absorbWindowSec });
   // A requested venue that silently returns nothing must never look like success:
   // futures enabled but not complete is surfaced as a visible warning with its code.
   if (!tx.skipped && tx.futuresEnabled === true && tx.futuresStatus !== 'complete') console.warn('[MARKET_CONTEXT] futures_unavailable', { runKey: body.runKey, futuresStatus: body.futuresStatus, futuresFailureCode: body.futuresFailureCode });
