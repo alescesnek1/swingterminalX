@@ -2141,3 +2141,13 @@ html,body{overflow-x:hidden;max-width:100vw}
 .radar-pill-off { background: rgba(136,153,170,0.15); color: #8899aa; }
 .radar-pill-data-off { background: rgba(136,153,170,0.15); color: #8899aa; }
 .radar-pill-advisory { background: rgba(168,85,247,0.15); color: #a855f7; }
+
+/* Canonical RADAR panels (task 3): Provider Status + Absorb Diagnostics. Fed by
+   /api/context; additive, shown only when the canonical read flag is on. */
+.radar-canonical-panels { margin-bottom: 10px; }
+.radar-provider-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 4px 12px; font-size: 11px; }
+.radar-provider-cell b { font-weight: 700; }
+.radar-absorb-funnel { font-size: 11px; opacity: 0.85; margin: 4px 0 6px; line-height: 1.5; }
+.radar-absorb-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.radar-absorb-table th, .radar-absorb-table td { text-align: left; padding: 2px 6px; border-bottom: 1px solid rgba(128,128,128,0.2); white-space: nowrap; }
+.radar-absorb-table th { opacity: 0.7; font-weight: 600; }

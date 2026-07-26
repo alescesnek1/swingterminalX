@@ -34,3 +34,24 @@ test('missing multi-timeframe fields are left absent (UNKNOWN), never fabricated
 test('canonical RADAR + provider status are exposed for the RADAR/Absorb panels', () => {
   assert.match(terminalJs, /window\.__canonicalContext = \{ radar: j\.radar/);
 });
+
+const terminalCss = fs.readFileSync(new URL('../apps/edge/public/css/terminal.css', import.meta.url), 'utf8');
+
+test('Provider Status + Absorb Diagnostics panels render from canonical radar', () => {
+  assert.match(terminalJs, /function _renderProviderStatusPanel\(/);
+  assert.match(terminalJs, /function _renderAbsorbDiagnosticsPanel\(/);
+  assert.match(terminalJs, /Provider Status/);
+  assert.match(terminalJs, /Absorb Diagnostics/);
+  assert.match(terminalJs, /MICROSTRUCTURE_PROVIDER/);
+  assert.match(terminalJs, /STRICT_ABSORB_STATUS/);
+  assert.match(terminalCss, /\.radar-absorb-table/);
+  assert.match(terminalCss, /\.radar-provider-grid/);
+});
+
+test('RADAR panel prefers a READY canonical radar and falls back to Fleet', () => {
+  const body = terminalJs.slice(terminalJs.indexOf('function renderTradingRadarPanel()'));
+  assert.match(body, /_canonicalContextEnabled\(\)/);
+  assert.match(body, /status \|\| ''\)\.toUpperCase\(\) === 'READY'/);
+  assert.match(body, /fell back to Fleet/);
+  assert.match(body, /_renderCanonicalRadarPanels/);
+});

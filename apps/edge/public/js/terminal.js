@@ -10035,11 +10035,78 @@ window._radarSelect = function(sym) {
   }
 };
 
+// ── Canonical RADAR panels (task 3) ─────────────────────────────────────────
+// Additive display fed by window.__canonicalContext.radar (from /api/context).
+// Provider Status makes the data source honest (ONLINE/STALE/OFFLINE, absorb
+// mode, feeds, coverage); Absorb Diagnostics surfaces STRICT/PROXY status+score
+// per candidate and the funnel. Shown only when the canonical read flag is on.
+function _radarStatusClass(v) {
+  const s = String(v || '').toUpperCase();
+  if (s === 'ONLINE' || s === 'OK' || s === 'STRICT' || s === 'ABSORB_CONFIRMED') return 'radar-score--good';
+  if (s === 'STALE' || s === 'DEGRADED' || s === 'PROXY' || s === 'ABSORB_WATCH' || s === 'ABSORB_PARTIAL_EVIDENCE') return 'radar-score--warn';
+  if (s === 'OFFLINE' || s === 'MISSING' || s === 'DISABLED' || s === 'UNTRUSTED' || s === 'ABSORB_DATA_UNAVAILABLE' || s === 'ABSORB_DATA_STALE' || s === 'ABSORB_PROVIDER_UNTRUSTED') return 'radar-score--bad';
+  return '';
+}
+function _renderProviderStatusPanel(radar, esc) {
+  const p = (radar && radar.providerStatus) || {};
+  const v = (x) => (x === null || x === undefined || x === '') ? '—' : esc(String(x));
+  const cell = (label, key) => `<div class="radar-provider-cell">${esc(label)}: <b class="${_radarStatusClass(p[key])}">${v(p[key])}</b></div>`;
+  return `<details class="radar-diagnostics radar-provider" open><summary>Provider Status</summary><div class="radar-provider-grid">`
+    + cell('Microstructure', 'MICROSTRUCTURE_PROVIDER') + cell('Absorb mode', 'ABSORB_MODE')
+    + cell('Order book', 'ORDER_BOOK_FEED') + cell('Trades', 'TRADES_FEED')
+    + cell('OI', 'OI_FEED') + cell('Funding', 'FUNDING_FEED')
+    + `<div class="radar-provider-cell">Coverage: <b>${v(p.COVERAGE_SYMBOLS)}</b></div>`
+    + `<div class="radar-provider-cell">Window: <b>${v(p.WINDOW_SEC)}</b>s</div>`
+    + `<div class="radar-provider-cell">Last update: <b>${v(p.LAST_UPDATE)}</b></div>`
+    + `<div class="radar-provider-cell">Latency: <b>${v(p.DATA_LATENCY_MS)}</b>ms</div>`
+    + `</div></details>`;
+}
+function _renderAbsorbDiagnosticsPanel(radar, esc) {
+  const cands = Array.isArray(radar && radar.candidates) ? radar.candidates : [];
+  const funnel = (radar && radar.absorbFunnel) || {};
+  const g = (c, col, key) => c[col] ?? (c.payload && c.payload[key]);
+  const rows = cands.slice(0, 25).map((c) => {
+    const sym = esc(String(c.symbol || (c.payload && c.payload.symbol) || '—'));
+    const mode = esc(String(g(c, 'absorb_mode', 'ABSORB_MODE') || '—'));
+    const sSt = String(g(c, 'strict_absorb_status', 'STRICT_ABSORB_STATUS') || '—');
+    const sSc = g(c, 'strict_absorb_score', 'STRICT_ABSORB_SCORE');
+    const pSt = String(g(c, 'proxy_absorb_status', 'PROXY_ABSORB_STATUS') || '—');
+    const pSc = g(c, 'proxy_absorb_score', 'PROXY_ABSORB_SCORE');
+    return `<tr><td>${sym}</td><td>${mode}</td>`
+      + `<td class="${_radarStatusClass(sSt)}">${esc(sSt)}${sSc == null ? '' : ' (' + esc(String(sSc)) + ')'}</td>`
+      + `<td class="${_radarStatusClass(pSt)}">${esc(pSt)}${pSc == null ? '' : ' (' + esc(String(pSc)) + ')'}</td></tr>`;
+  }).join('');
+  const fk = Object.keys(funnel);
+  const funnelHtml = fk.length ? fk.map((k) => `${esc(k)}: <b>${esc(String(funnel[k]))}</b>`).join(' · ') : 'no funnel data';
+  return `<details class="radar-diagnostics radar-absorb" open><summary>Absorb Diagnostics</summary>`
+    + `<div class="radar-absorb-funnel">${funnelHtml}</div>`
+    + `<table class="radar-absorb-table"><thead><tr><th>Symbol</th><th>Mode</th><th>STRICT</th><th>PROXY</th></tr></thead>`
+    + `<tbody>${rows || '<tr><td colspan="4">no candidates</td></tr>'}</tbody></table></details>`;
+}
+function _renderCanonicalRadarPanels(radar, esc) {
+  return `<div class="radar-canonical-panels">${_renderProviderStatusPanel(radar, esc)}${_renderAbsorbDiagnosticsPanel(radar, esc)}</div>`;
+}
+
 function renderTradingRadarPanel() {
   const root = document.getElementById('trading-radar-root');
   if (!root) return;
-  const radar = Fleet && Fleet.data ? Fleet.data.tradingRadar : null;
-  root.innerHTML = _renderTradingRadar(radar, _esc);
+  // Canonical read cutover: when enabled and a READY canonical RADAR exists, the
+  // panel renders from it (candidates carry the full evaluator payload); any shape
+  // problem falls back to the legacy Fleet render so the panel never goes blank.
+  const canonicalRadar = _canonicalContextEnabled() && window.__canonicalContext ? window.__canonicalContext.radar : null;
+  const fleetRadar = Fleet && Fleet.data ? Fleet.data.tradingRadar : null;
+  let radar = fleetRadar;
+  let mainHtml;
+  if (canonicalRadar && String(canonicalRadar.status || '').toUpperCase() === 'READY') {
+    try {
+      const mapped = { ...canonicalRadar, candidates: (canonicalRadar.candidates || []).map((c) => (c && c.payload) ? c.payload : c) };
+      radar = mapped;
+      mainHtml = _renderTradingRadar(mapped, _esc);
+    } catch (e) { console.warn('[CANONICAL] radar render fell back to Fleet:', e && e.message); radar = fleetRadar; mainHtml = _renderTradingRadar(fleetRadar, _esc); }
+  } else {
+    mainHtml = _renderTradingRadar(fleetRadar, _esc);
+  }
+  root.innerHTML = (canonicalRadar ? _renderCanonicalRadarPanels(canonicalRadar, _esc) : '') + mainHtml;
   // Hardened toggle-state persistence: replaced inline ontoggle="...symbol..." handlers
   // (XSS sink — raw symbol in inline JS string) with safe data-* attributes + delegated
   // event listeners. The symbol is read from element.dataset, never interpolated into JS.
