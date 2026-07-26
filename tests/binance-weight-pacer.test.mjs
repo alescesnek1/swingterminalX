@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createWeightPacer, SYMBOL_REQUEST_WEIGHT, DEFAULT_WEIGHT_BUDGET_PER_MIN } from '../netlify/functions/_binance-market-context-source.mjs';
+import { createWeightPacer, SYMBOL_REQUEST_WEIGHT, DEFAULT_WEIGHT_BUDGET_PER_MIN, venueRequestWeight, venueWeightBudget } from '../netlify/functions/_binance-market-context-source.mjs';
 
 // Virtual clock: the pacer must be provably correct without sleeping for real.
 function fakeClock(startMs = 1_000_000) {
@@ -53,4 +53,22 @@ test('the documented per-symbol weight and default budget leave real headroom', 
   // because the ticker and multi-timeframe calls share the same allowance.
   assert.ok(DEFAULT_WEIGHT_BUDGET_PER_MIN < 6000);
   assert.ok(DEFAULT_WEIGHT_BUDGET_PER_MIN >= 1800, 'but not so low that a cycle cannot finish');
+});
+
+// Regression: a single spot-shaped weight/budget pair was applied to BOTH venues.
+// The pacer then reported ample headroom (pacingWaitedMs 0) while Binance
+// rate-limited 111 futures symbols in the very same cycle, because USD-M Futures
+// has a far smaller per-minute allowance and a much dearer aggTrades endpoint.
+test('futures is paced far more tightly than spot', () => {
+  assert.ok(venueRequestWeight('futures') > venueRequestWeight('spot'), 'a futures symbol costs more');
+  assert.ok(venueWeightBudget('futures') < venueWeightBudget('spot'), 'and has a smaller allowance');
+  // The combination is what matters: symbols admitted per minute must be lower.
+  const spotPerMin = venueWeightBudget('spot') / venueRequestWeight('spot');
+  const futuresPerMin = venueWeightBudget('futures') / venueRequestWeight('futures');
+  assert.ok(futuresPerMin < spotPerMin / 2, 'futures sustains well under half the spot symbol rate');
+});
+
+test('an unknown venue falls back to the conservative spot profile', () => {
+  assert.equal(venueRequestWeight('nonsense'), venueRequestWeight('spot'));
+  assert.equal(venueWeightBudget(undefined), venueWeightBudget('spot'));
 });

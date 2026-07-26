@@ -147,8 +147,22 @@ async function mapBounded(items, limit, callback) {
 // Weights used here: klines(limit<=100)=2, depth(limit=100)=5, aggTrades=2 → 9
 // per measured symbol. The budget below leaves headroom for the ticker and
 // multi-timeframe calls that share the same allowance.
-export const SYMBOL_REQUEST_WEIGHT = 9;
-export const DEFAULT_WEIGHT_BUDGET_PER_MIN = 3600;
+// Weight and allowance are PER VENUE and differ a lot. Spot publishes ~6000/min
+// per IP; USD-M Futures publishes a much tighter one, and its aggTrades endpoint
+// costs several times the spot equivalent. Treating both as "9 weight against
+// 6000" is what made the first paced run useless: the pacer reported
+// pacingWaitedMs 0 — believing it had ample headroom — while Binance rate-limited
+// 111 futures symbols in the same cycle.
+//
+// These are deliberately CONSERVATIVE: calibrated to stay clear of the observed
+// 429s rather than to squeeze the documented maximum, because the penalty for
+// overrunning is an IP ban that stops all collection, not a single failed symbol.
+export const VENUE_REQUEST_WEIGHTS = Object.freeze({ spot: 9, futures: 27 });
+export const VENUE_WEIGHT_BUDGETS_PER_MIN = Object.freeze({ spot: 3600, futures: 1500 });
+export const SYMBOL_REQUEST_WEIGHT = VENUE_REQUEST_WEIGHTS.spot;
+export const DEFAULT_WEIGHT_BUDGET_PER_MIN = VENUE_WEIGHT_BUDGETS_PER_MIN.spot;
+export function venueRequestWeight(market) { return VENUE_REQUEST_WEIGHTS[market] ?? VENUE_REQUEST_WEIGHTS.spot; }
+export function venueWeightBudget(market) { return VENUE_WEIGHT_BUDGETS_PER_MIN[market] ?? VENUE_WEIGHT_BUDGETS_PER_MIN.spot; }
 const WEIGHT_WINDOW_MS = 60_000;
 
 // Rolling-window pacer: admits work only while the last 60s of spent weight stays
@@ -189,7 +203,7 @@ async function collectVenue(market, { fetchImpl, microstructureTopN, concurrency
   if (!rankable.length) console.warn('[MARKET_CONTEXT] microstructure_universe_empty', { market, tickerCount: tickers.length, quotes: RANKABLE_QUOTE_ASSETS });
   const candidates = rankable.slice(0, boundedTopN(microstructureTopN));
   const microstructures = await mapBounded(candidates, boundedConcurrency(concurrency), async (ticker) => {
-    if (pacer) await pacer.take(SYMBOL_REQUEST_WEIGHT);
+    if (pacer) await pacer.take(venueRequestWeight(market));
     return collectMicrostructurePair(market, ticker, fetchImpl);
   });
   return { tickers, microstructures, pacing: pacer ? pacer.diagnostics : null };
@@ -229,13 +243,17 @@ export async function collectBinanceMarketContext(options = {}) {
   const concurrency = boundedConcurrency(options.microstructureConcurrency);
   // One pacer per venue: spot and futures are separate services with separate
   // per-IP weight allowances, so spending on one must not throttle the other.
-  const makePacer = () => (options.weightBudgetPerMin === 0 ? null : createWeightPacer(options.weightBudgetPerMin));
+  const makePacer = (market) => (options.weightBudgetPerMin === 0 ? null : createWeightPacer(options.weightBudgetPerMin ?? venueWeightBudget(market)));
   let spot;
-  try { spot = await collectVenue('spot', { fetchImpl, microstructureTopN: topN, concurrency, pacer: makePacer() }); }
+  try { spot = await collectVenue('spot', { fetchImpl, microstructureTopN: topN, concurrency, pacer: makePacer('spot') }); }
   catch (error) { return { ok: false, reason: failureCode(error), dataStatus: 'unavailable' }; }
   let futures = { tickers: [], microstructures: [], status: 'unsupported', failureCode: null };
   if (options.includeFutures === true) {
-    try { const collected = await collectVenue('futures', { fetchImpl, microstructureTopN: topN, concurrency, pacer: makePacer() }); futures = { ...collected, status: 'complete', failureCode: null }; }
+    // Futures carries its own, much smaller topN: its per-minute allowance is a
+    // fraction of spot's, so the same symbol count that spot absorbs comfortably
+    // gets the futures venue rate-limited outright.
+    const futuresTopN = Number.isFinite(Number(options.futuresMicrostructureTopN)) && Number(options.futuresMicrostructureTopN) > 0 ? boundedTopN(options.futuresMicrostructureTopN) : topN;
+    try { const collected = await collectVenue('futures', { fetchImpl, microstructureTopN: futuresTopN, concurrency, pacer: makePacer('futures') }); futures = { ...collected, status: 'complete', failureCode: null }; }
     catch (error) { futures = { tickers: [], microstructures: [], status: 'unavailable', failureCode: failureCode(error) }; }
   }
   const microstructures = [...spot.microstructures, ...futures.microstructures];

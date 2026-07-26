@@ -8,6 +8,7 @@ export const MARKET_CONTEXT_MULTI_TF_TOP_N_ENV_FLAG = 'MARKET_CONTEXT_MULTI_TF_T
 export const MARKET_CONTEXT_CONCURRENCY_ENV_FLAG = 'MARKET_CONTEXT_MICROSTRUCTURE_CONCURRENCY';
 export const MARKET_CONTEXT_RAW_SAMPLE_ENV_FLAG = 'MARKET_CONTEXT_RAW_SAMPLE_TOP_N';
 export const MARKET_CONTEXT_WEIGHT_BUDGET_ENV_FLAG = 'MARKET_CONTEXT_WEIGHT_BUDGET_PER_MIN';
+export const MARKET_CONTEXT_FUTURES_TOP_N_ENV_FLAG = 'MARKET_CONTEXT_FUTURES_MICROSTRUCTURE_TOP_N';
 
 async function loadStore() { return await import('./_market-context-store.mjs'); }
 async function loadSource() { return await import('./_binance-market-context-source.mjs'); }
@@ -27,7 +28,7 @@ export async function runMarketContextCollector(deps = {}) {
   const observedAt = typeof deps.now === 'function' ? new Date(deps.now()) : new Date();
   const runKey = store.makeRunKey ? store.makeRunKey(observedAt) : makeRunKey(observedAt);
   const multiTfTopN = Number(env[MARKET_CONTEXT_MULTI_TF_TOP_N_ENV_FLAG]);
-  const options = { includeFutures: env[MARKET_CONTEXT_FUTURES_ENV_FLAG] === 'true', microstructureTopN: topN(env[MARKET_CONTEXT_TOP_N_ENV_FLAG]), includeMultiTimeframe: env[MARKET_CONTEXT_MULTI_TF_ENV_FLAG] === 'true', multiTimeframeTopN: Number.isFinite(multiTfTopN) && multiTfTopN > 0 ? multiTfTopN : undefined, microstructureConcurrency: Number(env[MARKET_CONTEXT_CONCURRENCY_ENV_FLAG]) || undefined, weightBudgetPerMin: Number.isFinite(Number(env[MARKET_CONTEXT_WEIGHT_BUDGET_ENV_FLAG])) ? Number(env[MARKET_CONTEXT_WEIGHT_BUDGET_ENV_FLAG]) : undefined, fetchImpl: deps.fetchImpl };
+  const options = { includeFutures: env[MARKET_CONTEXT_FUTURES_ENV_FLAG] === 'true', microstructureTopN: topN(env[MARKET_CONTEXT_TOP_N_ENV_FLAG]), includeMultiTimeframe: env[MARKET_CONTEXT_MULTI_TF_ENV_FLAG] === 'true', multiTimeframeTopN: Number.isFinite(multiTfTopN) && multiTfTopN > 0 ? multiTfTopN : undefined, microstructureConcurrency: Number(env[MARKET_CONTEXT_CONCURRENCY_ENV_FLAG]) || undefined, weightBudgetPerMin: Number.isFinite(Number(env[MARKET_CONTEXT_WEIGHT_BUDGET_ENV_FLAG])) ? Number(env[MARKET_CONTEXT_WEIGHT_BUDGET_ENV_FLAG]) : undefined, futuresMicrostructureTopN: Number(env[MARKET_CONTEXT_FUTURES_TOP_N_ENV_FLAG]) || undefined, fetchImpl: deps.fetchImpl };
   const rawSampleTopN = Number(env[MARKET_CONTEXT_RAW_SAMPLE_ENV_FLAG]);
   const transaction = deps.withTransaction || store.withContextTransaction || withContextTransaction;
   const tx = await transaction(async (db) => {
