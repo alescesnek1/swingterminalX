@@ -13,9 +13,12 @@ function fakeFetch(perWindow, seen) {
     return { ok: true, json: async () => symbols.map((s) => ({ symbol: s, priceChangePercent: String(pct) })) };
   };
 }
+// quoteAsset is required: the top-N ranking only compares symbols quoted in a
+// USD stablecoin, so a fiat pair's exchange-rate-inflated quoteVolume cannot
+// outrank a major. See rankByQuoteVolume in _binance-market-context-source.mjs.
 const tickers = [
-  { symbol: 'AUSDT', quoteVolume: 100 }, { symbol: 'BUSDT', quoteVolume: 90 }, { symbol: 'CUSDT', quoteVolume: 80 },
-  { symbol: 'DUSDT', quoteVolume: 10 }, { symbol: 'EUSDT', quoteVolume: 5 },
+  { symbol: 'AUSDT', quoteAsset: 'USDT', quoteVolume: 100 }, { symbol: 'BUSDT', quoteAsset: 'USDT', quoteVolume: 90 }, { symbol: 'CUSDT', quoteAsset: 'USDT', quoteVolume: 80 },
+  { symbol: 'DUSDT', quoteAsset: 'USDT', quoteVolume: 10 }, { symbol: 'EUSDT', quoteAsset: 'USDT', quoteVolume: 5 },
 ];
 
 test('multi-timeframe is bounded to top-N by volume; the long tail stays UNKNOWN', async () => {

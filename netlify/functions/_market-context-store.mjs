@@ -164,7 +164,11 @@ export async function getRadarInputBundle(db, options = {}) {
     const windowSec = prev ? Math.round((new Date(latest.observed_at).getTime() - new Date(prev.observed_at).getTime()) / 1000) : null;
     const [tickRes, measRes] = await Promise.all([
       db.query(`SELECT market,symbol,last_price,price_change_percent,high_price,low_price,base_volume,quote_volume,trade_count,change_1h_pct,change_4h_pct,change_12h_pct,change_7d_pct,observed_at,data_status FROM market_ticker_observations WHERE run_id=$1 ORDER BY quote_volume DESC NULLS LAST LIMIT $2`, [latest.id, tickerLimit]),
-      db.query(`SELECT market,symbol,observed_at,window_start,window_end,data_status,spread_bps,bid_quote_depth,ask_quote_depth,taker_buy_quote,taker_sell_quote,best_bid,best_ask,agg_trade_count FROM market_microstructure_measurements WHERE run_id=$1 ORDER BY (COALESCE(taker_buy_quote,0)+COALESCE(taker_sell_quote,0)) DESC LIMIT $2`, [latest.id, topN]),
+      // One row per SYMBOL, deepest venue first. The rolling snapshot the RADAR
+      // consumes is keyed by symbol alone, so returning both venues of one symbol
+      // would spend two of the topN slots on a single measured symbol and silently
+      // drop one of them at merge time. DISTINCT ON keeps the busier venue.
+      db.query(`SELECT * FROM (SELECT DISTINCT ON (symbol) market,symbol,observed_at,window_start,window_end,data_status,spread_bps,bid_quote_depth,ask_quote_depth,taker_buy_quote,taker_sell_quote,best_bid,best_ask,agg_trade_count, (COALESCE(taker_buy_quote,0)+COALESCE(taker_sell_quote,0)) AS taker_total FROM market_microstructure_measurements WHERE run_id=$1 ORDER BY symbol, taker_total DESC) m ORDER BY m.taker_total DESC LIMIT $2`, [latest.id, topN]),
     ]);
     let prevDepth = new Map();
     if (prev) { const prevRes = await db.query(`SELECT market,symbol,bid_quote_depth FROM market_microstructure_measurements WHERE run_id=$1`, [prev.id]); prevDepth = new Map(prevRes.rows.map((r) => [`${r.market}:${r.symbol}`, num(r.bid_quote_depth)])); }

@@ -23,6 +23,19 @@ const VENUES = {
 };
 const ALLOWED_PATHS = new Set(Object.values(VENUES).flatMap((venue) => [venue.exchangeInfo, venue.ticker, venue.rollingTicker, venue.klines, venue.depth, venue.trades]).filter(Boolean));
 
+// Both bounded budgets below (microstructure depth/trades, multi-timeframe change)
+// rank by 24h `quoteVolume` — a figure denominated in the QUOTE asset. Comparing
+// that raw number across mixed quotes ranks by exchange rate, not by liquidity:
+// an IDR pair (~16k IDR/USD) or a TRY pair (~40 TRY/USD) outranks every major
+// purely through its denominator. Those pairs are also outside the RADAR universe
+// (scripts/radar/trading-radar.mjs QUOTES), so measuring them spends the whole
+// budget on symbols RADAR can never score. Rank only the USD-stable quotes.
+export const RANKABLE_QUOTE_ASSETS = Object.freeze(['USDT', 'USDC']);
+export function rankByQuoteVolume(tickers) {
+  const eligible = (Array.isArray(tickers) ? tickers : []).filter((t) => RANKABLE_QUOTE_ASSETS.includes(t?.quoteAsset));
+  return eligible.sort((a, b) => (finite(b.quoteVolume) || 0) - (finite(a.quoteVolume) || 0));
+}
+
 function boundedTopN(value) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? Math.min(Math.trunc(number), MAX_MICROSTRUCTURE_TOP_N) : DEFAULT_MICROSTRUCTURE_TOP_N;
@@ -123,7 +136,9 @@ async function collectVenue(market, { fetchImpl, microstructureTopN }) {
   const [info, tickersPayload] = await Promise.all([fetchBinancePublicJson(buildBinancePublicUrl(market, 'exchangeInfo'), { fetchImpl }), fetchBinancePublicJson(buildBinancePublicUrl(market, 'ticker'), { fetchImpl })]);
   const tickers = normalizeTickers(market, tickersPayload, instrumentIndex(market, info));
   if (!tickers.length) throw new Error('BINANCE_EMPTY_TICKER_UNIVERSE');
-  const candidates = [...tickers].sort((a, b) => (finite(b.quoteVolume) || 0) - (finite(a.quoteVolume) || 0)).slice(0, boundedTopN(microstructureTopN));
+  const rankable = rankByQuoteVolume(tickers);
+  if (!rankable.length) console.warn('[MARKET_CONTEXT] microstructure_universe_empty', { market, tickerCount: tickers.length, quotes: RANKABLE_QUOTE_ASSETS });
+  const candidates = rankable.slice(0, boundedTopN(microstructureTopN));
   const microstructures = await mapBounded(candidates, MICROSTRUCTURE_CONCURRENCY, (ticker) => collectMicrostructurePair(market, ticker, fetchImpl));
   return { tickers, microstructures };
 }
@@ -138,7 +153,7 @@ async function fetchRollingWindow(market, symbols, windowSize, fetchImpl) {
   for (const batch of chunkList(symbols, MULTI_TF_BATCH)) {
     let payload;
     try { payload = await fetchBinancePublicJson(buildBinancePublicUrl(market, 'rollingTicker', { symbols: JSON.stringify(batch), windowSize }), { fetchImpl }); }
-    catch { continue; }
+    catch (error) { console.warn('[MARKET_CONTEXT] multi_timeframe_batch_failed', { market, windowSize, symbolCount: batch.length, reason: failureCode(error) }); continue; }
     for (const row of Array.isArray(payload) ? payload : []) { const pct = finite(row?.priceChangePercent); if (row?.symbol && pct !== null) map.set(row.symbol, pct); }
   }
   return map;
@@ -148,7 +163,7 @@ async function fetchRollingWindow(market, symbols, windowSize, fetchImpl) {
 // volume. Windows are fetched sequentially to stay well inside the weight budget.
 export async function collectMultiTimeframe(market, tickers, { fetchImpl = fetch, topN = DEFAULT_MULTI_TF_TOP_N } = {}) {
   const bounded = Math.min(Math.max(Math.trunc(Number(topN) || DEFAULT_MULTI_TF_TOP_N), 1), MAX_MULTI_TF_TOP_N);
-  const symbols = [...tickers].sort((a, b) => (finite(b.quoteVolume) || 0) - (finite(a.quoteVolume) || 0)).slice(0, bounded).map((t) => t.symbol);
+  const symbols = rankByQuoteVolume(tickers).slice(0, bounded).map((t) => t.symbol);
   const byWindow = {};
   for (const window of MULTI_TF_WINDOWS) byWindow[window.key] = await fetchRollingWindow(market, symbols, window.windowSize, fetchImpl);
   const result = new Map();
