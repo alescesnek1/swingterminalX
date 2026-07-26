@@ -13,6 +13,78 @@
 > `/reply` or `/admin_summary` support system** here. If you find yourself
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
+> _Universe scale-out + alert path (2026-07-26 evening, branch
+> `integrate/canonical-context`):_ Goal restated by the owner: an atomized DB
+> with indexes, RADAR evaluating the WHOLE universe, and any coin meeting the
+> conditions becoming ENTRY_READY and firing a Telegram alert — not just BTC/ETH.
+>
+> **Why a small universe made the goal unreachable:** EXECUTION_SCORE is 25%
+> order-book support + 25% flow confirmation, so a coin with no measured
+> microstructure can never reach 65 and therefore never becomes ENTRY_READY.
+> Measuring five symbols made the entry/Telegram branch structurally dead for
+> every other pair.
+>
+> **What was rebuilt.** Absorption is computed at COLLECTION time (raw trades and
+> candles are already in memory) and stored as one derived `absorb` JSONB per
+> measurement. The publisher previously rebuilt it by reading raw trades and
+> candles back PER SYMBOL — two round trips each, i.e. 1000 for a 500-symbol
+> universe. Candles for all measured symbols now come from one windowed query.
+> Raw trades/book levels are kept only for a top-N audit sample
+> (`MARKET_CONTEXT_RAW_SAMPLE_TOP_N`, default 10); every measured symbol still
+> stores its derived row. The collector runs as a Netlify BACKGROUND function
+> (~15 min vs the 30s scheduled ceiling) behind
+> `MARKET_CONTEXT_BACKGROUND_ENABLED`; the scheduled function only dispatches to
+> it with the worker token (constant-time compare, fail-closed, never logged).
+>
+> **Binance weight is the real ceiling, not time.** 9 weight per measured symbol
+> (klines 2 + depth 5 + aggTrades 2) against 6000/min per IP. Concurrency bounds
+> parallelism, not rate, so a rolling-window pacer per venue
+> (`MARKET_CONTEXT_WEIGHT_BUDGET_PER_MIN`) now admits work only while the last
+> 60s stays under budget. The first 400-symbol cycle returned
+> `dataStatus: 'partial'` — the ceiling is empirical, not theoretical.
+>
+> **Measured results:** 50/venue → `STRICT_READY 47/50`, `absorbMode STRICT`,
+> full cycle 23.8s. Depth baselines self-heal in one cycle (a run only has N-1
+> depth for symbols the PREVIOUS run measured), and the shortfall is logged.
+>
+> **Two further defects found and fixed:**
+> - `validateRollingTrades` treated OUT-OF-WINDOW trades as corruption. An
+>   exchange returns the last N trades where N is a COUNT, so on a quieter symbol
+>   that tail predates the window as a matter of course. Both
+>   `computeRollingAbsorption` and `tradesValidated` voided the whole measurement
+>   over it (live: 4 of 5 symbols rejected). `malformed` is now separate from
+>   `outOfWindow`; malformed still voids the sample.
+> - `cron-alerts` resolved to a plain object, which Netlify v2 rejects AFTER the
+>   cycle has run — and then RETRIES. Three invocations in five seconds were
+>   observed for one tick; harmless only because Telegram is hard-disabled, but
+>   with sending on those are duplicate-alert attempts.
+>
+> **Alert path now reads canonical** behind `RADAR_ALERTS_CANONICAL_SOURCE`
+> (default OFF). It previously decided from `fleet.tradingRadar`, written by a
+> BROWSER session against `/api/markets` — so alerts depended on someone having
+> the terminal open, and ran on different data than the canonical RADAR. Enabled
+> means authoritative: if the canonical read fails, NOTHING is sent (fail-closed)
+> rather than falling back to a snapshot canonical never agreed with. Its
+> freshness bound is `CANONICAL_RADAR_STALE_MS` = 2 collector cycles; the 120s
+> browser-feed threshold would mark a 3-minute publish stale exactly when fresh.
+> Every other entry gate is untouched and applies identically.
+>
+> **Scanner showed only "DEX" coins** for two independent reasons, both fixed:
+> `_mapCanonicalTicker` put the PAIR in `symbol`, but `isOnBinance()` falls back
+> to looking up `symbol + 'USDT'` → "BTCUSDTUSDT" matched nothing, so every
+> canonical row including Bitcoin rendered as off-Binance with no order book.
+> And the READ path still ordered by raw `quote_volume` across mixed quotes, so
+> IDR/TRY pairs filled the list. Rows now carry base asset + pair +
+> `binance_available`; the read joins `market_instruments` and restricts to
+> USD-stable quotes. Ticker limit raised to 1000.
+>
+> **Still OFF / open:** `RADAR_ALERTS_CANONICAL_SOURCE`, `RADAR_TELEGRAM_ENABLED`,
+> universe still stepping up (50 → 200 → target full set), branch not merged to
+> `main`. Known gap: `withRollingMicrostructureSnapshot` looks rolling rows up by
+> SYMBOL with no venue check, so a spot candidate can receive futures
+> microstructure — fixing it means re-keying the absorb pipeline on
+> `market:symbol`.
+>
 > _Canonical-context absorb coverage fixes (2026-07-26, deployed, branch
 > `integrate/canonical-context`):_ STRICT absorb was confirming for almost no
 > symbol. Two independent root causes, both found by first making the failure
