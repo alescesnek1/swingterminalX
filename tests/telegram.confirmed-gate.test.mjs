@@ -17,7 +17,7 @@ import {
   selectRadarEntryAlerts,
   sendRadarEntryReadyTelegram,
   setupHash,
-  default as cronAlertsHandler,
+  runRadarTelegramAlertCycle as cronAlertsHandler,
 } from '../netlify/functions/cron-alerts.mjs';
 import legacyTelegram from '../netlify/functions/telegram.mjs';
 import { mutateFleet } from '../netlify/functions/_fleet-store.mjs';
