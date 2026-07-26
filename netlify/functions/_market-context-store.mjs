@@ -226,6 +226,28 @@ export async function getPublishedRadar(db) {
   } catch (error) { dbError('radar_read_failed', error); return { ok: false, reason: 'DB_UNAVAILABLE' }; }
 }
 
+// Retention: deletes heavy atomic rows older than the cutoffs. It prunes CHILD
+// rows only (never instruments, never run audit metadata) and always protects the
+// latest published run so consumers can never lose the current context. Idempotent
+// and safe to re-run; the caller decides the cutoffs and whether it runs at all.
+export async function pruneCanonicalContext(db, options = {}) {
+  const marketCutoff = asDate(options.marketCutoff, new Date(0));
+  const radarCutoff = asDate(options.radarCutoff, new Date(0));
+  try {
+    const latest = await db.query(`SELECT id FROM market_collection_runs WHERE scope_id=$1 AND status='published' ORDER BY observed_at DESC LIMIT 1`, [CONTEXT_SCOPE_ID]);
+    const protectId = latest.rows[0]?.id ?? -1;
+    const del = async (sql, params) => (await db.query(sql, params)).rowCount || 0;
+    const tickers = await del(`DELETE FROM market_ticker_observations WHERE observed_at < $1 AND run_id <> $2`, [marketCutoff, protectId]);
+    const candles = await del(`DELETE FROM market_candles_1m WHERE open_time < $1 AND run_id <> $2`, [marketCutoff, protectId]);
+    const levels = await del(`DELETE FROM market_order_book_levels WHERE observed_at < $1 AND run_id <> $2`, [marketCutoff, protectId]);
+    const trades = await del(`DELETE FROM market_agg_trades WHERE event_time < $1 AND run_id <> $2`, [marketCutoff, protectId]);
+    const measurements = await del(`DELETE FROM market_microstructure_measurements WHERE observed_at < $1 AND run_id <> $2`, [marketCutoff, protectId]);
+    const radarCandidates = await del(`DELETE FROM radar_run_candidates c USING market_collection_runs r WHERE c.run_id = r.id AND r.observed_at < $1 AND c.run_id <> $2`, [radarCutoff, protectId]);
+    const radarSnapshots = await del(`DELETE FROM radar_run_snapshots s USING market_collection_runs r WHERE s.run_id = r.id AND r.observed_at < $1 AND s.run_id <> $2`, [radarCutoff, protectId]);
+    return { ok: true, protectedRunId: protectId, deleted: { tickers, candles, levels, trades, measurements, radarCandidates, radarSnapshots } };
+  } catch (error) { dbError('retention_prune_failed', error); return { ok: false, reason: 'DB_UNAVAILABLE' }; }
+}
+
 // 24h / 7d Absorb funnel history: aggregates the stored per-run funnels by joining
 // to each run's observed_at. Pure read; used by the diagnostics endpoint only.
 export async function getRadarFunnelHistory(db, options = {}) {
