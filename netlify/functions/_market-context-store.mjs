@@ -233,16 +233,22 @@ export async function getRadarInputBundle(db, options = {}) {
     // per-symbol query cost one round trip per symbol, which caps the universe at
     // a handful; a per-partition ROW_NUMBER returns the same rows in a single
     // trip regardless of how many symbols were measured.
-    const keys = measRes.rows.map((m) => `${m.market}:${m.symbol}`);
+    // Tuple membership, NOT a concatenated key: `market || ':' || symbol = ANY(...)`
+    // is not sargable, so it would ignore the (market,symbol,open_time) index and
+    // scan the whole candle table on every cycle — survivable for five symbols,
+    // ruinous once the universe and 48h of history are in there.
+    const markets = measRes.rows.map((m) => m.market);
+    const symbols = measRes.rows.map((m) => m.symbol);
     const klinesByKey = new Map();
-    if (keys.length) {
+    if (symbols.length) {
       const klRes = await db.query(
         `SELECT market,symbol,open_time,close_time,open_price,high_price,low_price,close_price,base_volume FROM (
            SELECT market,symbol,open_time,close_time,open_price,high_price,low_price,close_price,base_volume,
                   ROW_NUMBER() OVER (PARTITION BY market,symbol ORDER BY open_time DESC) AS rn
-             FROM market_candles_1m WHERE market || ':' || symbol = ANY($1)
-         ) c WHERE c.rn <= $2 ORDER BY market,symbol,open_time`,
-        [keys, candleLimit],
+             FROM market_candles_1m
+            WHERE (market, symbol) IN (SELECT m, s FROM unnest($1::text[], $2::text[]) AS t(m, s))
+         ) c WHERE c.rn <= $3 ORDER BY market,symbol,open_time`,
+        [markets, symbols, candleLimit],
       );
       for (const k of klRes.rows) {
         const key = `${k.market}:${k.symbol}`;
@@ -258,7 +264,7 @@ export async function getRadarInputBundle(db, options = {}) {
     const legacy = measRes.rows.filter((m) => !m.absorb);
     const tradesByKey = new Map();
     if (legacy.length) {
-      const tradeRes = await db.query(`SELECT market,symbol,event_time,price,quantity,buyer_is_maker FROM market_agg_trades WHERE run_id=$1 AND market || ':' || symbol = ANY($2) ORDER BY market,symbol,event_time`, [latest.id, legacy.map((m) => `${m.market}:${m.symbol}`)]);
+      const tradeRes = await db.query(`SELECT market,symbol,event_time,price,quantity,buyer_is_maker FROM market_agg_trades WHERE run_id=$1 AND (market, symbol) IN (SELECT m, s FROM unnest($2::text[], $3::text[]) AS t(m, s)) ORDER BY market,symbol,event_time`, [latest.id, legacy.map((m) => m.market), legacy.map((m) => m.symbol)]);
       for (const t of tradeRes.rows) {
         const key = `${t.market}:${t.symbol}`;
         if (!tradesByKey.has(key)) tradesByKey.set(key, []);

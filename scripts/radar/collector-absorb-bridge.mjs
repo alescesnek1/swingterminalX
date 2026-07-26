@@ -75,7 +75,10 @@ export function buildCollectorRollingRow(input = {}, nowMs = Date.now()) {
     },
     validation: {
       makerFlagsValid: validation.invalidMakerFlags === 0,
-      tradesValidated: validation.invalid === 0 && validation.trades.length >= MIN_TRADE_SAMPLES,
+      // Only MALFORMED trades invalidate the sample. Trades outside the window are
+      // discarded, not held against the symbol — the exchange returns a fixed
+      // COUNT of recent trades, so an out-of-window tail is normal, not corruption.
+      tradesValidated: validation.malformed === 0 && validation.trades.length >= MIN_TRADE_SAMPLES,
       tradesSorted: true,
       klinesValidated: klines.length >= MIN_KLINE_SAMPLES,
     },
