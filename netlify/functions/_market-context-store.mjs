@@ -9,6 +9,11 @@ const RUN_BUCKET_MS = 3 * 60 * 1000;
 // The widest insert here binds 20 columns, so 500 rows = 10,000 bind parameters,
 // comfortably inside PostgreSQL's 65,535 limit.
 const INSERT_CHUNK = 500;
+// Must match the collector band in scripts/radar/rolling-microstructure-snapshot.mjs
+// (validateTrustedRollingRow). Picking a depth baseline outside this band yields a
+// windowSec the STRICT validator will reject for every symbol of the run.
+const COLLECTOR_WINDOW_MIN_SEC = 120;
+const COLLECTOR_WINDOW_MAX_SEC = 900;
 const SECRET_KEY = /token|secret|authorization|cookie|password|api[_-]?key|header|bearer/i;
 const SAFE_STATUS = new Set(['complete', 'partial', 'unavailable', 'unsupported']);
 
@@ -157,11 +162,21 @@ export async function getRadarInputBundle(db, options = {}) {
   const tickerLimit = Math.min(Math.max(Number(options.tickerLimit) || 1000, 1), 2000);
   const candleLimit = Math.min(Math.max(Number(options.candleLimit) || 60, 30), 120);
   try {
-    const runsRes = await db.query(`SELECT id, observed_at FROM market_collection_runs WHERE scope_id=$1 AND status='published' ORDER BY observed_at DESC LIMIT 2`, [CONTEXT_SCOPE_ID]);
+    // The depth-rebuild baseline is the previous run, but "previous" must be far
+    // enough back to be a real window. The Netlify scheduler drifts, so two
+    // consecutive published runs can land seconds apart; taking row[1] blindly
+    // then produced a sub-120s windowSec and the STRICT validator rejected EVERY
+    // symbol of that run at once (observed: all 5 rejected 'window-invalid').
+    // Pick the newest earlier run that actually falls inside the honest collector
+    // band instead — the reported window stays the true elapsed time, never padded.
+    const runsRes = await db.query(`SELECT id, observed_at FROM market_collection_runs WHERE scope_id=$1 AND status='published' ORDER BY observed_at DESC LIMIT 12`, [CONTEXT_SCOPE_ID]);
     const latest = runsRes.rows[0];
     if (!latest) return { ok: true, run: null, windowSec: null, tickers: [], microSymbols: [] };
-    const prev = runsRes.rows[1] || null;
-    const windowSec = prev ? Math.round((new Date(latest.observed_at).getTime() - new Date(prev.observed_at).getTime()) / 1000) : null;
+    const latestMs = new Date(latest.observed_at).getTime();
+    const elapsedSec = (row) => Math.round((latestMs - new Date(row.observed_at).getTime()) / 1000);
+    const prev = runsRes.rows.slice(1).find((row) => { const sec = elapsedSec(row); return sec >= COLLECTOR_WINDOW_MIN_SEC && sec <= COLLECTOR_WINDOW_MAX_SEC; }) || null;
+    if (!prev && runsRes.rows.length > 1) console.warn('[ATOMIC_MARKET_STORE] no_baseline_run_in_window', { runId: latest.id, candidates: runsRes.rows.length - 1, nearestSec: elapsedSec(runsRes.rows[1]), band: [COLLECTOR_WINDOW_MIN_SEC, COLLECTOR_WINDOW_MAX_SEC] });
+    const windowSec = prev ? elapsedSec(prev) : null;
     const [tickRes, measRes] = await Promise.all([
       db.query(`SELECT market,symbol,last_price,price_change_percent,high_price,low_price,base_volume,quote_volume,trade_count,change_1h_pct,change_4h_pct,change_12h_pct,change_7d_pct,observed_at,data_status FROM market_ticker_observations WHERE run_id=$1 ORDER BY quote_volume DESC NULLS LAST LIMIT $2`, [latest.id, tickerLimit]),
       // One row per SYMBOL, deepest venue first. The rolling snapshot the RADAR
