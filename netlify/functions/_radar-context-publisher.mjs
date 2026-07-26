@@ -113,8 +113,18 @@ export async function runRadarContextPublisher(deps = {}) {
     if (!bundle.run) return { ok: true, skipped: true, reason: 'NO_PUBLISHED_RUN' };
     const nowMs = bundle.run.observedAt ? new Date(bundle.run.observedAt).getTime() : Date.now();
     const markets = (bundle.tickers || []).map(tickerToMarket);
-    const rollingSnapshot = bridge.buildCollectorRollingSnapshot(bundle.microSymbols || [], { nowMs, updatedAtMs: nowMs });
-    const validatedRolling = rolling.normalizeRollingMicrostructureSnapshot(rollingSnapshot, { nowMs });
+    // A run's observed_at is stamped when collection STARTS. Request pacing makes a
+    // cycle take a minute or more, so measurements taken near the end are newer
+    // than it — and the trusted-row validator, which allows only 60s of clock
+    // skew, then rejected every one of them as 'measurement-stale'. The rolling
+    // snapshot is as of the moment its data was actually complete, so validate it
+    // against the NEWEST measurement rather than the run's start.
+    const measuredAt = (bundle.microSymbols || [])
+      .map((s) => Number(s?.absorb?.rollingMeasuredAtMs ?? s?.observedAtMs))
+      .filter((v) => Number.isFinite(v));
+    const rollingNowMs = measuredAt.length ? Math.max(nowMs, ...measuredAt) : nowMs;
+    const rollingSnapshot = bridge.buildCollectorRollingSnapshot(bundle.microSymbols || [], { nowMs: rollingNowMs, updatedAtMs: rollingNowMs });
+    const validatedRolling = rolling.normalizeRollingMicrostructureSnapshot(rollingSnapshot, { nowMs: rollingNowMs });
     const klinesSnapshot = buildKlinesSnapshot(bundle.microSymbols || [], nowMs);
     const result = radar.evaluateTradingRadar({ markets, source: 'canonical_context', fetchedAt: bundle.run.observedAt, now: nowMs, rollingMicrostructureSnapshot: rollingSnapshot, klinesSnapshot });
     const candidates = Array.isArray(result.candidates) ? result.candidates : [];

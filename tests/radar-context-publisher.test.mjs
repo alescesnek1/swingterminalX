@@ -110,3 +110,21 @@ test('two venues of one symbol are reported as a collapse, not silently lost', a
   assert.equal(coverage.DISTINCT_SYMBOLS, 1);
   assert.equal(coverage.COLLAPSED_DUPLICATES, 1);
 });
+
+// Regression: a run's observed_at is stamped when collection STARTS, but request
+// pacing makes a cycle take a minute or more. Measurements taken near the end are
+// then newer than it, and the trusted-row validator — which tolerates only 60s of
+// clock skew — rejected EVERY symbol as 'measurement-stale'. Live: trustedMicro 0
+// with every symbol reporting that reason.
+test('a long collection cycle does not make its own measurements look stale', async () => {
+  const capture = {};
+  const bundle = fullBundle();
+  const lateMs = NOW + 95_000; // measured 95s after the run started
+  bundle.microSymbols[0].observedAtMs = lateMs;
+  bundle.microSymbols[0].windowSec = 360;
+  const res = await runRadarContextPublisher({ env: { MARKET_CONTEXT_RADAR_ENABLED: 'true' }, store: fakeStore(capture), withTransaction: async (cb) => cb({}), radar, bridge, rolling, bundle });
+  assert.equal(res.body.ok, true);
+  const coverage = capture.payload.providerStatus.ABSORB_COVERAGE;
+  assert.equal(coverage.SYMBOL_STATUS.BTCUSDT, 'READY', 'the late measurement is still trusted');
+  assert.equal(capture.payload.providerStatus.ABSORB_MODE, 'STRICT');
+});
