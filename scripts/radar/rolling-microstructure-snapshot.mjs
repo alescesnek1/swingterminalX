@@ -115,7 +115,19 @@ export function normalizeRollingMicrostructureSnapshot(input, opts = {}) {
   const stale = !Number.isFinite(updatedAtMs) || updatedAtMs > nowMs + 60_000 || nowMs - updatedAtMs > ttlMs;
   const suppliedTrusted = boolValue(input?.trusted) === true;
   const foundationRows = Object.values(data).filter((row) => foundationPayload(row));
-  const trusted = suppliedTrusted && !stale && (foundationRows.length ? foundationRows.every((row) => row.strictReady === true) : true);
-  return { provider: typeof input?.provider === 'string' ? input.provider.slice(0, 64) : 'unknown', updatedAtMs, timeframe: typeof input?.timeframe === 'string' && input.timeframe ? input.timeframe.slice(0, 32) : 'rolling', windows: input?.windows && typeof input.windows === 'object' && !Array.isArray(input.windows) ? { ...input.windows } : {}, ttlMs, trusted, stale, data, diagnostics };
+  // `trusted` describes the PROVIDER, not any one symbol. The Absorb spec keeps
+  // these separate: ABSORB_PROVIDER_UNTRUSTED / ABSORB_DATA_STALE are global
+  // provider verdicts, while a symbol whose own measurement is incomplete is
+  // ABSORB_DATA_UNAVAILABLE with its missing fields listed for that coin alone.
+  // Folding per-row readiness in here made one thin symbol declare the provider
+  // untrusted and discard every other symbol's genuine measurement.
+  //
+  // STRICT stays fail-closed per symbol, not by this flag: a row that fails
+  // validateTrustedRollingRow has every trusted field deleted above and carries
+  // strictReady=false, and the RADAR gate requires rollingMicrostructureTrusted
+  // on the individual candidate before STRICT may confirm.
+  const trusted = suppliedTrusted && !stale;
+  const strictReadySymbols = foundationRows.filter((row) => row.strictReady === true).length;
+  return { provider: typeof input?.provider === 'string' ? input.provider.slice(0, 64) : 'unknown', updatedAtMs, timeframe: typeof input?.timeframe === 'string' && input.timeframe ? input.timeframe.slice(0, 32) : 'rolling', windows: input?.windows && typeof input.windows === 'object' && !Array.isArray(input.windows) ? { ...input.windows } : {}, ttlMs, trusted, stale, strictReadySymbols, foundationRows: foundationRows.length, data, diagnostics };
 }
 export function getFreshRollingMicrostructureForSymbol(snapshot, symbol, opts = {}) { const normalized = normalizeRollingMicrostructureSnapshot(snapshot, opts); if (normalized.stale || normalized.trusted !== true) return null; const safeSymbol = normalizeSymbol(symbol); const row = safeSymbol && normalized.data[safeSymbol]; return row ? { ...row, missingFields: [...row.missingFields] } : null; }

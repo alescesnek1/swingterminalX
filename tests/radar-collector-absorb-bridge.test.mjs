@@ -53,8 +53,31 @@ test('thin trade data is never trusted (STRICT cannot confirm) — honest UNKNOW
   const built = buildCollectorRollingRow(fullInput({ aggTrades: cleanTrades(5) }), NOW);
   assert.equal(built.row.strictReady === true, false);
   assert.equal(validateTrustedRollingRow(built.row, { nowMs: NOW }).ok, false);
+  // The thin symbol carries no trusted absorb field, so STRICT has nothing to
+  // score. Fail-closed is enforced per symbol, not by demoting the provider.
   const snapshot = buildCollectorRollingSnapshot([fullInput({ aggTrades: cleanTrades(5) })], { nowMs: NOW, updatedAtMs: NOW });
-  assert.equal(normalizeRollingMicrostructureSnapshot(snapshot, { nowMs: NOW }).trusted, false);
+  const normalized = normalizeRollingMicrostructureSnapshot(snapshot, { nowMs: NOW });
+  assert.equal(normalized.strictReadySymbols, 0);
+  const row = getFreshRollingMicrostructureForSymbol(snapshot, 'BTCUSDT', { nowMs: NOW });
+  assert.equal(row.strictReady, false);
+  for (const field of ['absorptionScore', 'bidDepthRebuildPct', 'aggressiveSellsFailed', 'deltaImprovementPct', 'marketBuyVolumeDominance', 'supportRetestHeld', 'spreadAndSlippageHealthy']) {
+    assert.equal(Object.prototype.hasOwnProperty.call(row, field), false, `${field} stripped`);
+  }
+});
+
+test('one thin symbol no longer discards a healthy symbol measured in the same run', () => {
+  const snapshot = buildCollectorRollingSnapshot([
+    fullInput(),
+    { ...fullInput({ aggTrades: cleanTrades(5) }), symbol: 'ETHUSDT' },
+  ], { nowMs: NOW, updatedAtMs: NOW });
+  const normalized = normalizeRollingMicrostructureSnapshot(snapshot, { nowMs: NOW });
+  assert.equal(normalized.trusted, true, 'the provider itself is fresh and trusted');
+  assert.equal(normalized.strictReadySymbols, 1);
+  assert.equal(normalized.data.BTCUSDT.strictReady, true);
+  assert.equal(normalized.data.ETHUSDT.strictReady, false);
+  // The healthy symbol keeps its measurement; the thin one still confirms nothing.
+  assert.equal(getFreshRollingMicrostructureForSymbol(snapshot, 'BTCUSDT', { nowMs: NOW }).strictReady, true);
+  assert.equal(getFreshRollingMicrostructureForSymbol(snapshot, 'ETHUSDT', { nowMs: NOW }).strictReady, false);
 });
 
 test('missing depth-before (only one snapshot) drops bidDepthRebuild → not trusted', () => {

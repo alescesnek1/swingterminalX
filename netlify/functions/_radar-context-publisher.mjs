@@ -44,15 +44,19 @@ function buildProviderStatus(validated, bundle, nowMs) {
   const coverage = validated?.data ? Object.values(validated.data).filter((row) => row?.strictReady === true).length : 0;
   const hasMicro = (bundle?.microSymbols || []).length > 0;
   const observedMs = bundle?.run?.observedAt ? new Date(bundle.run.observedAt).getTime() : nowMs;
+  // `trusted` is now a provider verdict, so it alone must not claim STRICT: a
+  // live, fresh provider whose every symbol failed validation confirms nothing.
+  // DEGRADED is the honest panel state for that — the feed is up, the coverage
+  // is not. STRICT requires at least one symbol that actually passed.
   return {
-    MICROSTRUCTURE_PROVIDER: trusted ? 'ONLINE' : stale ? 'STALE' : hasMicro ? 'DEGRADED' : 'OFFLINE',
+    MICROSTRUCTURE_PROVIDER: stale ? 'STALE' : !trusted ? (hasMicro ? 'UNTRUSTED' : 'OFFLINE') : coverage > 0 ? 'ONLINE' : hasMicro ? 'DEGRADED' : 'OFFLINE',
     LAST_UPDATE: bundle?.run?.observedAt || new Date(nowMs).toISOString(),
     DATA_LATENCY_MS: Math.max(0, Date.now() - observedMs),
     ORDER_BOOK_FEED: hasMicro ? 'OK' : 'MISSING',
     TRADES_FEED: hasMicro ? 'OK' : 'MISSING',
     OI_FEED: 'UNSUPPORTED',
     FUNDING_FEED: 'UNSUPPORTED',
-    ABSORB_MODE: trusted ? 'STRICT' : hasMicro ? 'PROXY' : 'DISABLED',
+    ABSORB_MODE: trusted && !stale && coverage > 0 ? 'STRICT' : hasMicro ? 'PROXY' : 'DISABLED',
     COVERAGE_SYMBOLS: coverage,
     WINDOW_SEC: bundle?.windowSec ?? null,
   };
