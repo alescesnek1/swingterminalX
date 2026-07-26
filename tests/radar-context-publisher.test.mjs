@@ -94,8 +94,9 @@ test('rejected microstructure reports a specific reason, never a bare zero', asy
   assert.ok(coverage, 'coverage diagnostics persisted');
   assert.equal(coverage.SUPPLIED_MEASUREMENTS, 1);
   assert.equal(coverage.STRICT_READY, 0);
-  assert.equal(coverage.SYMBOL_STATUS.BTCUSDT, 'samples-thin');
-  assert.equal(coverage.REJECTIONS['samples-thin'], 1);
+  // The reason names the failing floor, not just that some floor failed.
+  assert.equal(coverage.SYMBOL_STATUS.BTCUSDT, 'samples-thin:aggTrades');
+  assert.equal(coverage.REJECTIONS['samples-thin:aggTrades'], 1);
 });
 
 test('two venues of one symbol are reported as a collapse, not silently lost', async () => {

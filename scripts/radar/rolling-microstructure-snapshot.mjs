@@ -59,10 +59,18 @@ export function validateTrustedRollingRow(row, { nowMs = Date.now(), ttlMs = DEF
   }
   const measuredAtMs = Number(row.rollingMeasuredAtMs);
   if (!Number.isFinite(measuredAtMs) || measuredAtMs > nowMs + 60_000 || nowMs - measuredAtMs > ttlMs) return fail('measurement-stale');
+  // Both rejections name the exact floor / flag that failed. A bare
+  // 'samples-thin' cannot be acted on: it hides whether the symbol lacked trades,
+  // a second depth snapshot, or candle history — three different causes.
   const samples = row.samples || {};
-  if (!(Number(samples.aggTrades) >= MIN_TRADE_SAMPLES && Number(samples.depthSnapshots) >= MIN_DEPTH_SNAPSHOTS && Number(samples.klines) >= MIN_KLINE_SAMPLES)) return fail('samples-thin');
+  const thin = [];
+  if (!(Number(samples.aggTrades) >= MIN_TRADE_SAMPLES)) thin.push('aggTrades');
+  if (!(Number(samples.depthSnapshots) >= MIN_DEPTH_SNAPSHOTS)) thin.push('depthSnapshots');
+  if (!(Number(samples.klines) >= MIN_KLINE_SAMPLES)) thin.push('klines');
+  if (thin.length) return fail(`samples-thin:${thin.join('+')}`);
   const validation = row.validation || {};
-  if (!['makerFlagsValid', 'tradesValidated', 'tradesSorted', 'klinesValidated'].every((key) => validation[key] === true)) return fail('validation-incomplete');
+  const invalid = ['makerFlagsValid', 'tradesValidated', 'tradesSorted', 'klinesValidated'].filter((key) => validation[key] !== true);
+  if (invalid.length) return fail(`validation-incomplete:${invalid.join('+')}`);
   for (const field of TRUSTED_ROLLING_FIELDS) {
     if (!hasOwn(row, field)) return fail(`missing-${field}`);
     if (field === 'marketBuyVolumeDominance') { if (!(Number.isFinite(row[field]) && row[field] >= 0 && row[field] <= 1)) return fail('buy-dominance-invalid'); }
