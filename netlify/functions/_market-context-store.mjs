@@ -2,7 +2,13 @@ import { getDb } from './_db.mjs';
 
 export const CONTEXT_SCOPE_ID = 'global';
 const RUN_BUCKET_MS = 3 * 60 * 1000;
-const INSERT_CHUNK = 100;
+// Rows per multi-VALUES INSERT. Each chunk is one round trip, so this directly
+// sets how long a collection cycle takes: at 100 a futures-enabled cycle issued
+// ~150 statements and ran ~29s against the 30s function limit (functions are in
+// eu-central-1, the database is not co-located, so every round trip is costly).
+// The widest insert here binds 20 columns, so 500 rows = 10,000 bind parameters,
+// comfortably inside PostgreSQL's 65,535 limit.
+const INSERT_CHUNK = 500;
 const SECRET_KEY = /token|secret|authorization|cookie|password|api[_-]?key|header|bearer/i;
 const SAFE_STATUS = new Set(['complete', 'partial', 'unavailable', 'unsupported']);
 
