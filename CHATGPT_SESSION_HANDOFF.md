@@ -13,6 +13,50 @@
 > `/reply` or `/admin_summary` support system** here. If you find yourself
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
+> _Canonical-context absorb coverage fixes (2026-07-26, deployed, branch
+> `integrate/canonical-context`):_ STRICT absorb was confirming for almost no
+> symbol. Two independent root causes, both found by first making the failure
+> visible rather than by raising limits.
+>
+> **(1) The bounded budgets ranked by exchange rate, not liquidity.** 24h
+> `quoteVolume` is denominated in the QUOTE asset, and both the microstructure
+> top-N and the multi-timeframe top-300 sorted that raw number across mixed
+> quotes. IDR (~16k/USD) and TRY pairs therefore outranked every major: a live
+> run measured `BTCIDR, USDTIDR, USDCIDR, EULTRY, BTCUSDT`. Those pairs are
+> outside the RADAR universe (`QUOTES = USDC|USDT`), so 4 of 5 measured symbols
+> could never become candidates. `rankByQuoteVolume` now ranks USDT/USDC-quoted
+> pairs only; every ticker is still STORED, only the measurement budget is
+> ranked. Coverage went 2/5 junk symbols -> 4/5 majors on the next cycle.
+>
+> **(2) STRICT trust was all-or-nothing.** `normalizeRollingMicrostructureSnapshot`
+> folded per-row `strictReady` into the snapshot-level `trusted` flag, so ONE
+> thin symbol declared the whole PROVIDER untrusted and discarded every other
+> symbol's genuine measurement. The Absorb spec separates these:
+> `ABSORB_PROVIDER_UNTRUSTED` / `ABSORB_DATA_STALE` are global provider
+> verdicts, while a symbol with incomplete data is `ABSORB_DATA_UNAVAILABLE`
+> with ITS missing fields. `trusted` is now the provider verdict alone. STRICT
+> remains fail-closed **per symbol**: a row failing `validateTrustedRollingRow`
+> has every trusted field stripped and `strictReady=false`, and the RADAR gate
+> (`radarDataQuality`) already required `rollingMicrostructureTrusted` on the
+> individual candidate. `ABSORB_MODE` no longer reads STRICT off the provider
+> flag — a live provider whose every symbol failed is DEGRADED, not ONLINE.
+>
+> **Observability added (was the blocker to diagnosing any of this):** the
+> publisher logs `[RADAR_ABSORB] coverage` and persists `ABSORB_COVERAGE` into
+> `providerStatus` — the supplied -> measured -> distinct -> ready funnel plus
+> the validator's per-symbol reason. Rejection reasons now name the failing
+> floor/flag (`samples-thin:aggTrades`, `validation-incomplete:klinesValidated`)
+> instead of a bare category. A dropped multi-timeframe batch is logged instead
+> of `catch { continue }`.
+>
+> **Known gap, deliberately NOT fixed:** `withRollingMicrostructureSnapshot`
+> looks up rolling rows by SYMBOL only, with no venue check, so a spot candidate
+> can receive futures microstructure. Fixing it means re-keying the absorb
+> pipeline on `market:symbol`. The store-side bundle query now returns one row
+> per symbol (deepest venue) so at least no topN slot is wasted on a duplicate.
+> Microstructure budget stays at 5 by owner's call, so coverage is effectively
+> BTC/ETH plus a stablecoin pair.
+>
 > _RADAR Focus Candidate human-readability redesign (2026-07-23, local-only on
 > top of `c537a47`):_ UI/UX-only restructure of the Trading RADAR Focus card so
 > a human reads the trade state in ~10 seconds. No backend scoring, strict
@@ -812,6 +856,7 @@ Keep this as operational memory, not a full changelog.
 - **Backtest sizing/fill/accounting contract (pure/local-only):** `docs/backtest-simulation-contract.md` and the backtest engine now define deterministic fixed-notional, percent-equity, and stop-risk sizing; conservative fills/costs; sequential positions; separate USDT/USDC ledgers; equity curves; and risk veto reason codes. It remains simulated-only: no fetch, persistence, adapter, scheduler, runner, orders, or RADAR/Telegram runtime wiring. Futures stays isolated, 1x default, 2x maximum, with unknown liquidation reported rather than inferred.
 - **Synthetic portfolio scheduling scenarios (test-only):** `tests/fixtures/radar-portfolio-scenarios.mjs` defines versioned multi-symbol fixture cases. `runRadarPortfolioBacktest` sorts by timestamp, priority, symbol, then fixture ID and carries only simulated balances/daily loss/open-position state. It has no market-data integration or runtime wiring; stale evidence fails before sizing/fill.
 - **Synthetic portfolio edge-case contract (test-only):** tests/fixtures/radar-portfolio-edge-scenarios.mjs and tests/radar-portfolio-edge-scenarios.test.mjs define versioned partial-fill, candle-gap, UTC daily-boundary, funding-evidence, dataset-end, quote-loss-scope, global-loss, and fill-time freshness cases. The pure engine cancels unfilled entry remainder, marks a partial-exit remainder at supplied dataset end, rejects gaps without optimistic fills, reports missing funding as funding_unknown, and never changes RADAR/Telegram/live behavior.
+- **KuCoin public-candle backtest MVP (local-only):** scripts/radar/kucoin-public-candles.mjs and scripts/radar/run-kucoin-radar-backtest.mjs provide a one-shot Spot candle fetch/cache/normalization/validation/backtest/report flow using only the exact public KuCoin HTTPS candle endpoint. It has no auth headers, private calls, credentials, orders, adapters, scheduler, persistent runner, Telegram, or live wiring. The report labels RADAR actionability and Strict Absorb as supplied fixture evidence only, not reconstructed historical truth; generated artifacts/cache are Git-ignored. Futures remains deferred pending separate evidence mapping.
 - **No live trading by default** — live is opt-in, admin-only, micro-cap, gated.
 - **STOCKS is a SEPARATE project** (`stock-terminal-X`), *not* a mode/page inside
   this terminal. Do not add stock features here. _(From project memory; verify if
