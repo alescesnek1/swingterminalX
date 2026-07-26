@@ -1783,7 +1783,14 @@ function _mapCanonicalTicker(t) {
     symbol: base, id: base.toLowerCase(), pair, market: t.market || 'spot',
     binance_available: true, binance_market: t.market === 'futures' ? 'futures' : 'spot',
     quote_asset: quote || null,
-    exchange: 'Binance', source: 'canonical', listingSource: 'Binance',
+    // `exchange` is a THREE-VALUE enum the rest of the UI switches on — 'BIN',
+    // 'ALPHA' (Binance USD-M futures) or DEX. loadOrderbook() requires exactly
+    // 'BIN'/'ALPHA', so the descriptive 'Binance' put every canonical coin down
+    // the "not on Binance, no book" path even though its badge rendered as BIN.
+    exchange: t.market === 'futures' ? 'ALPHA' : 'BIN',
+    spot_pair: t.market === 'futures' ? undefined : pair,
+    futures_pair: t.market === 'futures' ? pair : undefined,
+    source: 'canonical', listingSource: 'Binance',
     current_price: n(t.last_price) ?? 0, price_change_percentage_24h: n(t.price_change_percent) ?? 0,
     total_volume: n(t.quote_volume) ?? 0, high_24h: n(t.high_price), low_24h: n(t.low_price),
     _funding: 0, _oi: 0, _oiDelta: 0,
@@ -1796,13 +1803,32 @@ function _mapCanonicalTicker(t) {
   return row;
 }
 
+// One row per COIN. Canonical rows are keyed by base asset, and the same base
+// trades on both spot and futures, so BTCUSDT (spot) and BTCUSDT (futures) would
+// otherwise collide and one would silently vanish — which is why the list came
+// back well short of the requested count. Spot wins (it is the venue with a real
+// order book); futures only fills bases spot does not list. Within one venue the
+// deeper pair wins.
+function _dedupeCanonicalByBase(rows) {
+  const byBase = new Map();
+  for (const row of rows) {
+    const prev = byBase.get(row.symbol);
+    if (!prev) { byBase.set(row.symbol, row); continue; }
+    const prevSpot = prev.market === 'spot';
+    const rowSpot = row.market === 'spot';
+    if (rowSpot !== prevSpot) { if (rowSpot) byBase.set(row.symbol, row); continue; }
+    if ((row.total_volume || 0) > (prev.total_volume || 0)) byBase.set(row.symbol, row);
+  }
+  return Array.from(byBase.values());
+}
+
 async function _fetchCanonicalMarkets(authHeaders) {
   const r = await fetch('/api/context', { headers: { 'Accept': 'application/json', ...authHeaders } });
   if (!r.ok) { const body = await r.text().catch(() => ''); throw new Error('HTTP ' + r.status + ' — ' + body.slice(0, 120)); }
   const j = await r.json();
   if (!j || j.ok === false) throw new Error('context error: ' + ((j && j.reason) || 'unknown'));
   const tickers = (j.market && Array.isArray(j.market.tickers)) ? j.market.tickers : [];
-  const rows = tickers.map(_mapCanonicalTicker).filter((row) => row.symbol);
+  const rows = _dedupeCanonicalByBase(tickers.map(_mapCanonicalTicker).filter((row) => row.symbol));
   // Expose the canonical RADAR + provider status for the RADAR/Absorb panels.
   window.__canonicalContext = { radar: j.radar || null, market: { observedAt: j.market?.observedAt || null, freshness: j.market?.freshness || null }, run: j.run || null, receivedAt: Date.now() };
   window.__marketsFreshness = { ok: true, servedFrom: 'canonical', stale: j.market?.freshness === 'STALE', generatedAt: j.market?.observedAt ? Date.parse(j.market.observedAt) : null };
@@ -10098,6 +10124,20 @@ function _renderCanonicalRadarPanels(radar, esc) {
   return `<div class="radar-canonical-panels">${_renderProviderStatusPanel(radar, esc)}${_renderAbsorbDiagnosticsPanel(radar, esc)}</div>`;
 }
 
+// Folds the canonical provider/absorb panels into the RADAR panel's own
+// "Diagnostics & Logs" section instead of stacking them above the Radar Matrix.
+// Falls back to appending at the end if that section is ever renamed, so the
+// data is never silently dropped.
+function _withCanonicalDiagnostics(mainHtml, radar, esc) {
+  if (!radar) return mainHtml;
+  const panels = _renderCanonicalRadarPanels(radar, esc);
+  const anchor = '<details class="radar-diagnostics"><summary>Diagnostics & Logs</summary>';
+  const at = mainHtml.indexOf(anchor);
+  if (at === -1) return mainHtml + panels;
+  const insertAt = at + anchor.length;
+  return mainHtml.slice(0, insertAt) + panels + mainHtml.slice(insertAt);
+}
+
 function renderTradingRadarPanel() {
   const root = document.getElementById('trading-radar-root');
   if (!root) return;
@@ -10117,7 +10157,10 @@ function renderTradingRadarPanel() {
   } else {
     mainHtml = _renderTradingRadar(fleetRadar, _esc);
   }
-  root.innerHTML = (canonicalRadar ? _renderCanonicalRadarPanels(canonicalRadar, _esc) : '') + mainHtml;
+  // Provider Status / Absorb Diagnostics belong INSIDE the existing RADAR panel's
+  // diagnostics, not as a second table stacked above it: prepending them pushed the
+  // real Radar Matrix down the page and read as a duplicate, competing panel.
+  root.innerHTML = _withCanonicalDiagnostics(mainHtml, canonicalRadar, _esc);
   // Hardened toggle-state persistence: replaced inline ontoggle="...symbol..." handlers
   // (XSS sink — raw symbol in inline JS string) with safe data-* attributes + delegated
   // event listeners. The symbol is read from element.dataset, never interpolated into JS.

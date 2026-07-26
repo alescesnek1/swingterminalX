@@ -11,7 +11,10 @@ export async function runContextRead(req, deps = {}) {
   let identity; try { identity = await getIdentity(req); } catch { return json(req, { ok: false, reason: 'UNAUTHENTICATED' }, 401); }
   if (!identity?.ok || identity.verified !== true) return json(req, { ok: false, reason: 'UNAUTHENTICATED' }, 401);
   let store = deps.store; let database = deps.database; try { store ||= await (deps.loadStore || loadStore)(); if (!database) database = (await (deps.loadDb || loadDb)()).getDb().pool; } catch { return json(req, { ok: false, reason: 'DB_UNAVAILABLE' }, 503); }
-  const context = await store.getAtomizedMarketContext(database, { tickerLimit: 1000, microLimit: 600 });
+  // Over-fetch deliberately: the reader collapses spot/futures rows of the same
+  // base asset into one coin, so ~1000 displayed coins needs materially more rows
+  // than 1000 here.
+  const context = await store.getAtomizedMarketContext(database, { tickerLimit: 2000, microLimit: 600 });
   if (!context?.ok) return json(req, { ok: false, reason: context?.reason || 'DB_UNAVAILABLE' }, 503);
   return json(req, context);
 }

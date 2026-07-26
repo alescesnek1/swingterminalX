@@ -67,6 +67,35 @@ test('canonical rows identify as Binance assets, keyed by base symbol not pair',
   assert.equal(derived.symbol, 'ETH');
   // Futures rows are tagged so the ALPHA badge resolves instead of DEX.
   assert.equal(_mapCanonicalTicker({ symbol: 'SOLUSDT', base_asset: 'SOL', quote_asset: 'USDT', market: 'futures' }).binance_market, 'futures');
+
+  // loadOrderbook() gates on exchange being exactly 'BIN' or 'ALPHA'; the
+  // descriptive 'Binance' sent every canonical coin down the "no book" path.
+  assert.equal(row.exchange, 'BIN');
+  assert.equal(row.spot_pair, 'BTCUSDT');
+  assert.equal(_mapCanonicalTicker({ symbol: 'SOLUSDT', base_asset: 'SOL', quote_asset: 'USDT', market: 'futures' }).exchange, 'ALPHA');
+  assert.equal(_mapCanonicalTicker({ symbol: 'SOLUSDT', base_asset: 'SOL', quote_asset: 'USDT', market: 'futures' }).futures_pair, 'SOLUSDT');
+});
+
+// The same coin trades on both venues, and canonical rows are keyed by base
+// asset, so without a deliberate merge one venue's row silently displaced the
+// other and the list came back short of the requested size.
+test('spot and futures rows of one coin collapse to a single row, spot preferred', () => {
+  const make = new Function(`${extractFunction('_dedupeCanonicalByBase')}\nreturn _dedupeCanonicalByBase;`);
+  const dedupe = make();
+  const merged = dedupe([
+    { symbol: 'BTC', market: 'futures', total_volume: 900 },
+    { symbol: 'BTC', market: 'spot', total_volume: 100 },
+    { symbol: 'ETH', market: 'futures', total_volume: 50 },
+    { symbol: 'SOL', market: 'spot', total_volume: 10 },
+    { symbol: 'SOL', market: 'spot', total_volume: 80 },
+  ]);
+  assert.equal(merged.length, 3, 'one row per coin');
+  const btc = merged.find((r) => r.symbol === 'BTC');
+  assert.equal(btc.market, 'spot', 'spot wins even on lower volume — it has the order book');
+  // A base that only trades on futures is kept, not dropped.
+  assert.equal(merged.find((r) => r.symbol === 'ETH').market, 'futures');
+  // Within one venue the deeper pair wins.
+  assert.equal(merged.find((r) => r.symbol === 'SOL').total_volume, 80);
 });
 
 const terminalCss = fs.readFileSync(new URL('../apps/edge/public/css/terminal.css', import.meta.url), 'utf8');
@@ -87,5 +116,26 @@ test('RADAR panel prefers a READY canonical radar and falls back to Fleet', () =
   assert.match(body, /_canonicalContextEnabled\(\)/);
   assert.match(body, /status \|\| ''\)\.toUpperCase\(\) === 'READY'/);
   assert.match(body, /fell back to Fleet/);
-  assert.match(body, /_renderCanonicalRadarPanels/);
+  assert.match(body, /_withCanonicalDiagnostics/);
+});
+
+// The provider/absorb panels were prepended, which pushed the real Radar Matrix
+// down the page and read as a second, competing table. They belong inside the
+// panel's own diagnostics section.
+test('canonical panels are folded into the existing diagnostics, not stacked above the matrix', () => {
+  const make = new Function(
+    `${extractFunction('_renderProviderStatusPanel')}\n${extractFunction('_renderAbsorbDiagnosticsPanel')}\n${extractFunction('_radarStatusClass')}\n${extractFunction('_renderCanonicalRadarPanels')}\n${extractFunction('_withCanonicalDiagnostics')}\nreturn _withCanonicalDiagnostics;`,
+  );
+  const withDiagnostics = make();
+  const esc = (v) => String(v ?? '');
+  const anchor = '<details class="radar-diagnostics"><summary>Diagnostics & Logs</summary>';
+  const main = `<div class="radar-section-title">Radar Matrix</div><table>MATRIX</table>${anchor}<ul><li>x</li></ul></details>`;
+  const out = withDiagnostics(main, { providerStatus: { ABSORB_MODE: 'STRICT' }, candidates: [] }, esc);
+
+  assert.ok(out.indexOf('MATRIX') < out.indexOf('radar-canonical-panels'), 'the matrix still comes first');
+  assert.ok(out.indexOf(anchor) < out.indexOf('radar-canonical-panels'), 'panels sit inside the diagnostics section');
+  // Without a canonical radar the markup is untouched.
+  assert.equal(withDiagnostics(main, null, esc), main);
+  // If the anchor is ever renamed the data is appended, never silently dropped.
+  assert.match(withDiagnostics('<table>ONLY</table>', { providerStatus: {}, candidates: [] }, esc), /radar-canonical-panels/);
 });
