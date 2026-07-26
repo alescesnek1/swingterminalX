@@ -139,20 +139,60 @@ async function mapBounded(items, limit, callback) {
   });
   await Promise.all(workers); return result;
 }
+// Binance enforces a per-IP REQUEST WEIGHT budget per minute (6000 on spot).
+// Exceeding it returns 418/429 and then bans the IP for minutes to hours, which
+// would take the whole collector down — so the collector paces itself instead of
+// relying on concurrency, which only bounds parallelism and not the rate.
+//
+// Weights used here: klines(limit<=100)=2, depth(limit=100)=5, aggTrades=2 → 9
+// per measured symbol. The budget below leaves headroom for the ticker and
+// multi-timeframe calls that share the same allowance.
+export const SYMBOL_REQUEST_WEIGHT = 9;
+export const DEFAULT_WEIGHT_BUDGET_PER_MIN = 3600;
+const WEIGHT_WINDOW_MS = 60_000;
+
+// Rolling-window pacer: admits work only while the last 60s of spent weight stays
+// under budget, otherwise waits for the oldest entry to age out. Each venue gets
+// its own instance — spot and futures are separate services with separate limits.
+export function createWeightPacer(budgetPerMin = DEFAULT_WEIGHT_BUDGET_PER_MIN, { now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  const budget = Number.isFinite(Number(budgetPerMin)) && Number(budgetPerMin) > 0 ? Number(budgetPerMin) : DEFAULT_WEIGHT_BUDGET_PER_MIN;
+  const spent = [];
+  let waitedMs = 0;
+  const prune = (t) => { while (spent.length && t - spent[0].at >= WEIGHT_WINDOW_MS) spent.shift(); };
+  const total = () => spent.reduce((sum, e) => sum + e.weight, 0);
+  return {
+    async take(weight) {
+      const cost = Number.isFinite(Number(weight)) && Number(weight) > 0 ? Number(weight) : 1;
+      for (;;) {
+        const t = now();
+        prune(t);
+        if (total() + cost <= budget || !spent.length) { spent.push({ at: t, weight: cost }); return; }
+        const waitMs = Math.max(1, WEIGHT_WINDOW_MS - (t - spent[0].at));
+        waitedMs += waitMs;
+        await sleep(waitMs);
+      }
+    },
+    get diagnostics() { return { budgetPerMin: budget, waitedMs, windowWeight: total() }; },
+  };
+}
+
 function boundedConcurrency(value) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? Math.min(Math.trunc(n), MAX_MICROSTRUCTURE_CONCURRENCY) : DEFAULT_MICROSTRUCTURE_CONCURRENCY;
 }
 
-async function collectVenue(market, { fetchImpl, microstructureTopN, concurrency }) {
+async function collectVenue(market, { fetchImpl, microstructureTopN, concurrency, pacer }) {
   const [info, tickersPayload] = await Promise.all([fetchBinancePublicJson(buildBinancePublicUrl(market, 'exchangeInfo'), { fetchImpl }), fetchBinancePublicJson(buildBinancePublicUrl(market, 'ticker'), { fetchImpl })]);
   const tickers = normalizeTickers(market, tickersPayload, instrumentIndex(market, info));
   if (!tickers.length) throw new Error('BINANCE_EMPTY_TICKER_UNIVERSE');
   const rankable = rankByQuoteVolume(tickers);
   if (!rankable.length) console.warn('[MARKET_CONTEXT] microstructure_universe_empty', { market, tickerCount: tickers.length, quotes: RANKABLE_QUOTE_ASSETS });
   const candidates = rankable.slice(0, boundedTopN(microstructureTopN));
-  const microstructures = await mapBounded(candidates, boundedConcurrency(concurrency), (ticker) => collectMicrostructurePair(market, ticker, fetchImpl));
-  return { tickers, microstructures };
+  const microstructures = await mapBounded(candidates, boundedConcurrency(concurrency), async (ticker) => {
+    if (pacer) await pacer.take(SYMBOL_REQUEST_WEIGHT);
+    return collectMicrostructurePair(market, ticker, fetchImpl);
+  });
+  return { tickers, microstructures, pacing: pacer ? pacer.diagnostics : null };
 }
 
 function chunkList(items, size) { const out = []; for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size)); return out; }
@@ -187,12 +227,15 @@ export async function collectBinanceMarketContext(options = {}) {
   const fetchImpl = options.fetchImpl || fetch;
   const topN = boundedTopN(options.microstructureTopN);
   const concurrency = boundedConcurrency(options.microstructureConcurrency);
+  // One pacer per venue: spot and futures are separate services with separate
+  // per-IP weight allowances, so spending on one must not throttle the other.
+  const makePacer = () => (options.weightBudgetPerMin === 0 ? null : createWeightPacer(options.weightBudgetPerMin));
   let spot;
-  try { spot = await collectVenue('spot', { fetchImpl, microstructureTopN: topN, concurrency }); }
+  try { spot = await collectVenue('spot', { fetchImpl, microstructureTopN: topN, concurrency, pacer: makePacer() }); }
   catch (error) { return { ok: false, reason: failureCode(error), dataStatus: 'unavailable' }; }
   let futures = { tickers: [], microstructures: [], status: 'unsupported', failureCode: null };
   if (options.includeFutures === true) {
-    try { const collected = await collectVenue('futures', { fetchImpl, microstructureTopN: topN, concurrency }); futures = { ...collected, status: 'complete', failureCode: null }; }
+    try { const collected = await collectVenue('futures', { fetchImpl, microstructureTopN: topN, concurrency, pacer: makePacer() }); futures = { ...collected, status: 'complete', failureCode: null }; }
     catch (error) { futures = { tickers: [], microstructures: [], status: 'unavailable', failureCode: failureCode(error) }; }
   }
   const microstructures = [...spot.microstructures, ...futures.microstructures];
@@ -208,6 +251,6 @@ export async function collectBinanceMarketContext(options = {}) {
   return {
     ok: true, observedAt: new Date(), collectedAt: new Date(), dataStatus: futures.status === 'complete' && allMicrostructureComplete ? 'complete' : 'partial',
     rows: [...spot.tickers, ...futures.tickers], microstructure: microstructures,
-    diagnostics: { spotTickerCount: spot.tickers.length, futuresTickerCount: futures.tickers.length, microstructureCount: microstructures.length, futuresStatus: futures.status, futuresFailureCode: futures.failureCode, microstructureTopN: topN, multiTimeframeRequested: multiTf.requested, multiTimeframeCovered: multiTf.covered },
+    diagnostics: { spotTickerCount: spot.tickers.length, futuresTickerCount: futures.tickers.length, microstructureCount: microstructures.length, futuresStatus: futures.status, futuresFailureCode: futures.failureCode, microstructureTopN: topN, multiTimeframeRequested: multiTf.requested, multiTimeframeCovered: multiTf.covered, pacingWaitedMs: (spot.pacing?.waitedMs || 0) + (futures.pacing?.waitedMs || 0), rateLimitedSymbols: microstructures.filter((row) => row.failureCode === 'UPSTREAM_RATE_LIMITED').length },
   };
 }

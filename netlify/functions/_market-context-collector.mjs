@@ -7,6 +7,7 @@ export const MARKET_CONTEXT_MULTI_TF_ENV_FLAG = 'MARKET_CONTEXT_MULTI_TF_ENABLED
 export const MARKET_CONTEXT_MULTI_TF_TOP_N_ENV_FLAG = 'MARKET_CONTEXT_MULTI_TF_TOP_N';
 export const MARKET_CONTEXT_CONCURRENCY_ENV_FLAG = 'MARKET_CONTEXT_MICROSTRUCTURE_CONCURRENCY';
 export const MARKET_CONTEXT_RAW_SAMPLE_ENV_FLAG = 'MARKET_CONTEXT_RAW_SAMPLE_TOP_N';
+export const MARKET_CONTEXT_WEIGHT_BUDGET_ENV_FLAG = 'MARKET_CONTEXT_WEIGHT_BUDGET_PER_MIN';
 
 async function loadStore() { return await import('./_market-context-store.mjs'); }
 async function loadSource() { return await import('./_binance-market-context-source.mjs'); }
@@ -26,7 +27,7 @@ export async function runMarketContextCollector(deps = {}) {
   const observedAt = typeof deps.now === 'function' ? new Date(deps.now()) : new Date();
   const runKey = store.makeRunKey ? store.makeRunKey(observedAt) : makeRunKey(observedAt);
   const multiTfTopN = Number(env[MARKET_CONTEXT_MULTI_TF_TOP_N_ENV_FLAG]);
-  const options = { includeFutures: env[MARKET_CONTEXT_FUTURES_ENV_FLAG] === 'true', microstructureTopN: topN(env[MARKET_CONTEXT_TOP_N_ENV_FLAG]), includeMultiTimeframe: env[MARKET_CONTEXT_MULTI_TF_ENV_FLAG] === 'true', multiTimeframeTopN: Number.isFinite(multiTfTopN) && multiTfTopN > 0 ? multiTfTopN : undefined, microstructureConcurrency: Number(env[MARKET_CONTEXT_CONCURRENCY_ENV_FLAG]) || undefined, fetchImpl: deps.fetchImpl };
+  const options = { includeFutures: env[MARKET_CONTEXT_FUTURES_ENV_FLAG] === 'true', microstructureTopN: topN(env[MARKET_CONTEXT_TOP_N_ENV_FLAG]), includeMultiTimeframe: env[MARKET_CONTEXT_MULTI_TF_ENV_FLAG] === 'true', multiTimeframeTopN: Number.isFinite(multiTfTopN) && multiTfTopN > 0 ? multiTfTopN : undefined, microstructureConcurrency: Number(env[MARKET_CONTEXT_CONCURRENCY_ENV_FLAG]) || undefined, weightBudgetPerMin: Number.isFinite(Number(env[MARKET_CONTEXT_WEIGHT_BUDGET_ENV_FLAG])) ? Number(env[MARKET_CONTEXT_WEIGHT_BUDGET_ENV_FLAG]) : undefined, fetchImpl: deps.fetchImpl };
   const rawSampleTopN = Number(env[MARKET_CONTEXT_RAW_SAMPLE_ENV_FLAG]);
   const transaction = deps.withTransaction || store.withContextTransaction || withContextTransaction;
   const tx = await transaction(async (db) => {
@@ -53,15 +54,18 @@ export async function runMarketContextCollector(deps = {}) {
     if (!written.ok) return written;
     const completed = await store.completeCollectionRun(db, { runId: run.runId, completedAt: collected.collectedAt, diagnostics: { ...collected.diagnostics, ...absorbDiagnostics, dataStatus: collected.dataStatus, tickerCount: written.tickerCount, candleCount: written.candleCount, orderBookLevelCount: written.orderBookLevelCount, aggTradeCount: written.aggTradeCount, measurementCount: written.measurementCount } });
     if (!completed.ok) return completed;
-    return { ok: true, runKey, runId: run.runId, dataStatus: collected.dataStatus, futuresEnabled: options.includeFutures, futuresStatus: collected.diagnostics?.futuresStatus ?? null, futuresFailureCode: collected.diagnostics?.futuresFailureCode ?? null, futuresTickerCount: collected.diagnostics?.futuresTickerCount ?? 0, multiTimeframeCovered: collected.diagnostics?.multiTimeframeCovered ?? 0, ...absorbDiagnostics, ...written };
+    return { ok: true, runKey, runId: run.runId, dataStatus: collected.dataStatus, futuresEnabled: options.includeFutures, futuresStatus: collected.diagnostics?.futuresStatus ?? null, futuresFailureCode: collected.diagnostics?.futuresFailureCode ?? null, futuresTickerCount: collected.diagnostics?.futuresTickerCount ?? 0, multiTimeframeCovered: collected.diagnostics?.multiTimeframeCovered ?? 0, pacingWaitedMs: collected.diagnostics?.pacingWaitedMs ?? 0, rateLimitedSymbols: collected.diagnostics?.rateLimitedSymbols ?? 0, ...absorbDiagnostics, ...written };
   }, { getDbImpl: deps.getDbImpl });
   if (!tx?.ok) { console.warn('[MARKET_CONTEXT] cycle_failed', { reason: tx?.reason || 'DB_UNAVAILABLE', runKey }); return outcome(503, { ok: false, reason: tx?.reason || 'DB_UNAVAILABLE', runKey }); }
   const body = tx.skipped ? { ok: true, skipped: true, reason: tx.reason, runKey } : { ok: true, skipped: false, runKey: tx.runKey, runId: tx.runId, dataStatus: tx.dataStatus, futuresEnabled: tx.futuresEnabled, futuresStatus: tx.futuresStatus, futuresFailureCode: tx.futuresFailureCode, futuresTickerCount: tx.futuresTickerCount, multiTimeframeCovered: tx.multiTimeframeCovered, tickerCount: tx.tickerCount, candleCount: tx.candleCount, orderBookLevelCount: tx.orderBookLevelCount, aggTradeCount: tx.aggTradeCount, measurementCount: tx.measurementCount, absorbComputed: tx.absorbComputed, absorbWithDepthBaseline: tx.absorbWithDepthBaseline, absorbWindowSec: tx.absorbWindowSec };
-  if (!tx.skipped) console.info('[MARKET_CONTEXT] cycle_completed', { runKey: body.runKey, runId: body.runId, dataStatus: body.dataStatus, futuresEnabled: body.futuresEnabled, futuresStatus: body.futuresStatus, futuresFailureCode: body.futuresFailureCode, futuresTickerCount: body.futuresTickerCount, multiTimeframeCovered: body.multiTimeframeCovered, tickerCount: body.tickerCount, candleCount: body.candleCount, orderBookLevelCount: body.orderBookLevelCount, aggTradeCount: body.aggTradeCount, measurementCount: body.measurementCount, absorbComputed: tx.absorbComputed, absorbWithDepthBaseline: tx.absorbWithDepthBaseline, absorbWindowSec: tx.absorbWindowSec });
+  if (!tx.skipped) console.info('[MARKET_CONTEXT] cycle_completed', { runKey: body.runKey, runId: body.runId, dataStatus: body.dataStatus, futuresEnabled: body.futuresEnabled, futuresStatus: body.futuresStatus, futuresFailureCode: body.futuresFailureCode, futuresTickerCount: body.futuresTickerCount, multiTimeframeCovered: body.multiTimeframeCovered, tickerCount: body.tickerCount, candleCount: body.candleCount, orderBookLevelCount: body.orderBookLevelCount, aggTradeCount: body.aggTradeCount, measurementCount: body.measurementCount, absorbComputed: tx.absorbComputed, absorbWithDepthBaseline: tx.absorbWithDepthBaseline, absorbWindowSec: tx.absorbWindowSec, pacingWaitedMs: tx.pacingWaitedMs, rateLimitedSymbols: tx.rateLimitedSymbols });
   // Measured symbols with no usable N-1 depth cannot yield a depth-rebuild input,
   // so STRICT can never confirm for them. Silent low coverage would look identical
   // to a quiet market, so the shortfall is reported.
   if (!tx.skipped && tx.measurementCount > 0 && (tx.absorbWithDepthBaseline || 0) < tx.measurementCount) console.warn('[MARKET_CONTEXT] absorb_baseline_shortfall', { runKey: body.runKey, measured: tx.measurementCount, withBaseline: tx.absorbWithDepthBaseline || 0, windowSec: tx.absorbWindowSec });
+  // Being throttled by the upstream must never look like a healthy cycle: a rate
+  // limited symbol silently loses its depth/trades and drops out of STRICT.
+  if (!tx.skipped && (tx.rateLimitedSymbols || 0) > 0) console.warn('[MARKET_CONTEXT] upstream_rate_limited', { runKey: body.runKey, rateLimitedSymbols: tx.rateLimitedSymbols, pacingWaitedMs: tx.pacingWaitedMs || 0 });
   // A requested venue that silently returns nothing must never look like success:
   // futures enabled but not complete is surfaced as a visible warning with its code.
   if (!tx.skipped && tx.futuresEnabled === true && tx.futuresStatus !== 'complete') console.warn('[MARKET_CONTEXT] futures_unavailable', { runKey: body.runKey, futuresStatus: body.futuresStatus, futuresFailureCode: body.futuresFailureCode });
