@@ -1752,10 +1752,68 @@ async function _getAuthHeaders() {
   } catch { return {}; }
 }
 
+// Canonical Context Store read cutover (task 3). Additive + reversible: OFF by
+// default, so the terminal keeps its legacy /api/markets + Fleet path. Enable with
+// window.RADAR_CANONICAL_CONTEXT_READ = true, or localStorage
+// 'radarCanonicalContextRead' = 'true' (lets the owner shadow-test without a deploy).
+function _canonicalContextEnabled() {
+  try {
+    if (typeof window === 'undefined') return false;
+    if (window.RADAR_CANONICAL_CONTEXT_READ === true) return true;
+    if (window.RADAR_CANONICAL_CONTEXT_READ === false) return false;
+    return window.localStorage?.getItem('radarCanonicalContextRead') === 'true';
+  } catch { return false; }
+}
+
+// Maps one canonical /api/context ticker to the scanner row shape. Missing
+// multi-timeframe fields (symbols outside the collected top-N) are left ABSENT so
+// getTimeframePct returns null — never a fabricated value.
+function _mapCanonicalTicker(t) {
+  const n = (v) => (v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v));
+  const row = {
+    symbol: String(t.symbol || '').toUpperCase(), id: String(t.symbol || '').toLowerCase(), market: t.market || 'spot',
+    exchange: 'Binance', source: 'canonical', listingSource: 'Binance',
+    current_price: n(t.last_price) ?? 0, price_change_percentage_24h: n(t.price_change_percent) ?? 0,
+    total_volume: n(t.quote_volume) ?? 0, high_24h: n(t.high_price), low_24h: n(t.low_price),
+    _funding: 0, _oi: 0, _oiDelta: 0,
+  };
+  const c1 = n(t.change_1h_pct); if (c1 != null) row._c1 = c1;
+  const c4 = n(t.change_4h_pct); if (c4 != null) row._c4 = c4;
+  const c12 = n(t.change_12h_pct); if (c12 != null) row._c12 = c12;
+  const c24 = n(t.price_change_percent); if (c24 != null) row._c24 = c24;
+  const c7d = n(t.change_7d_pct); if (c7d != null) row._c7d = c7d;
+  return row;
+}
+
+async function _fetchCanonicalMarkets(authHeaders) {
+  const r = await fetch('/api/context', { headers: { 'Accept': 'application/json', ...authHeaders } });
+  if (!r.ok) { const body = await r.text().catch(() => ''); throw new Error('HTTP ' + r.status + ' — ' + body.slice(0, 120)); }
+  const j = await r.json();
+  if (!j || j.ok === false) throw new Error('context error: ' + ((j && j.reason) || 'unknown'));
+  const tickers = (j.market && Array.isArray(j.market.tickers)) ? j.market.tickers : [];
+  const rows = tickers.map(_mapCanonicalTicker).filter((row) => row.symbol);
+  // Expose the canonical RADAR + provider status for the RADAR/Absorb panels.
+  window.__canonicalContext = { radar: j.radar || null, market: { observedAt: j.market?.observedAt || null, freshness: j.market?.freshness || null }, run: j.run || null, receivedAt: Date.now() };
+  window.__marketsFreshness = { ok: true, servedFrom: 'canonical', stale: j.market?.freshness === 'STALE', generatedAt: j.market?.observedAt ? Date.parse(j.market.observedAt) : null };
+  return rows;
+}
+
 async function fetchData() {
   let live = null;
+  const _canonical = _canonicalContextEnabled();
   try {
     const authHeaders = await _getAuthHeaders();
+    if (_canonical) {
+      try {
+        live = await _fetchCanonicalMarkets(authHeaders);
+        SRC = window.__marketsFreshness.stale ? 'STALE' : 'LIVE';
+      } catch (ce) {
+        // Honest fallback: surface the canonical failure, then use the legacy feed.
+        console.warn('[CANONICAL] /api/context read failed; falling back to /api/markets:', ce && ce.message);
+        window.Toast?.error?.('Canonical context unavailable', `Falling back to /api/markets — ${ce && ce.message || 'error'}`, { endpoint: '/api/context' });
+      }
+    }
+    if (!live) {
     const r = await fetch('/api/markets', { headers: { 'Accept': 'application/json', ...authHeaders } });
     if (!r.ok) {
       const body = await r.text().catch(() => '');
@@ -1816,6 +1874,7 @@ async function fetchData() {
     // Batch B: honest source label. Only fresh, live-built snapshots get
     // the green LIVE badge; a stale last-good snapshot is surfaced as STALE.
     SRC = window.__marketsFreshness.stale ? 'STALE' : 'LIVE';
+    }
   } catch(e) {
     SRC = 'ERROR';
     window.__marketsFreshness = { ok: false, servedFrom: 'error', stale: true, generatedAt: null };
