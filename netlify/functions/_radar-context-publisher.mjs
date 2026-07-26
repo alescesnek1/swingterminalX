@@ -58,6 +58,37 @@ function buildProviderStatus(validated, bundle, nowMs) {
   };
 }
 
+// Why STRICT absorb did — or did not — confirm on this run. A bare coverage
+// count makes a rejected measurement indistinguishable from a genuinely quiet
+// market, so every non-ready symbol carries the validator's own reason, and the
+// supplied → measured → distinct → ready funnel is reported so a silent loss
+// (e.g. two venues of one symbol collapsing onto a single key) stays visible.
+function buildAbsorbCoverage(validated, rollingSnapshot, bundle) {
+  const rows = Object.entries(validated?.data || {});
+  const rejections = {};
+  const symbolStatus = {};
+  let strictReady = 0;
+  for (const [symbol, row] of rows) {
+    if (row?.strictReady === true) { strictReady += 1; symbolStatus[symbol] = 'READY'; continue; }
+    const reason = typeof row?.foundationReason === 'string' && row.foundationReason ? row.foundationReason : 'unknown';
+    rejections[reason] = (rejections[reason] || 0) + 1;
+    symbolStatus[symbol] = reason;
+  }
+  const supplied = (bundle?.microSymbols || []).length;
+  const measured = Number(rollingSnapshot?.diagnostics?.measured) || 0;
+  const distinct = rollingSnapshot?.data ? Object.keys(rollingSnapshot.data).length : 0;
+  return {
+    SUPPLIED_MEASUREMENTS: supplied,
+    BRIDGE_MEASURED: measured,
+    DISTINCT_SYMBOLS: distinct,
+    COLLAPSED_DUPLICATES: Math.max(0, measured - distinct),
+    NORMALIZED_ROWS: rows.length,
+    STRICT_READY: strictReady,
+    REJECTIONS: rejections,
+    SYMBOL_STATUS: symbolStatus,
+  };
+}
+
 // Coordinator. With the default flag this returns immediately without importing
 // the RADAR engine, DB, or bridge.
 export async function runRadarContextPublisher(deps = {}) {
@@ -82,17 +113,22 @@ export async function runRadarContextPublisher(deps = {}) {
     const candidates = Array.isArray(result.candidates) ? result.candidates : [];
     const entryReadyCount = Array.isArray(result.entryReady) ? result.entryReady.length : 0;
     const providerStatus = buildProviderStatus(validatedRolling, bundle, nowMs);
+    providerStatus.ABSORB_COVERAGE = buildAbsorbCoverage(validatedRolling, rollingSnapshot, bundle);
     const written = await store.insertRadarRunResult(db, {
       runId: bundle.run.id, status: 'ready', source: 'canonical_context', computedAt: new Date(nowMs),
       candidates, entryReadyCount, marketRegime: result.marketRegime, pipeline: result.pipeline,
       absorbFunnel: result.absorbFunnel, universeDiagnostics: result.universeDiagnostics, providerStatus,
     });
     if (!written.ok) return written;
-    return { ok: true, runId: bundle.run.id, candidateCount: written.candidateCount, entryReadyCount, trustedMicro: providerStatus.COVERAGE_SYMBOLS };
+    return { ok: true, runId: bundle.run.id, candidateCount: written.candidateCount, entryReadyCount, trustedMicro: providerStatus.COVERAGE_SYMBOLS, absorbCoverage: providerStatus.ABSORB_COVERAGE, absorbMode: providerStatus.ABSORB_MODE };
   }, { getDbImpl: deps.getDbImpl });
 
   if (!tx?.ok) { console.warn('[RADAR_PUBLISH] cycle_failed', { reason: tx?.reason || 'DB_UNAVAILABLE' }); return outcome(503, { ok: false, reason: tx?.reason || 'DB_UNAVAILABLE' }); }
   if (tx.skipped) return outcome(200, { ok: true, skipped: true, reason: tx.reason });
   console.info('[RADAR_PUBLISH] cycle_completed', { runId: tx.runId, candidateCount: tx.candidateCount, entryReadyCount: tx.entryReadyCount, trustedMicro: tx.trustedMicro });
+  console.info('[RADAR_ABSORB] coverage', { runId: tx.runId, absorbMode: tx.absorbMode, ...tx.absorbCoverage });
+  if (tx.absorbCoverage && tx.absorbCoverage.SUPPLIED_MEASUREMENTS > 0 && tx.absorbCoverage.STRICT_READY === 0) {
+    console.warn('[RADAR_ABSORB] no_strict_coverage', { runId: tx.runId, rejections: tx.absorbCoverage.REJECTIONS });
+  }
   return outcome(200, { ok: true, skipped: false, runId: tx.runId, candidateCount: tx.candidateCount, entryReadyCount: tx.entryReadyCount, trustedMicro: tx.trustedMicro });
 }

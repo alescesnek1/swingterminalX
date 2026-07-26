@@ -84,3 +84,28 @@ test('thin microstructure → provider not trusted, STRICT cannot be the mode', 
   assert.notEqual(capture.payload.providerStatus.ABSORB_MODE, 'STRICT');
   assert.equal(capture.payload.providerStatus.COVERAGE_SYMBOLS, 0);
 });
+
+test('rejected microstructure reports a specific reason, never a bare zero', async () => {
+  const capture = {};
+  const bundle = fullBundle();
+  bundle.microSymbols[0].aggTrades = cleanTrades(4); // below sample floor
+  await runRadarContextPublisher({ env: { MARKET_CONTEXT_RADAR_ENABLED: 'true' }, store: fakeStore(capture), withTransaction: async (cb) => cb({}), radar, bridge, rolling, bundle });
+  const coverage = capture.payload.providerStatus.ABSORB_COVERAGE;
+  assert.ok(coverage, 'coverage diagnostics persisted');
+  assert.equal(coverage.SUPPLIED_MEASUREMENTS, 1);
+  assert.equal(coverage.STRICT_READY, 0);
+  assert.equal(coverage.SYMBOL_STATUS.BTCUSDT, 'samples-thin');
+  assert.equal(coverage.REJECTIONS['samples-thin'], 1);
+});
+
+test('two venues of one symbol are reported as a collapse, not silently lost', async () => {
+  const capture = {};
+  const bundle = fullBundle();
+  bundle.microSymbols.push({ ...bundle.microSymbols[0], market: 'futures' });
+  await runRadarContextPublisher({ env: { MARKET_CONTEXT_RADAR_ENABLED: 'true' }, store: fakeStore(capture), withTransaction: async (cb) => cb({}), radar, bridge, rolling, bundle });
+  const coverage = capture.payload.providerStatus.ABSORB_COVERAGE;
+  assert.equal(coverage.SUPPLIED_MEASUREMENTS, 2);
+  assert.equal(coverage.BRIDGE_MEASURED, 2);
+  assert.equal(coverage.DISTINCT_SYMBOLS, 1);
+  assert.equal(coverage.COLLAPSED_DUPLICATES, 1);
+});
