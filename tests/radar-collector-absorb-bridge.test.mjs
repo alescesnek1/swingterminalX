@@ -73,8 +73,9 @@ test('one thin symbol no longer discards a healthy symbol measured in the same r
   const normalized = normalizeRollingMicrostructureSnapshot(snapshot, { nowMs: NOW });
   assert.equal(normalized.trusted, true, 'the provider itself is fresh and trusted');
   assert.equal(normalized.strictReadySymbols, 1);
-  assert.equal(normalized.data.BTCUSDT.strictReady, true);
-  assert.equal(normalized.data.ETHUSDT.strictReady, false);
+  // Keys are venue-qualified so spot and futures cannot overwrite each other.
+  assert.equal(normalized.data['spot:BTCUSDT'].strictReady, true);
+  assert.equal(normalized.data['spot:ETHUSDT'].strictReady, false);
   // The healthy symbol keeps its measurement; the thin one still confirms nothing.
   assert.equal(getFreshRollingMicrostructureForSymbol(snapshot, 'BTCUSDT', { nowMs: NOW }).strictReady, true);
   assert.equal(getFreshRollingMicrostructureForSymbol(snapshot, 'ETHUSDT', { nowMs: NOW }).strictReady, false);

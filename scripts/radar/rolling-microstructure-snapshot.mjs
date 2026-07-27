@@ -24,6 +24,53 @@ export const TRUSTED_ROLLING_FIELDS = Object.freeze(['absorptionScore', 'bidDept
 
 function clampPositiveInteger(value, fallback, max) { const n = Math.trunc(Number(value)); return Number.isFinite(n) && n > 0 ? Math.min(n, max) : fallback; }
 function normalizeSymbol(raw) { const symbol = String(raw ?? '').trim().toUpperCase(); return /^[A-Z0-9]{1,24}$/.test(symbol) ? symbol : null; }
+
+// Spot and futures are DIFFERENT measurements of the same symbol: different books,
+// different flow, different depth. Keying the snapshot by symbol alone made one
+// overwrite the other, and — worse — let a spot candidate be scored on futures
+// microstructure, which is a false execution reading rather than a missing one.
+//
+// A key may therefore be venue-qualified ("spot:BTCUSDT") or bare ("BTCUSDT"). Bare
+// keys remain fully supported: the futures producer and the legacy static snapshots
+// emit them, and dropping them would silently lose those feeds.
+const ROLLING_VENUES = new Set(['spot', 'futures']);
+export function parseRollingKey(raw) {
+  const text = String(raw ?? '').trim();
+  const separator = text.indexOf(':');
+  if (separator < 0) { const symbol = normalizeSymbol(text); return symbol ? { key: symbol, symbol, market: null } : null; }
+  const market = text.slice(0, separator).trim().toLowerCase();
+  const symbol = normalizeSymbol(text.slice(separator + 1));
+  if (!symbol || !ROLLING_VENUES.has(market)) return null;
+  return { key: `${market}:${symbol}`, symbol, market };
+}
+export function rollingKeyFor(market, symbol) {
+  const safeSymbol = normalizeSymbol(symbol);
+  if (!safeSymbol) return null;
+  const venue = String(market ?? '').trim().toLowerCase();
+  return ROLLING_VENUES.has(venue) ? `${venue}:${safeSymbol}` : safeSymbol;
+}
+
+// Resolves ONE row for a symbol, refusing to substitute another venue's data.
+// Returning null (→ UNKNOWN downstream) is the correct answer when the requested
+// venue was not measured; returning the other venue's row would be a wrong answer.
+function selectRollingRow(normalized, symbol, market) {
+  const safeSymbol = normalizeSymbol(symbol);
+  if (!safeSymbol) return null;
+  const requested = String(market ?? '').trim().toLowerCase();
+  const venue = ROLLING_VENUES.has(requested) ? requested : null;
+  if (venue) {
+    const exact = normalized.data[`${venue}:${safeSymbol}`];
+    if (exact) return exact;
+    // A bare-keyed row is usable only if it does not claim a different venue.
+    const bare = normalized.data[safeSymbol];
+    return bare && (!bare.market || bare.market === venue) ? bare : null;
+  }
+  const bare = normalized.data[safeSymbol];
+  if (bare) return bare;
+  // No venue asked for: only unambiguous when exactly one venue measured this symbol.
+  const matches = Object.keys(normalized.data).filter((key) => key.endsWith(`:${safeSymbol}`));
+  return matches.length === 1 ? normalized.data[matches[0]] : null;
+}
 function finiteNumber(value) { const n = Number(value); return Number.isFinite(n) ? n : null; }
 function boolValue(value) { if (value === true || value === false) return value; if (typeof value === 'string' && value.trim().toLowerCase() === 'true') return true; if (typeof value === 'string' && value.trim().toLowerCase() === 'false') return false; return undefined; }
 function hasOwn(obj, key) { return Object.prototype.hasOwnProperty.call(obj, key); }
@@ -87,6 +134,10 @@ export function validateTrustedRollingRow(row, { nowMs = Date.now(), ttlMs = DEF
 function normalizeRow(raw, opts) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const row = {};
+  // The venue must survive normalization: it is what lets a lookup refuse to answer
+  // a spot question with a futures measurement.
+  const venue = String(raw.market ?? '').trim().toLowerCase();
+  if (ROLLING_VENUES.has(venue)) row.market = venue;
   for (const key of ['bidDepthRebuildPct', 'marketSellRatio', 'openInterestChangePct', 'longLiquidationSpike', ...OPTIONAL_NUMERIC_FIELDS]) { if (hasOwn(raw, key)) { const n = finiteNumber(raw[key]); if (n !== null) row[key] = n; } }
   const flow = normalizeFlow(raw.flow); if (flow) row.flow = flow;
   for (const key of OPTIONAL_BOOLEAN_FIELDS) { if (hasOwn(raw, key)) { const value = boolValue(raw[key]); if (value !== undefined) row[key] = value; } }
@@ -114,7 +165,7 @@ export function normalizeRollingMicrostructureSnapshot(input, opts = {}) {
   const nowMs = Number.isFinite(Number(opts.nowMs)) ? Number(opts.nowMs) : Date.now(); const ttlMs = clampPositiveInteger(opts.ttlMs ?? input?.ttlMs, DEFAULT_TTL_MS, Number.MAX_SAFE_INTEGER); const topN = clampPositiveInteger(opts.topN ?? input?.topN, MAX_TOP_N, MAX_TOP_N); const updatedAtMs = updatedAtMsOf(input);
   const data = {}; const diagnostics = { requested: 0, stored: 0, skipped: 0, invalidSymbols: [], missingFieldsBySymbol: {}, ...(input?.diagnostics && typeof input.diagnostics === 'object' && !Array.isArray(input.diagnostics) ? input.diagnostics : {}) };
   const src = sourceMap(input);
-  if (src) for (const [rawSymbol, rawRow] of Object.entries(src).slice(0, topN)) { const symbol = normalizeSymbol(rawSymbol); if (!symbol) { diagnostics.invalidSymbols.push(String(rawSymbol)); diagnostics.skipped += 1; continue; } const row = normalizeRow(rawRow, { nowMs, ttlMs }); if (!row) { diagnostics.skipped += 1; continue; } data[symbol] = row; diagnostics.stored += 1; if (row.missingFields.length) diagnostics.missingFieldsBySymbol[symbol] = row.missingFields; }
+  if (src) for (const [rawSymbol, rawRow] of Object.entries(src).slice(0, topN)) { const parsed = parseRollingKey(rawSymbol); if (!parsed) { diagnostics.invalidSymbols.push(String(rawSymbol)); diagnostics.skipped += 1; continue; } const row = normalizeRow(rawRow, { nowMs, ttlMs }); if (!row) { diagnostics.skipped += 1; continue; } if (parsed.market && !row.market) row.market = parsed.market; row.symbol = parsed.symbol; data[parsed.key] = row; diagnostics.stored += 1; if (row.missingFields.length) diagnostics.missingFieldsBySymbol[parsed.key] = row.missingFields; }
   const stale = !Number.isFinite(updatedAtMs) || updatedAtMs > nowMs + 60_000 || nowMs - updatedAtMs > ttlMs;
   const suppliedTrusted = boolValue(input?.trusted) === true;
   const foundationRows = Object.values(data).filter((row) => foundationPayload(row));
@@ -133,4 +184,7 @@ export function normalizeRollingMicrostructureSnapshot(input, opts = {}) {
   const strictReadySymbols = foundationRows.filter((row) => row.strictReady === true).length;
   return { provider: typeof input?.provider === 'string' ? input.provider.slice(0, 64) : 'unknown', updatedAtMs, timeframe: typeof input?.timeframe === 'string' && input.timeframe ? input.timeframe.slice(0, 32) : 'rolling', windows: input?.windows && typeof input.windows === 'object' && !Array.isArray(input.windows) ? { ...input.windows } : {}, ttlMs, trusted, stale, strictReadySymbols, foundationRows: foundationRows.length, data, diagnostics };
 }
-export function getFreshRollingMicrostructureForSymbol(snapshot, symbol, opts = {}) { const normalized = normalizeRollingMicrostructureSnapshot(snapshot, opts); if (normalized.stale || normalized.trusted !== true) return null; const safeSymbol = normalizeSymbol(symbol); const row = safeSymbol && normalized.data[safeSymbol]; return row ? { ...row, missingFields: [...row.missingFields] } : null; }
+// `opts.market` scopes the lookup to a venue. Omitting it keeps the previous
+// behaviour for bare-keyed snapshots; supplying it makes a venue mismatch return
+// null rather than another market's measurement.
+export function getFreshRollingMicrostructureForSymbol(snapshot, symbol, opts = {}) { const normalized = normalizeRollingMicrostructureSnapshot(snapshot, opts); if (normalized.stale || normalized.trusted !== true) return null; const row = selectRollingRow(normalized, symbol, opts.market); return row ? { ...row, missingFields: [...row.missingFields] } : null; }

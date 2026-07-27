@@ -14,6 +14,7 @@
 //     and the row is not strictReady — the pipeline then reports UNKNOWN, never a
 //     fake confirmation.
 import { computeRollingAbsorption, validateRollingTrades } from './rolling-microstructure-core.mjs';
+import { rollingKeyFor } from './rolling-microstructure-snapshot.mjs';
 
 export const COLLECTOR_ROLLING_SOURCE = 'netlify-atomic-collector';
 const MIN_TRADE_SAMPLES = 10;
@@ -124,11 +125,15 @@ export function buildCollectorRollingSnapshot(symbols = [], opts = {}) {
     // provenance and the trust bar are identical — nothing is relaxed.
     if (input?.absorb && typeof input.absorb === 'object' && !Array.isArray(input.absorb)) {
       const symbol = typeof input.symbol === 'string' ? input.symbol.trim().toUpperCase() : '';
-      if (symbol) { data[symbol] = input.absorb; measured += 1; precomputed += 1; continue; }
+      // Venue-qualified key. Keyed by symbol alone, the spot and futures rows of one
+      // symbol collided and the later one silently replaced the earlier — and the
+      // survivor could then be handed to a candidate on the OTHER venue.
+      const key = symbol ? rollingKeyFor(input.market, symbol) : null;
+      if (key) { data[key] = { ...input.absorb, market: input.absorb.market ?? input.market ?? null }; measured += 1; precomputed += 1; continue; }
     }
     const built = buildCollectorRollingRow(input, nowMs);
     if (!built) continue;
-    data[built.symbol] = built.row;
+    data[rollingKeyFor(built.market, built.symbol) || built.symbol] = built.row;
     measured += 1;
   }
   return {

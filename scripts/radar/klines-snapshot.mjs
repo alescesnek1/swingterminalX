@@ -44,6 +44,43 @@ function normalizeSymbol(raw) {
   return /^[A-Z0-9]{1,24}$/.test(symbol) ? symbol : null;
 }
 
+// Same venue problem as the rolling microstructure snapshot: spot and futures candles
+// for one symbol are different series, and keying by symbol alone let one replace the
+// other — so a spot candidate's reclaim could be computed from futures candles.
+// Keys may be venue-qualified ("spot:BTCUSDT") or bare ("BTCUSDT"); bare stays
+// supported because the existing producers emit it.
+const KLINES_VENUES = new Set(['spot', 'futures']);
+function parseKlinesKey(raw) {
+  const text = String(raw ?? '').trim();
+  const separator = text.indexOf(':');
+  if (separator < 0) { const symbol = normalizeSymbol(text); return symbol ? { key: symbol, symbol, market: null } : null; }
+  const market = text.slice(0, separator).trim().toLowerCase();
+  const symbol = normalizeSymbol(text.slice(separator + 1));
+  if (!symbol || !KLINES_VENUES.has(market)) return null;
+  return { key: `${market}:${symbol}`, symbol, market };
+}
+export function klinesKeyFor(market, symbol) {
+  const safeSymbol = normalizeSymbol(symbol);
+  if (!safeSymbol) return null;
+  const venue = String(market ?? '').trim().toLowerCase();
+  return KLINES_VENUES.has(venue) ? `${venue}:${safeSymbol}` : safeSymbol;
+}
+// Refuses to answer with another venue's series; null → UNKNOWN downstream.
+function selectKlinesKey(normalized, symbol, market) {
+  const safeSymbol = normalizeSymbol(symbol);
+  if (!safeSymbol) return null;
+  const requested = String(market ?? '').trim().toLowerCase();
+  const venue = KLINES_VENUES.has(requested) ? requested : null;
+  if (venue) {
+    const exact = `${venue}:${safeSymbol}`;
+    if (normalized.data[exact]) return exact;
+    return normalized.data[safeSymbol] ? safeSymbol : null;
+  }
+  if (normalized.data[safeSymbol]) return safeSymbol;
+  const matches = Object.keys(normalized.data).filter((key) => key.endsWith(`:${safeSymbol}`));
+  return matches.length === 1 ? matches[0] : null;
+}
+
 function toFiniteNumber(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
@@ -143,12 +180,13 @@ export function normalizeKlinesSnapshot(input, opts = {}) {
   diagnostics.requested = entries.length;
 
   for (const [rawSymbol, entry] of entries.slice(0, topN)) {
-    const symbol = normalizeSymbol(rawSymbol);
-    if (!symbol) {
+    const parsed = parseKlinesKey(rawSymbol);
+    if (!parsed) {
       diagnostics.invalidSymbols.push(String(rawSymbol));
       diagnostics.skipped += 1;
       continue;
     }
+    const symbol = parsed.key;
 
     const candles = [];
     for (const rawCandle of candlesFromEntry(entry)) {
@@ -187,7 +225,8 @@ export function getFreshClosedKlinesForSymbol(snapshot, symbol, opts = {}) {
   const normalized = normalizeKlinesSnapshot(snapshot, opts);
   if (normalized.stale) return null;
 
-  const normalizedSymbol = normalizeSymbol(symbol);
+  // `opts.market` scopes the lookup to a venue; omitted keeps the previous behaviour.
+  const normalizedSymbol = selectKlinesKey(normalized, symbol, opts.market);
   if (!normalizedSymbol) return null;
 
   const candles = normalized.data[normalizedSymbol];
