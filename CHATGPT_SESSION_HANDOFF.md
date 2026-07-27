@@ -730,6 +730,11 @@ Doc map:
   the machine-enforced error-observability ESLint rules, and the
   `eslint-suppressions.json` debt baseline. Read before touching any failure
   path or adding a `<script>` to `index.html`.
+- `docs/native-auth.md` — own-database accounts (`app_users`), scrypt passwords,
+  the terminal's own access tokens, the admin user-management endpoint, the
+  revocation tradeoff, and the step-by-step rollout order. **Read before
+  touching anything auth-related.** Backend done + default-off; the browser
+  still signs in through Supabase.
 
 ## 5. Git / deploy guardrails
 
@@ -846,7 +851,37 @@ email allowlist (§9), not a billing tier.
   another user's session) and org-wide visibility **require `verified === true`** —
   never available in decode-only mode.
 - **`AUTH_DECODE_ONLY=true` is dev-only and NOT production-safe** — must be
-  false/unset in production (any unverifiable token → 401).
+  false/unset in production (any unverifiable token → 401). It also cannot reach
+  account management: `/api/admin-users` requires `verified === true`.
+- **Native (own-database) auth — backend DONE, DEFAULT OFF (local, unpushed).**
+  A second, additive identity source alongside Supabase, so the owner can manage
+  the handful of real users from the terminal. Full detail + rollout order in
+  `docs/native-auth.md`; the essentials:
+  - Accounts live in `app_users` (Netlify/Neon), passwords are **scrypt** via
+    Node's built-in `crypto` (no new dependency). **Supabase's bcrypt hashes are
+    NOT migrated** — the owner sets fresh passwords through the admin page.
+  - Gated behind `NATIVE_AUTH_ENABLED === 'true'` **and** a ≥32-char
+    `AUTH_JWT_SECRET`. With the flag off, a native token is refused and every
+    existing path behaves exactly as before. Both sources are accepted while the
+    flag is on, so the cutover cannot lock the owner out and reverts via one env
+    var.
+  - **`app_users.role` grants NOTHING.** Admin is still `BOT_ADMIN_EMAILS` only.
+    A `role` claim in a user-held token is ignored. There is deliberately **no
+    bootstrap secret** — the first native accounts are created via
+    `/api/admin-users` using the owner's existing Supabase admin session.
+  - Endpoints: `/api/auth-login`, `/api/auth-refresh`, `/api/admin-users`.
+    Login is **non-enumerable** (unknown email / wrong password / disabled /
+    locked → byte-identical 401, same scrypt cost). Lockout is 8 attempts →
+    15 min, and is *not* disclosed to the client — read it on the admin page or
+    in `app_user_audit`. A DB outage is a 503, never "invalid credentials".
+  - **Revocation:** verification is stateless (no DB read on the hot path), so
+    disable/reset takes effect at the user's next **refresh** (≤ 1 token TTL,
+    default 60 min). For immediate global revocation, rotate `AUTH_JWT_SECRET`.
+  - **The browser still signs in through Supabase** — `terminal.js` is unchanged.
+    Remaining: the login form + token storage + refresh loop + admin panel, a
+    "change my own password" endpoint (so `mustChangePassword` can be satisfied),
+    and a tier decision for native users (`getTier()` currently resolves a native
+    non-admin to `free`).
 - **Personal watch — Phase 1 backend (live, merged to `main`):**
   `netlify/functions/cockpit-personal-watch-settings.mjs` +
   `_personal-watch-store.mjs` expose `/api/cockpit-personal-watch-settings`
@@ -1204,6 +1239,32 @@ email allowlist (§9), not a billing tier.
 ## 11. Known completed work / recent milestones
 
 From current git history (most recent first, condensed — see `git log` for full):
+- **Native auth backend, phase 2 (LOCAL, UNPUSHED, branch
+  `feat/native-auth-foundation`: `98c958d` → `47c09b8` → `19eaf15`)** — auth
+  moved off Supabase into the Netlify/Neon DB, **complete on the backend and
+  disabled by default**; the browser still signs in through Supabase, so the
+  terminal UI switch is the remaining piece. New: `app_users` +
+  `app_user_audit` migration, `_password.mjs` (scrypt via node:crypto, no new
+  dependency, self-describing hash so cost can be raised later),
+  `_native-jwt.mjs` + a second Deno-edge verifier kept byte-compatible by a
+  cross-runtime test, `_user-store.mjs`, and three endpoints
+  (`/api/auth-login`, `/api/auth-refresh`, `/api/admin-users`).
+  **Passwords are NOT migrated** — Supabase's are bcrypt and Node has no native
+  bcrypt, so the owner sets fresh ones via the admin page.
+  Gated behind `NATIVE_AUTH_ENABLED === 'true'` + a ≥32-char `AUTH_JWT_SECRET`;
+  with the flag off a native token is refused and Supabase is untouched
+  (asserted, not assumed). Both sources work while the flag is on, so the
+  cutover is reversible by one env var.
+  **Authorization did not change:** `app_users.role` grants nothing — admin
+  stays `BOT_ADMIN_EMAILS` only, and `/api/admin-users` additionally requires
+  `identity.verified === true`. That also solves the first-account problem with
+  no bootstrap secret: the owner creates native accounts using their existing
+  Supabase admin session.
+  Verification is stateless (no DB read on the hot path); revocation is
+  therefore disable/reset → effective at the next refresh (≤ 1 TTL), or rotate
+  `AUTH_JWT_SECRET` for immediate global revocation. Login is deliberately
+  non-enumerable: unknown email / wrong password / disabled / locked all return
+  a byte-identical 401. See §9 and `docs/native-auth.md` for the rollout order.
 - **Error observability + static analysis, phase 1 (LOCAL, UNPUSHED, branch
   `feat/error-observability-lint`)** — three things:
   1. **A production bug found and fixed.** `normalizeOpenPositionsSummary()`

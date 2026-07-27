@@ -134,6 +134,23 @@ Do not rediscover the whole repo from scratch unless these are clearly stale.
   `TELEGRAM_NETWORK_ERROR` / `TELEGRAM_TIMEOUT` → retry later. As always, no
   raw token/chat ID/user ID should ever be pasted into chat, logs, or
   issues.
+- **Native auth (own-database accounts) is additive and default-off.** The
+  `app_users` path is gated behind `NATIVE_AUTH_ENABLED === 'true'` plus a
+  ≥32-char `AUTH_JWT_SECRET`; with the flag off, a native token is refused and
+  the Supabase path is untouched. Rules that must not be relaxed:
+  **`app_users.role` grants nothing** — admin authority stays exclusively
+  `BOT_ADMIN_EMAILS` via `_auth.mjs` `isAdmin()`, and `/api/admin-users` also
+  requires `identity.verified === true` so `AUTH_DECODE_ONLY` can never reach
+  account management. Never accept a `role` claim from a user-held token as
+  authorization. Never add a bootstrap/backdoor secret that creates accounts —
+  the first native accounts are created through `/api/admin-users` using the
+  owner's existing (Supabase) admin session. Never log or return a password,
+  hash, or token; a generated password is shown once in the response and never
+  written to `app_user_audit`. Keep the two verifier implementations
+  (`netlify/functions/_native-jwt.mjs` and
+  `apps/edge/netlify/edge-functions/lib/native-jwt.js`) byte-compatible — the
+  cross-runtime test exists because a drift means half the API accepts a token
+  the other half rejects. See `docs/native-auth.md`.
 - **No secrets / keys / tokens / customer PII** in code, docs, URLs, or commits.
 
 ## Error observability (non-negotiable)
