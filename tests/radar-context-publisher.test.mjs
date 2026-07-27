@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { runRadarContextPublisher } from '../netlify/functions/_radar-context-publisher.mjs';
 import * as radar from '../scripts/radar/trading-radar.mjs';
 import * as bridge from '../scripts/radar/collector-absorb-bridge.mjs';
@@ -41,6 +42,7 @@ function fakeStore(capture) {
   return {
     withContextTransaction: async (cb) => cb({}),
     insertRadarRunResult: async (_db, payload) => { capture.payload = payload; return { ok: true, candidateCount: payload.candidates.length }; },
+    upsertRadarCandidateStates: async (_db, payload) => { capture.statePayload = payload; return { ok: true, written: payload.candidates.length }; },
     getRadarInputBundle: async () => { throw new Error('should use injected bundle'); },
   };
 }
@@ -95,11 +97,15 @@ test('rejected microstructure reports a specific reason, never a bare zero', asy
   assert.equal(coverage.SUPPLIED_MEASUREMENTS, 1);
   assert.equal(coverage.STRICT_READY, 0);
   // The reason names the failing floor, not just that some floor failed.
-  assert.equal(coverage.SYMBOL_STATUS.BTCUSDT, 'samples-thin:aggTrades');
+  assert.equal(coverage.SYMBOL_STATUS['spot:BTCUSDT'], 'samples-thin:aggTrades');
   assert.equal(coverage.REJECTIONS['samples-thin:aggTrades'], 1);
 });
 
-test('two venues of one symbol are reported as a collapse, not silently lost', async () => {
+// Spot and futures are DIFFERENT measurements of one symbol: different books,
+// different flow. They used to share a single snapshot key, so one silently replaced
+// the other and the survivor could be handed to a candidate on the OTHER venue — a
+// wrong execution reading rather than a missing one. Venue-qualified keys keep both.
+test('both venues of one symbol are kept as separate measurements, neither collapsed', async () => {
   const capture = {};
   const bundle = fullBundle();
   bundle.microSymbols.push({ ...bundle.microSymbols[0], market: 'futures' });
@@ -107,8 +113,10 @@ test('two venues of one symbol are reported as a collapse, not silently lost', a
   const coverage = capture.payload.providerStatus.ABSORB_COVERAGE;
   assert.equal(coverage.SUPPLIED_MEASUREMENTS, 2);
   assert.equal(coverage.BRIDGE_MEASURED, 2);
-  assert.equal(coverage.DISTINCT_SYMBOLS, 1);
-  assert.equal(coverage.COLLAPSED_DUPLICATES, 1);
+  assert.equal(coverage.DISTINCT_SYMBOLS, 2, 'no venue is dropped');
+  assert.equal(coverage.COLLAPSED_DUPLICATES, 0);
+  // Each venue is reported under its own key, so coverage can never hide one.
+  assert.deepEqual(Object.keys(coverage.SYMBOL_STATUS).sort(), ['futures:BTCUSDT', 'spot:BTCUSDT']);
 });
 
 // Regression: a run's observed_at is stamped when collection STARTS, but request
@@ -125,7 +133,7 @@ test('a long collection cycle does not make its own measurements look stale', as
   const res = await runRadarContextPublisher({ env: { MARKET_CONTEXT_RADAR_ENABLED: 'true' }, store: fakeStore(capture), withTransaction: async (cb) => cb({}), radar, bridge, rolling, bundle });
   assert.equal(res.body.ok, true);
   const coverage = capture.payload.providerStatus.ABSORB_COVERAGE;
-  assert.equal(coverage.SYMBOL_STATUS.BTCUSDT, 'READY', 'the late measurement is still trusted');
+  assert.equal(coverage.SYMBOL_STATUS['spot:BTCUSDT'], 'READY', 'the late measurement is still trusted');
   assert.equal(capture.payload.providerStatus.ABSORB_MODE, 'STRICT');
 });
 
@@ -156,4 +164,32 @@ test('a long cycle does not mark its own rolling snapshot STALE (matrix "DATA OF
   assert.ok(btc, 'BTCUSDT is a candidate');
   assert.notEqual(btc.STRICT_ABSORB_STATUS, 'ABSORB_DATA_STALE');
   assert.notEqual(btc.ABSORB_STATUS, 'ABSORB_DATA_STALE');
+});
+
+// The publisher must stay lazy: with the flag off it returns without pulling in the
+// RADAR engine, the DB, or the bridge. A static import of any of those at module load
+// would silently undo that (and a venue-key helper import did exactly that once).
+test('the publisher imports no RADAR/DB module at load time', () => {
+  const src = fs.readFileSync(new URL('../netlify/functions/_radar-context-publisher.mjs', import.meta.url), 'utf8');
+  const staticImports = [...src.matchAll(/^import\s.*$/gm)].map((m) => m[0]);
+  assert.deepEqual(staticImports, [], 'every dependency is loaded lazily inside the coordinator');
+  // The lazy loaders are still the only path to those modules.
+  for (const mod of ['_market-context-store.mjs', 'trading-radar.mjs', 'collector-absorb-bridge.mjs', 'rolling-microstructure-snapshot.mjs']) {
+    assert.ok(src.includes(`await import('./${mod}')`) || src.includes(`await import('../../scripts/radar/${mod}')`), `${mod} is imported lazily`);
+  }
+});
+
+// The publisher's local key builder and the snapshot reader's klinesKeyFor are
+// duplicated on purpose (to keep the module lazy), so they must agree on the format.
+test('the publisher key builder matches the snapshot reader format', async () => {
+  const { klinesKeyFor } = await import('../scripts/radar/klines-snapshot.mjs');
+  const capture = {};
+  const bundle = fullBundle();
+  bundle.microSymbols.push({ ...bundle.microSymbols[0], market: 'futures' });
+  await runRadarContextPublisher({ env: { MARKET_CONTEXT_RADAR_ENABLED: 'true' }, store: fakeStore(capture), withTransaction: async (cb) => cb({}), radar, bridge, rolling, bundle });
+  // Both venues were supplied, so both keys must be the reader's own format.
+  for (const market of ['spot', 'futures']) {
+    assert.equal(klinesKeyFor(market, 'BTCUSDT'), `${market}:BTCUSDT`);
+  }
+  assert.equal(capture.payload.providerStatus.ABSORB_COVERAGE.DISTINCT_SYMBOLS, 2);
 });

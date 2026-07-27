@@ -40,9 +40,25 @@ function tickerToMarket(t) {
   };
 }
 
+// Venue-qualified key, matching klinesKeyFor in scripts/radar/klines-snapshot.mjs.
+// Duplicated deliberately rather than imported: this module must not import the RADAR
+// modules at load time — with the flag off the publisher returns without pulling in
+// the engine, DB, or bridge, and a static import here would undo that. The snapshot
+// reader accepts both bare and venue-qualified keys, so the two only need to agree on
+// the format, which the venue-keying tests pin down.
+const KLINES_VENUES = new Set(['spot', 'futures']);
+function klinesKeyForVenue(market, symbol) {
+  const safeSymbol = String(symbol ?? '').trim().toUpperCase();
+  if (!/^[A-Z0-9]{1,24}$/.test(safeSymbol)) return null;
+  const venue = String(market ?? '').trim().toLowerCase();
+  return KLINES_VENUES.has(venue) ? `${venue}:${safeSymbol}` : safeSymbol;
+}
+
 function buildKlinesSnapshot(microSymbols, nowMs) {
   const data = {};
-  for (const s of microSymbols) if (s && s.symbol && Array.isArray(s.klines) && s.klines.length) data[String(s.symbol).toUpperCase()] = s.klines;
+  // Two venues of one symbol are two candle series; a single symbol key let one
+  // overwrite the other, so a spot candidate's reclaim could use futures candles.
+  for (const s of microSymbols) if (s && s.symbol && Array.isArray(s.klines) && s.klines.length) { const key = klinesKeyForVenue(s.market, s.symbol); if (key) data[key] = s.klines; }
   return { timeframe: '1m', updatedAtMs: nowMs, data };
 }
 
@@ -149,6 +165,17 @@ export async function runRadarContextPublisher(deps = {}) {
       absorbFunnel: result.absorbFunnel, universeDiagnostics: result.universeDiagnostics, providerStatus,
     });
     if (!written.ok) return written;
+    // Atomized current-state write, keyed by (market, symbol) rather than by run.
+    // The run-keyed insert above stays as the per-run history the funnel rollups
+    // scan; this is what the terminal/Cockpit/alert path read, so a freshly
+    // published run can no longer be found un-scored.
+    const state = await store.upsertRadarCandidateStates(db, {
+      candidates, runId: bundle.run.id, source: 'canonical_context',
+      computedAt: new Date(nowMs), observedAt: bundle.run.observedAt,
+    });
+    // A failed state write must be loud: the read path serves this table, so silently
+    // keeping the previous cycle's rows would show stale verdicts as current.
+    if (!state.ok) { console.warn('[RADAR_PUBLISH] state_upsert_failed', { runId: bundle.run.id, reason: state.reason }); return state; }
     return { ok: true, runId: bundle.run.id, candidateCount: written.candidateCount, entryReadyCount, trustedMicro: providerStatus.COVERAGE_SYMBOLS, absorbCoverage: providerStatus.ABSORB_COVERAGE, absorbMode: providerStatus.ABSORB_MODE };
   }, { getDbImpl: deps.getDbImpl });
 

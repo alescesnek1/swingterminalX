@@ -195,7 +195,7 @@ export async function getAtomizedMarketContext(db, options = {}) {
       db.query(`SELECT market,symbol,observed_at,window_start,window_end,data_status,failure_code,missing_inputs,candle_count,order_book_bid_levels,order_book_ask_levels,best_bid,best_ask,spread_bps,bid_quote_depth,ask_quote_depth,agg_trade_count,taker_buy_quote,taker_sell_quote FROM market_microstructure_measurements WHERE run_id=$1 ORDER BY market,symbol LIMIT $2`, [run.id,microLimit]),
     ]);
     const ageMs = Date.now() - new Date(run.observed_at).getTime(); const freshness = !Number.isFinite(ageMs) ? 'MISSING' : ageMs <= 6 * 60 * 1000 ? 'FRESH' : 'STALE';
-    const radar = await readRadarForRun(db, run.id);
+    const radar = await readCanonicalRadar(db, { limit: tickerLimit });
     return { ok: true, contextVersion: null, run: { id: run.id, key: run.run_key, observedAt: run.observed_at, completedAt: run.completed_at }, market: { observedAt: run.observed_at, freshness, tickers: tickers.rows, microstructure: micro.rows, dataQuality: sanitizeDiagnostics(run.diagnostics || {}) }, radar };
   } catch (error) { dbError('atomic_context_read_failed', error); return { ok: false, reason: 'DB_UNAVAILABLE' }; }
 }
@@ -238,11 +238,15 @@ export async function getRadarInputBundle(db, options = {}) {
     const windowSec = prev ? elapsedSec(prev) : null;
     const [tickRes, measRes] = await Promise.all([
       db.query(`SELECT market,symbol,last_price,price_change_percent,high_price,low_price,base_volume,quote_volume,trade_count,change_1h_pct,change_4h_pct,change_12h_pct,change_7d_pct,observed_at,data_status FROM market_ticker_observations WHERE run_id=$1 ORDER BY quote_volume DESC NULLS LAST LIMIT $2`, [latest.id, tickerLimit]),
-      // One row per SYMBOL, deepest venue first. The rolling snapshot the RADAR
-      // consumes is keyed by symbol alone, so returning both venues of one symbol
-      // would spend two of the topN slots on a single measured symbol and silently
-      // drop one of them at merge time. DISTINCT ON keeps the busier venue.
-      db.query(`SELECT * FROM (SELECT DISTINCT ON (symbol) market,symbol,observed_at,window_start,window_end,data_status,spread_bps,bid_quote_depth,ask_quote_depth,taker_buy_quote,taker_sell_quote,best_bid,best_ask,agg_trade_count,absorb, (COALESCE(taker_buy_quote,0)+COALESCE(taker_sell_quote,0)) AS taker_total FROM market_microstructure_measurements WHERE run_id=$1 ORDER BY symbol, taker_total DESC) m ORDER BY m.taker_total DESC LIMIT $2`, [latest.id, topN]),
+      // One row per (market, symbol), busiest first. This used to collapse to
+      // DISTINCT ON (symbol) because the rolling snapshot was keyed by symbol alone,
+      // so both venues of one symbol would land on a single key and one would be
+      // silently dropped at merge time. The snapshot is now keyed "market:symbol"
+      // (scripts/radar/rolling-microstructure-snapshot.mjs rollingKeyFor), so spot
+      // and futures are distinct measurements and neither has to be discarded.
+      // topN therefore bounds MEASUREMENTS, not symbols — which is what the
+      // collector's per-venue budgets already produced.
+      db.query(`SELECT market,symbol,observed_at,window_start,window_end,data_status,spread_bps,bid_quote_depth,ask_quote_depth,taker_buy_quote,taker_sell_quote,best_bid,best_ask,agg_trade_count,absorb FROM market_microstructure_measurements WHERE run_id=$1 ORDER BY (COALESCE(taker_buy_quote,0)+COALESCE(taker_sell_quote,0)) DESC LIMIT $2`, [latest.id, topN]),
     ]);
     let prevDepth = new Map();
     if (prev) { const prevRes = await db.query(`SELECT market,symbol,bid_quote_depth FROM market_microstructure_measurements WHERE run_id=$1`, [prev.id]); prevDepth = new Map(prevRes.rows.map((r) => [`${r.market}:${r.symbol}`, num(r.bid_quote_depth)])); }
@@ -338,6 +342,209 @@ export async function insertRadarRunResult(db, payload = {}) {
   } catch (error) { dbError('radar_result_insert_failed', error); return { ok: false, reason: 'DB_UNAVAILABLE' }; }
 }
 
+// ── Atomized per-symbol RADAR state ─────────────────────────────────────────
+// The CURRENT RADAR verdict per coin, upserted on (market, symbol). Unlike the
+// run-keyed tables above, a read here never depends on which market run was most
+// recently published, so it cannot return PENDING for a run that has not been
+// scored yet — the race that made the terminal fall back to its legacy path and
+// flip Strict Absorb between a real verdict and "DATA OFF".
+
+// A status the V1 state machine did not produce is stored as 'UNKNOWN' rather than
+// rejected: dropping the row would lose the whole coin, and coercing it into a
+// neighbouring state would invent a verdict. UNKNOWN is neither actionable nor
+// mistakable for one.
+const RADAR_V1_STATES = new Set(['IGNORE', 'WATCH', 'SETUP_CONFIRMED', 'DISLOCATION_CONFIRMED', 'LONG_FLUSH_CONFIRMED', 'STABILIZATION', 'RECLAIM_DETECTED', 'EARLY_ENTRY_READY', 'STANDARD_ENTRY_READY', 'AGGRESSIVE_ENTRY_READY', 'WAIT_FOR_PULLBACK', 'WAIT_FOR_RECLAIM', 'EXTENDED_ENTRY', 'CHASE_RISK', 'RISK_OFF_BLOCKED', 'INVALIDATED']);
+const RADAR_DATA_STATUS = new Set(['ready', 'pending', 'degraded', 'unknown']);
+
+// POSITION_SIZE_GUIDANCE is a human string ("25-40% planned position", "0% planned
+// position - confidence too low"). An unparseable value yields NULLs, never zeros:
+// 0% is itself a real verdict here, so a parse failure must not be storable as one.
+function parsePositionSizePct(guidance) {
+  if (typeof guidance !== 'string') return { low: null, high: null };
+  const match = guidance.match(/(\d+(?:\.\d+)?)\s*(?:-\s*(\d+(?:\.\d+)?))?\s*%/);
+  if (!match) return { low: null, high: null };
+  const low = numberOrNull(match[1]);
+  const high = match[2] === undefined ? low : numberOrNull(match[2]);
+  return { low, high };
+}
+function tpLevel(candidate, index) {
+  const list = Array.isArray(candidate?.TAKE_PROFIT_LEVELS) ? candidate.TAKE_PROFIT_LEVELS : [];
+  return numberOrNull(list[index]?.level);
+}
+function stringOrNull(value, max = 64) { return typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : null; }
+function missingInputsOf(candidate) {
+  const raw = candidate?.dataQuality?.missingData ?? candidate?.missingData;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((entry) => typeof entry === 'string' && entry.trim()).slice(0, 40).map((entry) => entry.trim().slice(0, 64));
+}
+
+// Must equal the column count in the INSERT below; a mismatch is a bind error, not
+// silent corruption, but keeping it named makes the two easy to check against.
+const RADAR_STATE_COLUMNS = 43;
+
+export async function upsertRadarCandidateStates(db, payload = {}) {
+  const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
+  const computedAt = asDate(payload.computedAt);
+  const observedAt = asDate(payload.observedAt, computedAt);
+  const runId = Number.isInteger(Number(payload.runId)) && Number(payload.runId) > 0 ? Number(payload.runId) : null;
+  const source = typeof payload.source === 'string' ? payload.source.slice(0, 64) : 'canonical_context';
+  if (!candidates.length) return { ok: true, written: 0 };
+  try {
+    let written = 0;
+    for (const chunk of chunks(candidates)) {
+      const values = [];
+      for (const c of chunk) {
+        const market = c.market === 'futures' ? 'futures' : 'spot';
+        const status = RADAR_V1_STATES.has(c.STATUS) ? c.STATUS : 'UNKNOWN';
+        const size = parsePositionSizePct(c.POSITION_SIZE_GUIDANCE);
+        values.push(
+          market, upper(c.symbol || '', 32), computedAt, observedAt, runId, source,
+          status, stringOrNull(c.ENTRY_TYPE), c.allRadarConditionsPassed === true,
+          numberOrNull(c.SETUP_SCORE), numberOrNull(c.EXECUTION_SCORE), numberOrNull(c.RISK_REWARD_SCORE),
+          numberOrNull(c.MARKET_REGIME_SCORE), numberOrNull(c.FINAL_CONFIDENCE ?? c.CONFIDENCE),
+          numberOrNull(c.DISLOCATION_SCORE), numberOrNull(c.FLUSH_SCORE), numberOrNull(c.STABILIZATION_SCORE),
+          numberOrNull(c.RECLAIM_SCORE), numberOrNull(c.ORDER_BOOK_SUPPORT_SCORE), numberOrNull(c.FLOW_CONFIRMATION_SCORE),
+          numberOrNull(c.DERIVATIVES_RISK_SCORE),
+          stringOrNull(c.RECLAIM_STATUS), stringOrNull(c.ABSORB_STATUS), stringOrNull(c.ABSORB_MODE),
+          stringOrNull(c.STRICT_ABSORB_STATUS), numberOrNull(c.STRICT_ABSORB_SCORE), c.STRICT_ABSORB_CONFIRMED === true,
+          numberOrNull(c.ENTRY_ZONE?.low), numberOrNull(c.ENTRY_ZONE?.high),
+          numberOrNull(c.STOP_LOSS_LEVEL), numberOrNull(c.HARD_INVALIDATION),
+          tpLevel(c, 0), tpLevel(c, 1), tpLevel(c, 2),
+          size.low, size.high, stringOrNull(c.POSITION_SIZE_GUIDANCE, 128),
+          stringOrNull(c.TIMEFRAME_CONTEXT, 128), stringOrNull(c.TIME_VALIDITY, 160),
+          RADAR_DATA_STATUS.has(c.dataStatus) ? c.dataStatus : 'unknown',
+          missingInputsOf(c), safeJson(sanitizeDiagnostics(c.dataQuality || {})), safeJson(sanitizeDiagnostics(c)),
+        );
+      }
+      await db.query(
+        `INSERT INTO radar_candidate_state (
+           market,symbol,computed_at,observed_at,run_id,source,
+           status,entry_type,entry_ready,
+           setup_score,execution_score,risk_reward_score,market_regime_score,confidence,
+           dislocation_score,flush_score,stabilization_score,reclaim_score,
+           order_book_support_score,flow_confirmation_score,derivatives_risk_score,
+           reclaim_status,absorb_status,absorb_mode,strict_absorb_status,strict_absorb_score,strict_absorb_confirmed,
+           entry_zone_low,entry_zone_high,stop_loss,hard_invalidation,
+           tp1_level,tp2_level,tp3_level,
+           position_size_pct_low,position_size_pct_high,position_size_guidance,
+           timeframe_context,time_validity,
+           data_status,missing_inputs,data_quality,payload
+         ) VALUES ${valuesSql(chunk.length, RADAR_STATE_COLUMNS)}
+         ON CONFLICT (market,symbol) DO UPDATE SET
+           computed_at=EXCLUDED.computed_at, observed_at=EXCLUDED.observed_at, run_id=EXCLUDED.run_id, source=EXCLUDED.source,
+           status=EXCLUDED.status, entry_type=EXCLUDED.entry_type, entry_ready=EXCLUDED.entry_ready,
+           setup_score=EXCLUDED.setup_score, execution_score=EXCLUDED.execution_score, risk_reward_score=EXCLUDED.risk_reward_score,
+           market_regime_score=EXCLUDED.market_regime_score, confidence=EXCLUDED.confidence,
+           dislocation_score=EXCLUDED.dislocation_score, flush_score=EXCLUDED.flush_score,
+           stabilization_score=EXCLUDED.stabilization_score, reclaim_score=EXCLUDED.reclaim_score,
+           order_book_support_score=EXCLUDED.order_book_support_score, flow_confirmation_score=EXCLUDED.flow_confirmation_score,
+           derivatives_risk_score=EXCLUDED.derivatives_risk_score,
+           reclaim_status=EXCLUDED.reclaim_status, absorb_status=EXCLUDED.absorb_status, absorb_mode=EXCLUDED.absorb_mode,
+           strict_absorb_status=EXCLUDED.strict_absorb_status, strict_absorb_score=EXCLUDED.strict_absorb_score,
+           strict_absorb_confirmed=EXCLUDED.strict_absorb_confirmed,
+           entry_zone_low=EXCLUDED.entry_zone_low, entry_zone_high=EXCLUDED.entry_zone_high,
+           stop_loss=EXCLUDED.stop_loss, hard_invalidation=EXCLUDED.hard_invalidation,
+           tp1_level=EXCLUDED.tp1_level, tp2_level=EXCLUDED.tp2_level, tp3_level=EXCLUDED.tp3_level,
+           position_size_pct_low=EXCLUDED.position_size_pct_low, position_size_pct_high=EXCLUDED.position_size_pct_high,
+           position_size_guidance=EXCLUDED.position_size_guidance,
+           timeframe_context=EXCLUDED.timeframe_context, time_validity=EXCLUDED.time_validity,
+           data_status=EXCLUDED.data_status, missing_inputs=EXCLUDED.missing_inputs,
+           data_quality=EXCLUDED.data_quality, payload=EXCLUDED.payload, updated_at=now()`,
+        values,
+      );
+      written += chunk.length;
+    }
+    return { ok: true, written };
+  } catch (error) { dbError('radar_state_upsert_failed', error); return { ok: false, reason: 'DB_UNAVAILABLE' }; }
+}
+
+const RADAR_STATE_SELECT = `market,symbol,computed_at,observed_at,run_id,source,status,entry_type,entry_ready,
+  setup_score,execution_score,risk_reward_score,market_regime_score,confidence,
+  dislocation_score,flush_score,stabilization_score,reclaim_score,
+  order_book_support_score,flow_confirmation_score,derivatives_risk_score,
+  reclaim_status,absorb_status,absorb_mode,strict_absorb_status,strict_absorb_score,strict_absorb_confirmed,
+  entry_zone_low,entry_zone_high,stop_loss,hard_invalidation,tp1_level,tp2_level,tp3_level,
+  position_size_pct_low,position_size_pct_high,position_size_guidance,timeframe_context,time_validity,
+  data_status,missing_inputs,data_quality,payload`;
+
+// Current RADAR state for the whole universe, best setup first. Carries its own
+// computed_at so the caller can judge freshness per row instead of inheriting a
+// single run-level verdict.
+export async function getRadarCandidateStates(db, options = {}) {
+  const limit = Math.min(Math.max(Number(options.limit) || 500, 1), 2000);
+  try {
+    const params = [limit];
+    let filter = '';
+    if (options.entryReadyOnly === true) filter = 'WHERE entry_ready';
+    else if (typeof options.status === 'string' && RADAR_V1_STATES.has(options.status)) { filter = 'WHERE status=$2'; params.push(options.status); }
+    const result = await db.query(`SELECT ${RADAR_STATE_SELECT} FROM radar_candidate_state ${filter} ORDER BY setup_score DESC NULLS LAST, execution_score DESC NULLS LAST, symbol ASC LIMIT $1`, params);
+    return { ok: true, states: result.rows };
+  } catch (error) { dbError('radar_state_read_failed', error); return { ok: false, reason: 'DB_UNAVAILABLE' }; }
+}
+
+// Single-coin read for the Cockpit. Deepest venue first when a symbol trades on
+// both, so one coin resolves to one verdict without the caller guessing a venue.
+export async function getRadarCandidateState(db, symbol, options = {}) {
+  const safeSymbol = upper(symbol || '', 32);
+  // Validate the shape, not just emptiness: a junk symbol must be refused before it
+  // reaches the database rather than travelling as a bound parameter.
+  if (!/^[A-Z0-9]{2,32}$/.test(safeSymbol)) return { ok: false, reason: 'INVALID_SYMBOL' };
+  try {
+    const params = [safeSymbol];
+    let venue = '';
+    if (options.market === 'spot' || options.market === 'futures') { venue = ' AND market=$2'; params.push(options.market); }
+    const result = await db.query(`SELECT ${RADAR_STATE_SELECT} FROM radar_candidate_state WHERE symbol=$1${venue} ORDER BY (market='spot') DESC LIMIT 1`, params);
+    return { ok: true, state: result.rows[0] || null };
+  } catch (error) { dbError('radar_state_symbol_read_failed', error); return { ok: false, reason: 'DB_UNAVAILABLE' }; }
+}
+
+// The canonical RADAR read. Candidates and freshness come from the atomized
+// per-symbol state; the aggregate diagnostics (pipeline / funnel / provider status /
+// regime) still come from the most recent run snapshot, because those are
+// genuinely per-run figures.
+//
+// The snapshot may belong to an earlier run than the newest published market run —
+// that is reported (`diagnosticsRunId`) rather than hidden, and it no longer forces
+// the whole read to PENDING. Candidates existing at all is what makes the read
+// READY, so a market run that has just been published but not yet scored serves the
+// previous verdicts, correctly labelled with their own computed_at, instead of
+// collapsing the terminal onto its legacy browser path.
+async function readCanonicalRadar(db, options = {}) {
+  const limit = Math.min(Math.max(Number(options.limit) || 1000, 1), 2000);
+  const [stateRes, snapRes] = await Promise.all([
+    db.query(`SELECT ${RADAR_STATE_SELECT} FROM radar_candidate_state ORDER BY setup_score DESC NULLS LAST, execution_score DESC NULLS LAST, symbol ASC LIMIT $1`, [limit]),
+    db.query(`SELECT run_id,status,source,computed_at,candidate_count,entry_ready_count,market_regime,pipeline,absorb_funnel,universe_diagnostics,provider_status FROM radar_run_snapshots ORDER BY computed_at DESC LIMIT 1`),
+  ]);
+  const rows = stateRes.rows;
+  const snap = snapRes.rows[0] || null;
+  const meta = {
+    source: snap?.source || 'canonical_context',
+    marketRegime: snap?.market_regime || {},
+    pipeline: snap?.pipeline || {},
+    absorbFunnel: snap?.absorb_funnel || {},
+    universeDiagnostics: snap?.universe_diagnostics || {},
+    providerStatus: snap?.provider_status || {},
+    diagnosticsRunId: snap ? Number(snap.run_id) : null,
+    diagnosticsComputedAt: snap?.computed_at || null,
+  };
+  if (!rows.length) return { status: 'PENDING', candidates: [], readSource: 'atomized_state', ...meta };
+  // Freshness of the set is its newest row; every row also carries its own
+  // computed_at so a caller can judge any single coin independently.
+  const newest = rows.reduce((max, row) => {
+    const t = row.computed_at instanceof Date ? row.computed_at.getTime() : Date.parse(row.computed_at);
+    return Number.isFinite(t) && t > max ? t : max;
+  }, 0);
+  return {
+    status: 'READY',
+    readSource: 'atomized_state',
+    computedAt: newest > 0 ? new Date(newest) : null,
+    candidateCount: rows.length,
+    entryReadyCount: rows.filter((row) => row.entry_ready === true).length,
+    candidates: rows,
+    ...meta,
+  };
+}
+
 async function readRadarForRun(db, runId) {
   const snapRes = await db.query(`SELECT run_id,status,source,computed_at,candidate_count,entry_ready_count,market_regime,pipeline,absorb_funnel,universe_diagnostics,provider_status FROM radar_run_snapshots WHERE run_id=$1`, [runId]);
   const snap = snapRes.rows[0];
@@ -346,11 +553,14 @@ async function readRadarForRun(db, runId) {
   return { status: String(snap.status).toUpperCase(), runId, source: snap.source, computedAt: snap.computed_at, candidateCount: Number(snap.candidate_count), entryReadyCount: Number(snap.entry_ready_count), marketRegime: snap.market_regime || {}, pipeline: snap.pipeline || {}, absorbFunnel: snap.absorb_funnel || {}, universeDiagnostics: snap.universe_diagnostics || {}, providerStatus: snap.provider_status || {}, candidates: candRes.rows };
 }
 
+// Reads the atomized state, not a run: the alert path must not go blind for the
+// stretch between a market run being published and that run being scored. Freshness
+// is unchanged in kind — `computedAt` is still the verdict's own time, now taken
+// from the newest state row rather than a run snapshot — and every candidate also
+// carries its own `computed_at` for per-coin checks.
 export async function getPublishedRadar(db) {
   try {
-    const runRes = await db.query(`SELECT id FROM market_collection_runs WHERE scope_id=$1 AND status='published' ORDER BY observed_at DESC LIMIT 1`, [CONTEXT_SCOPE_ID]);
-    const run = runRes.rows[0]; if (!run) return { ok: true, radar: { status: 'PENDING', candidates: [] } };
-    return { ok: true, radar: await readRadarForRun(db, run.id) };
+    return { ok: true, radar: await readCanonicalRadar(db, { limit: 2000 }) };
   } catch (error) { dbError('radar_read_failed', error); return { ok: false, reason: 'DB_UNAVAILABLE' }; }
 }
 
