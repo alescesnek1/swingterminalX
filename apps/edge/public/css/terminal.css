@@ -259,11 +259,24 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .tc-card[data-venue="alpha"] .tc-venue{background:rgba(168,85,247,.12);color:var(--pur);border:1px solid rgba(168,85,247,.45)}
 .tc-card[data-venue="dex"] .tc-venue{background:rgba(255,176,32,.10);color:var(--amb);border:1px solid rgba(255,176,32,.35)}
 
-/* HEATMAP — canvas treemap, market-cap ordered, top 500 */
+/* HEATMAP — uniform DOM grid (design ported from terminal-v4),
+   market-cap ordered, colour = 24h change. */
 /* display:flex is set by #v-heatmap.on in the view routing block above */
 #v-heatmap.on{height:calc(100vh - 85px)}
-.hm-canvas-wrap{position:relative;flex:1;min-height:0;background:#04060e;contain:strict}
-.hm-canvas{display:block;width:100%;height:100%;cursor:crosshair;image-rendering:auto}
+/* Row height is explicit (not `auto`): every tile must be the same size no
+   matter how the browser would content-size a row inside a fixed-height,
+   scrolling flex child. */
+.hm-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(var(--hm-cell,80px),1fr));grid-auto-rows:var(--hm-row,48px);gap:4px;padding:8px 12px;align-content:start;flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;background:var(--bg)}
+.hm-grid[data-density="roomy"]{--hm-cell:96px;--hm-row:58px;gap:5px}
+.hm-grid[data-density="normal"]{--hm-cell:72px;--hm-row:48px;gap:4px}
+.hm-grid[data-density="compact"]{--hm-cell:56px;--hm-row:40px;gap:3px}
+.hm-cell{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:4px;border-radius:var(--rad);text-align:center;cursor:pointer;transition:opacity .1s;border:1px solid transparent;overflow:hidden}
+.hm-cell:hover{opacity:.8}
+.hm-cell--sel{border-color:var(--pur);box-shadow:0 0 0 1px rgba(168,85,247,.35)}
+.hm-sym{font-weight:600;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hm-chg{font-size:10px;font-weight:700;margin-top:2px}
+.hm-empty{grid-column:1/-1;padding:28px 12px;text-align:center;font-size:11px;color:var(--txt3)}
+.hm-empty--err{color:var(--amb)}
 .hm-tip{position:absolute;top:0;left:0;pointer-events:none;background:rgba(7,9,26,.95);border:1px solid rgba(0,232,200,.35);border-radius:6px;padding:8px 10px;font-family:var(--mono);font-size:11px;color:var(--txt);box-shadow:0 8px 20px rgba(0,0,0,.45);backdrop-filter:blur(6px);min-width:160px;z-index:10;will-change:transform}
 .hm-tip__sym{font-size:13px;font-weight:700;color:var(--acc);letter-spacing:.06em;margin-bottom:4px}
 .hm-tip__row{display:flex;justify-content:space-between;gap:14px;line-height:1.5}
@@ -1634,7 +1647,7 @@ html,body{overflow-x:hidden;max-width:100vw}
   .scanner-right{max-height:none}
   /* Heatmap must stop relying on fixed 100vh — calendar/movers too */
   #v-heatmap.on{height:auto;min-height:60vh}
-  .hm-canvas-wrap{height:60vh;min-height:340px}
+  .hm-grid{height:60vh;min-height:340px}
   #v-calendar.on{height:auto}
   .cal-shell{grid-template-columns:1fr;overflow-y:visible}
   /* Topbar wrap so logo/ticker/buttons can stack instead of clipping */
@@ -1662,12 +1675,15 @@ html,body{overflow-x:hidden;max-width:100vw}
   .f-chip{flex-shrink:0}
   .f-input{width:120px;flex-shrink:0}
 
-  /* Heatmap — labels MUST stay visible. We let the canvas keep its
-     pixel rendering (font sized via canvas API in terminal.js) but
-     enforce a minimum cell area by capping the rendered count via a
-     taller container, so each cell stays >= ~24px square at 320px. */
+  /* Heatmap — labels MUST stay visible. Shrink the cell floor instead of
+     letting 500 coins squeeze the grid into unreadable slivers; the grid
+     scrolls vertically rather than compressing. */
   #v-heatmap.on{height:auto;min-height:0}
-  .hm-canvas-wrap{height:calc(100vh - 130px);min-height:380px}
+  .hm-grid{height:calc(100vh - 130px);min-height:380px;padding:6px 8px}
+  .hm-grid[data-density="roomy"]{--hm-cell:72px;--hm-row:50px;gap:4px}
+  .hm-grid[data-density="normal"]{--hm-cell:60px;--hm-row:44px;gap:3px}
+  .hm-grid[data-density="compact"]{--hm-cell:50px;--hm-row:38px;gap:3px}
+  .hm-sym,.hm-chg{font-size:9px}
   .hm-tip{font-size:10px;min-width:140px;padding:6px 8px}
 
   /* Movers — already collapsed to single column above 900px; tighten */
@@ -1705,10 +1721,12 @@ html,body{overflow-x:hidden;max-width:100vw}
   .hotness-bar{width:34px;height:5px}
   .hotness-val{font-size:10px;min-width:18px}
 
-  /* Heatmap container: ensure minimum cell readability by guaranteeing
-     enough vertical real-estate to keep cells at least ~22×22 (500 coins
-     at 320×600 ≈ ~22×22 cells). */
-  .hm-canvas-wrap{height:calc(100vh - 120px);min-height:360px}
+  /* Heatmap container: keep cells tappable (≥44px wide) on a 320px
+     screen — the grid scrolls instead of shrinking below that. */
+  .hm-grid{height:calc(100vh - 120px);min-height:360px}
+  .hm-grid[data-density="roomy"]{--hm-cell:64px;--hm-row:46px}
+  .hm-grid[data-density="normal"]{--hm-cell:54px;--hm-row:40px}
+  .hm-grid[data-density="compact"]{--hm-cell:46px;--hm-row:36px}
 
   /* Heatmap filter strip — keep the legend on one row, scrollable */
   #v-heatmap .filter-bar{font-size:8px;gap:4px}

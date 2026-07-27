@@ -170,7 +170,7 @@ test('every versioned asset carries the same single bumped cache-bust token', ()
   const tokens = [...indexHtml.matchAll(/\?v=([0-9a-z]+)/g)].map((m) => m[1]);
   assert.ok(tokens.length >= 11, 'all versioned assets are still tokenised');
   assert.equal(new Set(tokens).size, 1, 'exactly one token across index.html');
-  assert.equal(tokens[0], '6j6', 'token was bumped for this JS change');
+  assert.equal(tokens[0], '6j7', 'token was bumped for this JS change');
 });
 
 // The measurement budget targets the deepest drawdowns, and DISLOCATION is 20% of

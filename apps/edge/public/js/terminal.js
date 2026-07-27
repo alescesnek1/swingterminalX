@@ -2912,33 +2912,40 @@ function _renderTopChartsCore() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// HEATMAP — V6.1 strict equal-grid canvas renderer.
+// HEATMAP — V7 uniform DOM grid (design ported from terminal-v4).
 //
-//   • Block SIZE  = STRICTLY EQUAL across all 500 cells.
-//   • Block ORDER = sorted by 24h quote volume DESC. Top-left = largest,
-//                   bottom-right = smallest. Row-major fill.
-//   • Block COLOR = 24h % price change (red ↔ neutral ↔ green).
-//   • RENDERER    = single <canvas>, DPR-aware, hardware-accelerated.
-//                   Hit-test on hover + click, one absolute tooltip div.
-//                   No DOM bloat — 500 cells cost ~1 paint per repaint.
+//   • Cell SIZE  = uniform across every coin. Responsive `auto-fill`
+//                  CSS grid; the density selector picks the cell floor.
+//   • Cell ORDER = market-cap rank ASC. Top-left = #1, row-major.
+//   • Cell COLOR = 24h % price change (red / amber / neutral / green),
+//                  intensity scaled by |change| — v4's palette.
+//   • RENDERER   = plain DOM. No canvas, no hit-testing, no resize
+//                  observer: the grid reflows itself, text stays
+//                  selectable and the browser handles scrolling.
 // ─────────────────────────────────────────────────────────────
 
 const _hm = {
-  rects: [],           // [{x,y,w,h,d}] in CSS px
-  lastWidth: 0,
-  lastHeight: 0,
-  resizeRaf: 0,
-  hoverIdx: -1,
-  selectedId: null,    // persists across hover/redraw until another cell is clicked
+  pool: [],            // rendered coins; index-aligned with .hm-cell[data-i]
+  selectedId: null,    // persists across redraws until another cell is clicked
+  wired: false,
 };
 
+// A missing 24h change must stay UNKNOWN — `Number(null)` is 0, so a plain
+// Number()||0 would paint "no data" as a real flat 0.0% cell.
+function _hmPct(d) {
+  const raw = d ? d.price_change_percentage_24h : null;
+  if (raw === null || raw === undefined || raw === '') return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+// v4 palette: four bands, alpha scaled by |change| capped at 15%.
 function _hmColor(c) {
-  const int = Math.min(1, Math.abs(c) / 12);
-  if (c <= -6) return { bg: `rgba(255,51,86,${0.32 + int * 0.55})`, txt: '#ff7a91' };
-  if (c <= -2) return { bg: `rgba(255,176,32,${0.22 + int * 0.45})`, txt: '#ffc977' };
-  if (c <   2) return { bg: 'rgba(96,112,144,.16)',                  txt: '#9fb1c8' };
-  if (c <   6) return { bg: `rgba(0,212,132,${0.22 + int * 0.45})`,  txt: '#5fe5b4' };
-  return         { bg: `rgba(0,212,132,${0.32 + int * 0.55})`,        txt: '#7af0c5' };
+  const int = Math.min(1, Math.abs(c) / 15);
+  if (c < -6) return { bg: `rgba(255,51,86,${(0.15 + int * 0.5).toFixed(3)})`,  txt: 'var(--red)'  };
+  if (c < -2) return { bg: `rgba(255,176,32,${(0.12 + int * 0.4).toFixed(3)})`, txt: 'var(--amb)'  };
+  if (c <  2) return { bg: 'rgba(96,112,144,.08)',                              txt: 'var(--txt2)' };
+  return             { bg: `rgba(0,212,132,${(0.12 + int * 0.4).toFixed(3)})`,  txt: 'var(--grn)'  };
 }
 
 function _hmFmtCap(mc) {
@@ -2949,214 +2956,104 @@ function _hmFmtCap(mc) {
   return '$' + Math.round(mc/1e3) + 'K';
 }
 
-// Strict equal-grid layout. Given a container WxH and N items, picks
-// the col/row count whose cell aspect is closest to 1:1, then lays the
-// items out row-major (top-left → bottom-right). Items must already be
-// sorted DESC by 24h volume by the caller.
-function _hmGridLayout(items, W, H, out) {
-  const n = items.length;
-  if (!n || W < 4 || H < 4) return;
-  // Pick cols so cell aspect ≈ 1. cols = round(sqrt(n * W/H)).
-  let cols = Math.max(1, Math.round(Math.sqrt(n * (W / H))));
-  cols = Math.min(cols, n);
-  let rows = Math.ceil(n / cols);
-  // Tweak to minimize empty trailing slots. If the last row would be
-  // less than half full, drop a column.
-  if (cols > 1 && (rows * cols - n) >= Math.floor(cols / 2)) {
-    cols -= 1;
-    rows = Math.ceil(n / cols);
-  }
-  const cw = W / cols;
-  const ch = H / rows;
-  for (let i = 0; i < n; i++) {
-    const r = (i / cols) | 0;
-    const c = i - r * cols;
-    out.push({ x: c * cw, y: r * ch, w: cw, h: ch, d: items[i].d });
-  }
-}
-
-function _hmDraw(canvas) {
-  const ctx = canvas.getContext('2d', { alpha: false });
-  const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
-  const W = canvas.clientWidth;
-  const H = canvas.clientHeight;
-  canvas.width  = Math.round(W * dpr);
-  canvas.height = Math.round(H * dpr);
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.fillStyle = '#04060e';
-  ctx.fillRect(0, 0, W, H);
-
-  for (const r of _hm.rects) {
-    const c = Number(r.d.price_change_percentage_24h) || 0;
-    const col = _hmColor(c);
-    // Cell fill
-    ctx.fillStyle = col.bg;
-    ctx.fillRect(r.x, r.y, r.w, r.h);
-    // Border
-    ctx.strokeStyle = 'rgba(4,6,14,.85)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
-
-    // V6.8: drop the (28×18) gate. Labels must stay visible on mobile
-    // canvases where 500 cells crush every box below the old threshold.
-    // We still bail out on truly degenerate cells (<10px on either axis)
-    // to avoid sub-pixel font noise.
-    if (r.w < 10 || r.h < 10) continue;
-
-    const sym = String(r.d.symbol || '').toUpperCase();
-    const area = r.w * r.h;
-    // Dynamic font: scale by sqrt(area) but enforce a 7px floor so
-    // even tiny mobile cells render readable text. Cap at 28px.
-    const fontSym = Math.max(7, Math.min(28, Math.sqrt(area) * 0.30));
-    const fontChg = Math.max(7, Math.min(20, fontSym * 0.75));
-    // Truncate symbol if it would visually overflow the cell. Estimate
-    // character width as ~0.6 × font-size for monospace.
-    const maxChars = Math.max(1, Math.floor((r.w - 4) / (fontSym * 0.6)));
-    const symFit = sym.length > maxChars ? sym.slice(0, maxChars) : sym;
-    ctx.fillStyle = col.txt;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.font = `700 ${fontSym}px var(--mono, monospace)`;
-    const cx = r.x + r.w / 2;
-    const cy = r.y + r.h / 2;
-    if (r.h > 52 && r.w > 48) {
-      ctx.fillText(symFit, cx, cy - fontChg * 0.65);
-      ctx.font = `600 ${fontChg}px var(--mono, monospace)`;
-      ctx.fillText((c >= 0 ? '+' : '') + c.toFixed(1) + '%', cx, cy + fontSym * 0.45);
-      ctx.font = `500 ${Math.max(6, Math.min(11, fontChg * 0.75))}px var(--mono, monospace)`;
-      ctx.fillText(_hmFmtCap(Number(r.d.total_volume) || 0).replace('$', ''), cx, cy + fontSym * 1.25);
-    } else if (r.h > 24 && r.w > 28) {
-      const tinySym = sym.length > Math.max(1, Math.floor((r.w - 4) / (fontSym * 0.55))) ? sym.slice(0, Math.max(1, Math.floor((r.w - 4) / (fontSym * 0.55)))) : sym;
-      ctx.font = `700 ${Math.max(7, Math.min(13, fontSym))}px var(--mono, monospace)`;
-      ctx.fillText(tinySym, cx, cy - fontChg * 0.45);
-      ctx.font = `600 ${Math.max(7, Math.min(11, fontChg))}px var(--mono, monospace)`;
-      ctx.fillText((c >= 0 ? '+' : '') + c.toFixed(1) + '%', cx, cy + fontChg * 0.75);
-    } else {
-      ctx.font = `700 ${Math.max(6, Math.min(10, fontSym))}px var(--mono, monospace)`;
-      ctx.fillText(symFit, cx, cy - 3);
-      ctx.font = `600 ${Math.max(6, Math.min(9, fontChg))}px var(--mono, monospace)`;
-      ctx.fillText((c >= 0 ? '+' : '') + c.toFixed(0) + '%', cx, cy + 5);
-    }
-  }
-
-  // Selected cell (click) persists across hover/redraw until another cell
-  // is clicked — matched by coin id since _hm.rects is rebuilt on every
-  // render and indices can't be trusted to stay stable.
-  if (_hm.selectedId) {
-    for (const r of _hm.rects) {
-      if (String(r.d.id || '') === _hm.selectedId) {
-        ctx.strokeStyle = '#c084fc';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2);
-        break;
-      }
-    }
-  }
-
-  if (_hm.hoverIdx >= 0 && _hm.hoverIdx < _hm.rects.length) {
-    const r = _hm.rects[_hm.hoverIdx];
-    ctx.strokeStyle = '#00e8c8';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2);
-  }
-}
-
-function _hmHit(px, py) {
-  for (let i = 0; i < _hm.rects.length; i++) {
-    const r = _hm.rects[i];
-    if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) return i;
-  }
-  return -1;
-}
-
-function _hmEnsureChrome() {
-  const view = document.getElementById('v-heatmap');
-  if (!view) return null;
-  let canvas = document.getElementById('hm-canvas');
-  let tip    = document.getElementById('hm-tip');
-  if (!canvas) {
-    const grid = document.getElementById('hm-grid');
-    if (grid) { grid.innerHTML = ''; grid.id = 'hm-canvas-wrap'; grid.className = 'hm-canvas-wrap'; }
-    const wrap = document.getElementById('hm-canvas-wrap') || grid || view;
-    canvas = document.createElement('canvas');
-    canvas.id = 'hm-canvas';
-    canvas.className = 'hm-canvas';
-    wrap.appendChild(canvas);
+// The tooltip lives on the view, not inside #hm-grid — the grid's
+// innerHTML is rewritten on every render and would otherwise wipe it.
+function _hmEnsureTip(wrap) {
+  let tip = document.getElementById('hm-tip');
+  if (!tip) {
     tip = document.createElement('div');
     tip.id = 'hm-tip';
     tip.className = 'hm-tip';
     tip.style.display = 'none';
-    wrap.appendChild(tip);
-
-    canvas.addEventListener('mousemove', (e) => {
-      const rect = canvas.getBoundingClientRect();
-      const px = e.clientX - rect.left;
-      const py = e.clientY - rect.top;
-      const idx = _hmHit(px, py);
-      if (idx !== _hm.hoverIdx) {
-        _hm.hoverIdx = idx;
-        _hmDraw(canvas);
-      }
-      if (idx >= 0) {
-        const r = _hm.rects[idx];
-        const d = r.d;
-        const c = Number(d.price_change_percentage_24h) || 0;
-        const mc = Number(d.market_cap) || 0;
-        const vol = Number(d.total_volume) || 0;
-        // V6.8 Sprint 1 (FIX-3): d.symbol is upstream — escape. The
-        // numeric outputs come from Number() coercion above so they're
-        // safe by construction.
-        tip.innerHTML = `<div class="hm-tip__sym">${_esc(String(d.symbol||'').toUpperCase())}</div>
-          <div class="hm-tip__row"><span>24h</span><b style="color:${c>=0?'var(--grn)':'var(--red)'}">${(c>=0?'+':'')+c.toFixed(2)}%</b></div>
-          <div class="hm-tip__row"><span>Market Cap</span><b>${_esc(_hmFmtCap(mc))}</b></div>
-          <div class="hm-tip__row"><span>24h Vol</span><b>${_esc(_hmFmtCap(vol))}</b></div>
-          <div class="hm-tip__hint">click → scanner</div>`;
-        tip.style.display = 'block';
-        const tw = tip.offsetWidth;
-        const th = tip.offsetHeight;
-        let tx = px + 14;
-        let ty = py + 14;
-        if (tx + tw > rect.width) tx = px - tw - 14;
-        if (ty + th > rect.height) ty = py - th - 14;
-        tip.style.transform = `translate(${tx}px,${ty}px)`;
-      } else {
-        tip.style.display = 'none';
-      }
-    });
-    canvas.addEventListener('mouseleave', () => { _hm.hoverIdx = -1; tip.style.display = 'none'; _hmDraw(canvas); });
-    canvas.addEventListener('click', (e) => {
-      const rect = canvas.getBoundingClientRect();
-      const idx = _hmHit(e.clientX - rect.left, e.clientY - rect.top);
-      if (idx < 0) return;
-      const d = _hm.rects[idx].d;
-      _hm.selectedId = String(d.id || '');
-      _hmDraw(canvas);
-      if (typeof showHeatmapDetail === 'function') showHeatmapDetail(d);
-    });
-
-    if (typeof ResizeObserver !== 'undefined') {
-      const ro = new ResizeObserver(() => {
-        if (_hm.resizeRaf) cancelAnimationFrame(_hm.resizeRaf);
-        _hm.resizeRaf = requestAnimationFrame(() => renderHeatmap());
-      });
-      ro.observe(canvas);
-      _ObserverRegistry.add(ro);
-    }
+    (wrap.parentElement || wrap).appendChild(tip);
   }
-  return canvas;
+  return tip;
+}
+
+function _hmWire(wrap) {
+  if (_hm.wired) return;
+  _hm.wired = true;
+  const tip = _hmEnsureTip(wrap);
+  const host = wrap.parentElement || wrap;
+  const hide = () => { tip.style.display = 'none'; };
+  // Touch screens synthesise a mousemove before the click but never a
+  // mouseleave, so a hover tooltip would stay parked over the tiles until
+  // the next tap. On a no-hover pointer the detail panel is the info path.
+  const canHover = () => !(window.matchMedia && window.matchMedia('(hover: none)').matches);
+
+  wrap.addEventListener('mousemove', (e) => {
+    if (!canHover()) { hide(); return; }
+    const cell = e.target.closest ? e.target.closest('.hm-cell') : null;
+    if (!cell) { hide(); return; }
+    const d = _hm.pool[Number(cell.dataset.i)];
+    if (!d) { hide(); return; }
+    const c = _hmPct(d);
+    const mc = Number(d.market_cap) || 0;
+    const vol = Number(d.total_volume) || 0;
+    // d.symbol is upstream — escape. The numerics route through Number()
+    // above so they are safe by construction.
+    tip.innerHTML = `<div class="hm-tip__sym">${_esc(String(d.symbol||'').toUpperCase())}</div>
+      <div class="hm-tip__row"><span>24h</span><b style="color:${c === null ? 'var(--txt3)' : c >= 0 ? 'var(--grn)' : 'var(--red)'}">${c === null ? 'no data' : (c>=0?'+':'')+c.toFixed(2)+'%'}</b></div>
+      <div class="hm-tip__row"><span>Market Cap</span><b>${_esc(_hmFmtCap(mc))}</b></div>
+      <div class="hm-tip__row"><span>24h Vol</span><b>${_esc(_hmFmtCap(vol))}</b></div>
+      <div class="hm-tip__hint">click → detail</div>`;
+    tip.style.display = 'block';
+    const hostRect = host.getBoundingClientRect();
+    const px = e.clientX - hostRect.left;
+    const py = e.clientY - hostRect.top;
+    let tx = px + 14;
+    let ty = py + 14;
+    if (tx + tip.offsetWidth  > hostRect.width)  tx = Math.max(0, px - tip.offsetWidth  - 14);
+    if (ty + tip.offsetHeight > hostRect.height) ty = Math.max(0, py - tip.offsetHeight - 14);
+    tip.style.transform = `translate(${tx}px,${ty}px)`;
+  });
+  wrap.addEventListener('mouseleave', hide);
+  wrap.addEventListener('scroll', hide, { passive: true });
+
+  wrap.addEventListener('click', (e) => {
+    hide();
+    const cell = e.target.closest ? e.target.closest('.hm-cell') : null;
+    if (!cell) return;
+    const d = _hm.pool[Number(cell.dataset.i)];
+    if (!d) return;
+    _hm.selectedId = String(d.id || '');
+    wrap.querySelectorAll('.hm-cell--sel').forEach(x => x.classList.remove('hm-cell--sel'));
+    cell.classList.add('hm-cell--sel');
+    if (typeof showHeatmapDetail === 'function') showHeatmapDetail(d);
+  });
 }
 
 window.hmState = { search: '', limit: 500, density: 'roomy' };
 window.bubState = { search: '', limit: 100 };
 
 function renderHeatmap() {
-  const canvas = _hmEnsureChrome();
-  if (!canvas) return;
+  const wrap = document.getElementById('hm-grid');
+  if (!wrap) return;
+  // Building 500 cells for a hidden tab on every 30s refresh is pure waste —
+  // sv() re-renders the moment the heatmap becomes visible.
+  const view = document.getElementById('v-heatmap');
+  if (view && !view.classList.contains('on')) return;
+  _hmWire(wrap);
 
-  const searchTerm = (window.hmState?.search || '').toLowerCase();
+  const hmCount = document.getElementById('hm-count');
+  const searchTerm = (window.hmState?.search || '').trim().toLowerCase();
   const limit = window.hmState?.limit || 500;
+  const density = window.hmState?.density || 'roomy';
+  wrap.dataset.density = density;
 
-  const pool = (Array.isArray(DATA) ? DATA : [])
+  const all = Array.isArray(DATA) ? DATA : [];
+
+  // "Upstream gave us nothing" must never read as "your filter matched
+  // nothing" — the two states get different copy and different counters.
+  if (!all.length) {
+    _hm.pool = [];
+    wrap.innerHTML = '<div class="hm-empty hm-empty--err">No market data loaded — the coin feed has not delivered yet. Check the header status / console for the fetch error.</div>';
+    if (hmCount) hmCount.textContent = 'no data';
+    console.warn('[Heatmap] DATA is empty — nothing to render (feed not loaded or fetch failed).');
+    return;
+  }
+
+  const pool = all
     .filter(d => Number(d.total_volume) > 0)
     .filter(d => {
       if (!searchTerm) return true;
@@ -3172,47 +3069,30 @@ function renderHeatmap() {
     })
     .slice(0, limit);
 
-  if (!pool.length) {
-    const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#04060e';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = '#a0a0a0';
-    ctx.font = '12px var(--mono, monospace)';
-    ctx.textAlign = 'center';
-    ctx.fillText('No matching coins found.', canvas.clientWidth/2, canvas.clientHeight/2);
-    const hmCount = document.getElementById('hm-count');
-    if (hmCount) hmCount.textContent = '0 coins';
+  _hm.pool = pool;
 
-    // Observability event
+  if (!pool.length) {
+    wrap.innerHTML = `<div class="hm-empty">No coin matches ${searchTerm ? '“' + _esc(searchTerm) + '”' : 'the current filter'}.</div>`;
+    if (hmCount) hmCount.textContent = '0 coins';
     try { window.SystemEvents?.push('cockpit_heatmap_empty', { search: searchTerm, limit }); } catch(e){}
     return;
   }
 
-  const wrap = canvas.parentElement;
-  const W = wrap.clientWidth || 800;
-  let H = wrap.clientHeight || 500;
+  // d.symbol / d.id are upstream strings — escape both. data-i carries the
+  // pool index so no coin id ever lands in an inline handler.
+  wrap.innerHTML = pool.map((d, i) => {
+    const c = _hmPct(d);
+    const known = c !== null;
+    const col = known ? _hmColor(c) : { bg: 'rgba(96,112,144,.08)', txt: 'var(--txt3)' };
+    const sym = _esc(String(d.symbol || '').toUpperCase());
+    const sel = _hm.selectedId && String(d.id || '') === _hm.selectedId ? ' hm-cell--sel' : '';
+    return `<div class="hm-cell${sel}" data-i="${i}" style="background:${col.bg}">
+      <div class="hm-sym" style="color:${col.txt}">${sym}</div>
+      <div class="hm-chg" style="color:${col.txt}">${known ? fp(c, 1) : '—'}</div>
+    </div>`;
+  }).join('');
 
-  // Heatmap readability fix: ensure enough vertical space so cells stay
-  // large — owner explicitly rejected a "cramped wall" default. Scroll
-  // vertically instead of shrinking cells to fit everything on-screen.
-  const density = window.hmState?.density || 'roomy';
-  const minCellArea = density === 'roomy' ? 6400 : density === 'compact' ? 2100 : 3800; // roomy ~80x80, normal ~62x62, compact ~46x46
-  const requiredH = Math.ceil((pool.length * minCellArea) / W);
-  if (requiredH > H) {
-    H = requiredH;
-  }
-
-  canvas.style.width = W + 'px';
-  canvas.style.height = H + 'px';
-  if (W < 10 || H < 10) return;
-
-  const items = pool.map(d => ({ d }));
-  _hm.rects = [];
-  _hmGridLayout(items, W, H, _hm.rects);
-  _hmDraw(canvas);
-
-  const hmCount = document.getElementById('hm-count');
-  if (hmCount) hmCount.textContent = pool.length + ' coins · equal grid · sorted by MC rank #1→#' + pool.length;
+  if (hmCount) hmCount.textContent = pool.length + ' coins · MC rank #1→#' + pool.length + ' · color = 24h change';
 }
 
 function renderAlerts() {
@@ -3605,22 +3485,24 @@ window.showHeatmapDetail = function(d) {
   const detail = document.getElementById('hm-detail');
   if (!detail) return;
 
-  const c = Number(d.price_change_percentage_24h) || 0;
+  // c === null means "upstream gave us no 24h change" — it must never render
+  // as a real 0.0%.
+  const c = _hmPct(d);
   const mc = Number(d.market_cap) || 0;
   const vol = Number(d.total_volume) || 0;
   const rank = d.market_cap_rank || '—';
-  const accent = c > 0.5 ? 'var(--grn)' : c < -0.5 ? 'var(--red)' : 'var(--pur)';
+  const accent = c === null ? 'var(--txt3)' : c > 0.5 ? 'var(--grn)' : c < -0.5 ? 'var(--red)' : 'var(--pur)';
 
   detail.style.cssText = `display:block; position:absolute; top:20px; right:20px; background:var(--s1); border:1px solid var(--b2); border-top:3px solid ${accent}; padding:16px; border-radius:var(--rad); width:280px; z-index:100; box-shadow:0 8px 24px rgba(0,0,0,0.8); font-family:var(--mono, monospace); font-size:12px;`;
 
   detail.innerHTML = `
     <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--b1); padding-bottom:10px; margin-bottom:12px;">
       <div style="font-size:16px; font-weight:700; color:var(--txt);">${_esc(String(d.symbol||'').toUpperCase())} <span style="font-size:10px; font-weight:400; color:var(--txt3);">${_esc(String(d.name||''))}</span></div>
-      <div style="cursor:pointer; color:var(--txt3); font-size:14px; padding:4px;" onclick="this.parentElement.parentElement.style.display='none'">✕</div>
+      <div role="button" aria-label="Zavřít" style="cursor:pointer; color:var(--txt3); font-size:18px; line-height:1; padding:10px; margin:-10px -10px -10px 0;" onclick="this.parentElement.parentElement.style.display='none'">✕</div>
     </div>
     <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-bottom:16px; color:var(--txt2);">
       <div>Price<br><b style="color:var(--txt);">${_esc(fmt(d.current_price))}</b></div>
-      <div>24h Chg<br><b style="color:${c>=0?'var(--grn)':'var(--red)'}">${(c>=0?'+':'')+c.toFixed(2)}%</b></div>
+      <div>24h Chg<br><b style="color:${c === null ? 'var(--txt3)' : c >= 0 ? 'var(--grn)' : 'var(--red)'}">${c === null ? 'no data' : (c>=0?'+':'')+c.toFixed(2)+'%'}</b></div>
       <div>Rank<br><b style="color:var(--txt);">${_esc(String(rank))}</b></div>
       <div>24h Vol<br><b style="color:var(--txt);">${_esc(_hmFmtCap(vol))}</b></div>
       <div style="grid-column: span 2;">Market Cap<br><b style="color:var(--txt);">${_esc(_hmFmtCap(mc))}</b></div>
@@ -3773,8 +3655,7 @@ function sv(v, el) {
   if (el) el.classList.add('on');
   const activeViewName = _viewNameFromId(target.id || v);
   if (activeViewName === 'livefeed' && typeof LiveFeed !== 'undefined') LiveFeed.clearUnread();
-  // Heatmap canvas needs a redraw after the view becomes visible
-  // (clientWidth/Height are zero while display:none).
+  // Heatmap skips rendering while hidden — draw it now that it's visible.
   if (activeViewName === 'heatmap') requestAnimationFrame(() => { try { renderHeatmap(); } catch(e){} });
   // Bubbles layout packs against container.clientWidth/Height, which are
   // zero while display:none — a periodic data refresh while this tab is

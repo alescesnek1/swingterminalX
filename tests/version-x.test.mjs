@@ -16,11 +16,33 @@ test('Version X branding is visible in active UI files', () => {
   assert.doesNotMatch(html, /SWING TERMINAL V6|Terminal V6">V6/);
 });
 
-test('mobile heatmap draw path contains symbol, numeric percent, and secondary volume rendering', () => {
+test('heatmap cells render an escaped symbol plus a numeric percent, volume in the tooltip', () => {
   const js = fs.readFileSync(new URL('../apps/edge/public/js/terminal.js', import.meta.url), 'utf8');
-  assert.match(js, /c\.toFixed\(1\) \+ '%'/);
-  assert.match(js, /_hmFmtCap\(Number\(r\.d\.total_volume\)/);
-  assert.match(js, /r\.h > 24 && r\.w > 28/);
+  // v4-style DOM grid: every cell carries symbol + signed 1-decimal change.
+  assert.match(js, /class="hm-sym"[^]*?\$\{sym\}/);
+  assert.match(js, /class="hm-chg"[^]*?fp\(c, 1\)/);
+  // Upstream symbols must stay escaped on the innerHTML path.
+  assert.match(js, /const sym = _esc\(String\(d\.symbol \|\| ''\)\.toUpperCase\(\)\)/);
+  // Market cap / 24h volume moved into the hover tooltip.
+  assert.match(js, /_hmFmtCap\(vol\)/);
+  // Missing 24h change must read as "—", never as a 0% (flat) cell.
+  assert.match(js, /known \? fp\(c, 1\) : '—'/);
+});
+
+test('heatmap suppresses the hover tooltip on touch, where nothing would dismiss it', () => {
+  const js = fs.readFileSync(new URL('../apps/edge/public/js/terminal.js', import.meta.url), 'utf8');
+  assert.match(js, /matchMedia\('\(hover: none\)'\)\.matches/);
+  assert.match(js, /wrap\.addEventListener\('mousemove'[^]*?if \(!canHover\(\)\) \{ hide\(\); return; \}/);
+  // A tap also clears any tooltip a synthesised mousemove already opened.
+  assert.match(js, /wrap\.addEventListener\('click'[^]*?hide\(\);/);
+});
+
+test('mobile heatmap keeps a readable cell floor instead of shrinking cells', () => {
+  const css = fs.readFileSync(new URL('../apps/edge/public/css/terminal.css', import.meta.url), 'utf8');
+  assert.match(css, /\.hm-grid\{[^}]*auto-fill[^}]*var\(--hm-cell/);
+  // Tiles are explicitly sized (never `auto` rows) so every cell is identical.
+  assert.match(css, /\.hm-grid\{[^}]*grid-auto-rows:var\(--hm-row/);
+  assert.match(css, /@media \(max-width:480px\)[^]*?\.hm-grid\[data-density="compact"\]\{--hm-cell:46px;--hm-row:36px\}/);
 });
 
 test('Safety adapter is honest for missing key, missing contract, and high holder concentration', async () => {

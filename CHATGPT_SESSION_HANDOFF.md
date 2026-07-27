@@ -13,6 +13,37 @@
 > `/reply` or `/admin_summary` support system** here. If you find yourself
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
+> _HEATMAP redesigned to the v4 tile grid (2026-07-27, local-only, uncommitted):_
+> The canvas treemap renderer is gone. The HEATMAP tab now renders the **terminal-v4
+> design**: a uniform CSS-grid of tiles (symbol above, 24h % below), colour = 24h
+> change on v4's four-band palette, ordered by market-cap rank #1 → #N, row-major.
+> `_hmGridLayout` / `_hmDraw` / `_hmHit` / `_hmEnsureChrome` and the ResizeObserver
+> were deleted — the grid reflows itself and the browser handles scrolling.
+> Everything the canvas version offered is kept: search, Top-100/250/500/1000,
+> density (roomy/normal/compact → cell + row size), hover tooltip (`.hm-tip`, now
+> a child of `#v-heatmap` so the grid's innerHTML rewrite can't wipe it), click →
+> `showHeatmapDetail`, and a selection border that survives redraws.
+> Tile rows are **explicitly sized** (`grid-auto-rows: var(--hm-row)`) rather than
+> `auto` — inside the fixed-height scrolling flex child, auto rows collapsed to a
+> single clipped line. Observability: "no market data loaded" (feed never arrived,
+> amber + `console.warn`) is now a *different* state from "no coin matches <query>",
+> and a missing `price_change_percentage_24h` renders as `—` / "no data" instead of
+> `Number(null) || 0` painting it as a real flat 0.0% cell — same fix applied to the
+> tooltip and the detail panel. Cache-bust token bumped `6j6` → `6j7`. Tests: the
+> canvas-internals assertion in `tests/version-x.test.mjs` was replaced by three tests
+> covering the DOM cell markup / escaping / UNKNOWN handling, the touch-pointer
+> tooltip guard, and the mobile cell floor; token test updated. Full suite green
+> (1910 pass / 0 fail / 26 skipped). No push, no deploy.
+>
+> _Mobile check (measured in-browser, not estimated):_ 375 px → 5 columns of 68×46 px
+> tiles; 320 px → 4 columns of 72×46 px; normal 58×40, compact 48×36. No clipped
+> symbols or percentages at any density, no horizontal page overflow, the grid scrolls.
+> Two touch fixes came out of it: the hover tooltip is **suppressed on `(hover: none)`
+> pointers** (a touch synthesises `mousemove` but never `mouseleave`, so it used to park
+> over the tiles) and any tap clears it; the detail panel's ✕ went from a ~22 px to a
+> 35×38 px hit area. The panel itself fits at 320 px (280 px wide, ~32 % of the screen)
+> and its GO TO SCANNER button is 247×38.
+>
 > _Venue keying fixed — spot and futures are no longer interchangeable (2026-07-27,
 > local-only, uncommitted):_ **Closes the long-standing "known gap, deliberately NOT
 > fixed".** Spot and futures are different books, different flow, different depth, but
@@ -1162,8 +1193,10 @@ From current git history (most recent first, condensed — see `git log` for ful
   trading, RADAR gates, ENTRY_READY, alerts, Telegram, or Supabase auth
   behavior changed. A push still auto-applies the pending migration.
 - **Cockpit market maps overhaul/polish (LOCAL, UNPUSHED — `…bd0306f`)** —
-  interactive market panels/maps UI work; bubbles-overlap + heatmap design
-  polish intentionally deferred.
+  interactive market panels/maps UI work; bubbles-overlap polish intentionally
+  deferred. The deferred heatmap design work was done later: the canvas treemap
+  was replaced by the terminal-v4 uniform tile grid (see the dated entry at the
+  top of this file).
 - **Database foundation (Phase 2B, `294c72e`, pushed/deployed)** — Netlify
   Database enabled; first migration creates `system_events` + `ingest_runs`
   only; unused `_db.mjs` connection helper; DB tests skip gracefully without
