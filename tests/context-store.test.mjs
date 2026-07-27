@@ -238,3 +238,59 @@ test('Cockpit single-coin read resolves one verdict and rejects a junk symbol', 
   assert.equal(bad.ok, false);
   assert.equal(bad.reason, 'INVALID_SYMBOL');
 });
+
+// ── cutover + publisher-failure fallback ────────────────────────────────────
+// radar_candidate_state starts EMPTY: only the first publisher cycle after the
+// migration fills it. Reading PENDING in that window would discard a good verdict
+// already in the run-keyed history, and would keep doing so for as long as the
+// publisher stayed disabled or failing. The fallback is LABELLED, never silent.
+function runSnapshot(overrides = {}) {
+  return { run_id: 8, status: 'ready', source: 'canonical_context', computed_at: new Date('2026-07-27T08:57:00.000Z'), candidate_count: 1, entry_ready_count: 0, market_regime: {}, pipeline: {}, absorb_funnel: {}, universe_diagnostics: {}, provider_status: { ABSORB_MODE: 'STRICT' }, ...overrides };
+}
+function cutoverDb({ state = [], snapshot = null, runCandidates = [], hasRun = true } = {}) {
+  return { query: async (sql) => {
+    if (sql.includes('FROM market_collection_runs')) return { rows: hasRun ? [{ id: 9, run_key: 'k', observed_at: new Date().toISOString(), completed_at: new Date().toISOString(), diagnostics: {} }] : [] };
+    if (sql.includes('FROM market_ticker_observations')) return { rows: [] };
+    if (sql.includes('FROM market_microstructure_measurements')) return { rows: [] };
+    if (sql.includes('FROM radar_candidate_state')) return { rows: state };
+    if (sql.includes('FROM radar_run_snapshots')) return { rows: snapshot ? [snapshot] : [] };
+    if (sql.includes('FROM radar_run_candidates')) return { rows: runCandidates };
+    throw new Error('unexpected query');
+  } };
+}
+
+test('an empty state table falls back to the run snapshot instead of reading PENDING', async () => {
+  const context = await getAtomizedMarketContext(cutoverDb({ state: [], snapshot: runSnapshot(), runCandidates: [{ market: 'spot', symbol: 'BTCUSDT', payload: {} }] }));
+  assert.equal(context.radar.status, 'READY', 'a good verdict in history is not discarded');
+  assert.equal(context.radar.candidates.length, 1);
+});
+
+test('the fallback is labelled and dated by the snapshot, never presented as current state', async () => {
+  const context = await getAtomizedMarketContext(cutoverDb({ state: [], snapshot: runSnapshot(), runCandidates: [{ market: 'spot', symbol: 'BTCUSDT', payload: {} }] }));
+  assert.equal(context.radar.readSource, 'run_snapshot_fallback', 'the answering table is named');
+  assert.equal(context.radar.stateBackfillPending, true, 'the caller can tell the atomized table is not written yet');
+  // computedAt is the snapshot's own time, so freshness cannot be mistaken for now.
+  assert.equal(new Date(context.radar.computedAt).toISOString(), '2026-07-27T08:57:00.000Z');
+});
+
+test('a populated state table is preferred over the run snapshot', async () => {
+  const context = await getAtomizedMarketContext(cutoverDb({ state: [stateRow()], snapshot: runSnapshot(), runCandidates: [{ market: 'spot', symbol: 'OLDUSDT', payload: {} }] }));
+  assert.equal(context.radar.readSource, 'atomized_state');
+  assert.equal(context.radar.stateBackfillPending, undefined);
+  assert.equal(context.radar.candidates[0].symbol, 'BTCUSDT', 'the current state answers, not the history');
+});
+
+// A bare PENDING sent the owner looking in the wrong place. Each stage names itself.
+test('PENDING names which stage is missing: collector, publisher, or an empty result', async () => {
+  const noRun = await getAtomizedMarketContext(cutoverDb({ hasRun: false }));
+  assert.equal(noRun.radar.pendingReason, 'NO_PUBLISHED_RUN', 'collector is the missing stage');
+
+  const neverScored = await getAtomizedMarketContext(cutoverDb({ state: [], snapshot: null }));
+  assert.equal(neverScored.radar.status, 'PENDING');
+  assert.equal(neverScored.radar.pendingReason, 'NO_RADAR_RESULT', 'publisher never scored a run');
+
+  // A snapshot exists but carries no candidates — the publisher ran and produced none.
+  const emptyResult = await getAtomizedMarketContext(cutoverDb({ state: [], snapshot: runSnapshot(), runCandidates: [] }));
+  assert.equal(emptyResult.radar.status, 'PENDING');
+  assert.equal(emptyResult.radar.pendingReason, 'RADAR_RESULT_EMPTY');
+});

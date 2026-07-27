@@ -10295,10 +10295,19 @@ function renderTradingRadarPanel() {
     // made the panel look like it was contradicting itself every cycle, so the
     // active source and the reason are now stated instead of implied.
     if (_canonicalContextEnabled()) {
+      // A bare "PENDING" sent the owner looking in the wrong place, so name the stage
+      // that is actually missing. These codes come from the server read.
+      const PENDING_REASONS = {
+        NO_PUBLISHED_RUN: 'the market COLLECTOR has not published a run — check MARKET_CONTEXT_COLLECT_ENABLED and the collector logs',
+        NO_RADAR_RESULT: 'the RADAR PUBLISHER has never scored a run — check MARKET_CONTEXT_RADAR_ENABLED',
+        RADAR_RESULT_EMPTY: 'the RADAR publisher ran but produced no candidates',
+        RADAR_STATE_EMPTY: 'the atomized RADAR state table is empty and no run snapshot exists yet',
+      };
       const reason = !window.__canonicalContext ? 'not loaded yet'
         : window.__canonicalContext.failed ? `/api/context failed — ${window.__canonicalContext.failureReason || 'error'}`
         : !canonicalRadar ? 'no canonical RADAR in the response'
-        : `canonical RADAR status ${String(canonicalRadar.status || 'unknown').toUpperCase()}`;
+        : PENDING_REASONS[canonicalRadar.pendingReason]
+          || `canonical RADAR status ${String(canonicalRadar.status || 'unknown').toUpperCase()}`;
       console.warn('[CANONICAL] radar panel is showing the legacy browser feed:', reason);
       mainHtml = _radarLegacySourceNoticeHtml(reason, _esc) + _renderTradingRadar(fleetRadar, _esc);
     } else {

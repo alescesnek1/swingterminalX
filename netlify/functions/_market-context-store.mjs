@@ -175,7 +175,11 @@ export async function getAtomizedMarketContext(db, options = {}) {
   const tickerLimit = Math.min(Math.max(Number(options.tickerLimit) || 500, 1), 2000); const microLimit = Math.min(Math.max(Number(options.microLimit) || 50, 1), 600);
   try {
     const runRes = await db.query(`SELECT id,run_key,observed_at,completed_at,diagnostics FROM market_collection_runs WHERE scope_id=$1 AND status='published' ORDER BY observed_at DESC LIMIT 1`, [CONTEXT_SCOPE_ID]); const run = runRes.rows[0];
-    if (!run) return { ok: true, contextVersion: null, run: null, market: null, radar: { status: 'PENDING' } };
+    // No published collection run at all — the COLLECTOR is the missing stage here,
+    // not the RADAR publisher. Naming it distinguishes "collector not running" from
+    // "collector fine, RADAR not scoring", which otherwise both surfaced as a bare
+    // PENDING and sent the owner looking in the wrong place.
+    if (!run) return { ok: true, contextVersion: null, run: null, market: null, radar: { status: 'PENDING', candidates: [], pendingReason: 'NO_PUBLISHED_RUN' } };
     const [tickers, micro] = await Promise.all([
       // Joined to the instrument so every row carries its base/quote asset, and
       // restricted to USD-stable quotes.
@@ -527,7 +531,28 @@ async function readCanonicalRadar(db, options = {}) {
     diagnosticsRunId: snap ? Number(snap.run_id) : null,
     diagnosticsComputedAt: snap?.computed_at || null,
   };
-  if (!rows.length) return { status: 'PENDING', candidates: [], readSource: 'atomized_state', ...meta };
+  if (!rows.length) {
+    // The state table starts EMPTY: it is only filled by the first publisher cycle
+    // after it is created. Reading PENDING in that window would discard a perfectly
+    // good verdict already sitting in the run-keyed history — and would keep doing so
+    // for as long as the publisher stays disabled or failing. So fall back to the
+    // per-run snapshot when one exists.
+    //
+    // This is a LABELLED fallback, never a silent one: readSource says which table
+    // answered, computedAt is the snapshot's own time (never "now"), and
+    // stateBackfillPending tells the caller the atomized table has not been written
+    // yet. A stale verdict the user can identify beats a blank panel; a stale verdict
+    // posing as current would not.
+    if (snap) {
+      const legacy = await readRadarForRun(db, Number(snap.run_id));
+      if (legacy.status === 'READY' && legacy.candidates.length) {
+        return { ...legacy, readSource: 'run_snapshot_fallback', stateBackfillPending: true, pendingReason: 'RADAR_STATE_EMPTY', ...meta, status: 'READY', computedAt: snap.computed_at };
+      }
+    }
+    // Nothing anywhere. Name which stage is missing so the UI can say whether the
+    // collector or the publisher is the thing that is not running.
+    return { status: 'PENDING', candidates: [], readSource: 'atomized_state', pendingReason: snap ? 'RADAR_RESULT_EMPTY' : 'NO_RADAR_RESULT', ...meta };
+  }
   // Freshness of the set is its newest row; every row also carries its own
   // computed_at so a caller can judge any single coin independently.
   const newest = rows.reduce((max, row) => {
