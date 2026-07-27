@@ -375,6 +375,62 @@ export async function collectMultiTimeframe(market, tickers, { fetchImpl = fetch
   return { symbols: result, requested: symbols.length, covered: result.size, windows: MULTI_TF_WINDOWS.map((window) => window.windowSize), windowCoverage, degradedWindows, retryWaitedMs };
 }
 
+// Futures-only listings had NO 1h/4h/12h/7d at all. Multi-timeframe comes from the
+// spot rolling-window ticker, and Binance futures has no equivalent endpoint, so any
+// base asset that trades ONLY on futures (measured: 319 of them) showed a dash in
+// every timeframe column while 24h was populated — which reads as broken rather than
+// as an uncollected venue.
+//
+// One 1h-kline request per symbol yields all four windows, so this costs one request
+// per futures-only symbol rather than one per symbol per window. The values are
+// derived from that symbol's OWN futures candles — never borrowed from a spot pair,
+// whose percentage change is a different number.
+export const FUTURES_TF_INTERVAL = '1h';
+export const FUTURES_TF_CANDLES = 169; // 168 closed hours + the forming one → 7d reach
+export const FUTURES_TF_REQUEST_WEIGHT = 5;
+const FUTURES_TF_WINDOWS = Object.freeze([
+  { key: 'change1hPct', hoursAgo: 1 },
+  { key: 'change4hPct', hoursAgo: 4 },
+  { key: 'change12hPct', hoursAgo: 12 },
+  { key: 'change7dPct', hoursAgo: 168 },
+]);
+
+export async function collectFuturesTimeframes(symbols, { fetchImpl = fetch, pacer = null, topN = MAX_MULTI_TF_TOP_N, concurrency = DEFAULT_MICROSTRUCTURE_CONCURRENCY } = {}) {
+  const bounded = (Array.isArray(symbols) ? symbols : []).slice(0, Math.min(Math.max(Math.trunc(Number(topN) || MAX_MULTI_TF_TOP_N), 1), MAX_MULTI_TF_TOP_N));
+  const result = new Map();
+  let failed = 0;
+  let shortHistory = 0;
+  const rows = await mapBounded(bounded, boundedConcurrency(concurrency), async (symbol) => {
+    if (pacer) await pacer.take(FUTURES_TF_REQUEST_WEIGHT);
+    try {
+      const payload = await fetchBinancePublicJson(buildBinancePublicUrl('futures', 'klines', { symbol, interval: FUTURES_TF_INTERVAL, limit: FUTURES_TF_CANDLES }), { fetchImpl });
+      return { symbol, closes: (Array.isArray(payload) ? payload : []).map((row) => finite(row?.[4])).filter((value) => value !== null && value > 0) };
+    } catch (error) { return { symbol, failureCode: failureCode(error) }; }
+  });
+  for (const row of rows) {
+    if (row.failureCode) { failed += 1; continue; }
+    const closes = row.closes;
+    const last = closes.length ? closes[closes.length - 1] : null;
+    if (last === null) { failed += 1; continue; }
+    const entry = {};
+    let short = false;
+    for (const window of FUTURES_TF_WINDOWS) {
+      const index = closes.length - 1 - window.hoursAgo;
+      // A young listing genuinely has no 7d reference. That window stays ABSENT so it
+      // renders UNKNOWN, rather than being computed against the oldest candle we
+      // happen to have and presented as a 7-day move.
+      if (index < 0) { short = true; continue; }
+      const base = closes[index];
+      if (!(base > 0)) { short = true; continue; }
+      entry[window.key] = +(((last - base) / base) * 100).toFixed(3);
+    }
+    if (short) shortHistory += 1;
+    if (Object.keys(entry).length) result.set(row.symbol, entry);
+  }
+  if (failed > 0 || shortHistory > 0) console.warn('[MARKET_CONTEXT] futures_timeframe_partial', { requested: bounded.length, covered: result.size, failed, shortHistory });
+  return { symbols: result, requested: bounded.length, covered: result.size, failed, shortHistory };
+}
+
 export async function collectBinanceMarketContext(options = {}) {
   const fetchImpl = options.fetchImpl || fetch;
   const topN = boundedTopN(options.microstructureTopN);
@@ -393,12 +449,16 @@ export async function collectBinanceMarketContext(options = {}) {
   try { spot = await collectVenue('spot', { fetchImpl, microstructureTopN: topN, ...budgetShape, concurrency, pacer: spotPacer }); }
   catch (error) { return { ok: false, reason: failureCode(error), dataStatus: 'unavailable' }; }
   let futures = { tickers: [], microstructures: [], status: 'unsupported', failureCode: null };
+  // Held outside the block so the futures-only timeframe pass below shares the SAME
+  // futures allowance as the microstructure reads that ran before it.
+  let futuresPacer = null;
   if (options.includeFutures === true) {
     // Futures carries its own, much smaller topN: its per-minute allowance is a
     // fraction of spot's, so the same symbol count that spot absorbs comfortably
     // gets the futures venue rate-limited outright.
     const futuresTopN = Number.isFinite(Number(options.futuresMicrostructureTopN)) && Number(options.futuresMicrostructureTopN) > 0 ? boundedTopN(options.futuresMicrostructureTopN) : topN;
-    try { const collected = await collectVenue('futures', { fetchImpl, microstructureTopN: futuresTopN, ...budgetShape, concurrency, pacer: makePacer('futures') }); futures = { ...collected, status: 'complete', failureCode: null }; }
+    futuresPacer = makePacer('futures');
+    try { const collected = await collectVenue('futures', { fetchImpl, microstructureTopN: futuresTopN, ...budgetShape, concurrency, pacer: futuresPacer }); futures = { ...collected, status: 'complete', failureCode: null }; }
     catch (error) { futures = { tickers: [], microstructures: [], status: 'unavailable', failureCode: failureCode(error) }; }
   }
   const microstructures = [...spot.microstructures, ...futures.microstructures];
@@ -406,14 +466,29 @@ export async function collectBinanceMarketContext(options = {}) {
   // Bounded multi-timeframe enrichment (spot only). Symbols outside the top-N
   // keep no 1h/4h/12h/7d fields → the reader surfaces them as UNKNOWN.
   let multiTf = { symbols: new Map(), requested: 0, covered: 0 };
+  let futuresTf = { symbols: new Map(), requested: 0, covered: 0 };
   if (options.includeMultiTimeframe === true) {
     try { multiTf = await collectMultiTimeframe('spot', spot.tickers, { fetchImpl, topN: options.multiTimeframeTopN, pacer: spotPacer }); }
     catch (error) { multiTf = { symbols: new Map(), requested: 0, covered: 0, failureCode: failureCode(error) }; }
     for (const row of spot.tickers) { const entry = multiTf.symbols.get(row.symbol); if (entry) Object.assign(row, entry); }
+    // Futures-only listings can never be covered by the spot rolling-window ticker, so
+    // they are derived from their own futures candles. Restricted to symbols spot does
+    // NOT list: a spot-listed base already gets its timeframes from the spot row, which
+    // the reader prefers anyway, so covering it twice would just spend weight.
+    if (futures.tickers.length) {
+      const spotSymbols = new Set(spot.tickers.map((row) => row.symbol));
+      const futuresOnly = futures.tickers.filter((row) => !spotSymbols.has(row.symbol) && RANKABLE_QUOTE_ASSETS.includes(row.quoteAsset));
+      if (futuresOnly.length) {
+        try {
+          futuresTf = await collectFuturesTimeframes(rankByQuoteVolume(futuresOnly).map((row) => row.symbol), { fetchImpl, pacer: futuresPacer, topN: options.multiTimeframeTopN, concurrency });
+          for (const row of futures.tickers) { const entry = futuresTf.symbols.get(row.symbol); if (entry) Object.assign(row, entry); }
+        } catch (error) { futuresTf = { symbols: new Map(), requested: futuresOnly.length, covered: 0, failureCode: failureCode(error) }; }
+      }
+    }
   }
   return {
     ok: true, observedAt: new Date(), collectedAt: new Date(), dataStatus: futures.status === 'complete' && allMicrostructureComplete ? 'complete' : 'partial',
     rows: [...spot.tickers, ...futures.tickers], microstructure: microstructures,
-    diagnostics: { spotTickerCount: spot.tickers.length, futuresTickerCount: futures.tickers.length, microstructureCount: microstructures.length, futuresStatus: futures.status, futuresFailureCode: futures.failureCode, microstructureTopN: topN, multiTimeframeRequested: multiTf.requested, multiTimeframeCovered: multiTf.covered, multiTimeframeFailureCode: multiTf.failureCode ?? null, multiTimeframeWindowCoverage: multiTf.windowCoverage ?? null, multiTimeframeDegradedWindows: multiTf.degradedWindows ?? 0, pacingWaitedMs: (spotPacer?.diagnostics?.waitedMs || 0) + (futures.pacing?.waitedMs || 0), rateLimitedSymbols: microstructures.filter((row) => row.failureCode === 'UPSTREAM_RATE_LIMITED').length },
+    diagnostics: { spotTickerCount: spot.tickers.length, futuresTickerCount: futures.tickers.length, microstructureCount: microstructures.length, futuresStatus: futures.status, futuresFailureCode: futures.failureCode, microstructureTopN: topN, multiTimeframeRequested: multiTf.requested, multiTimeframeCovered: multiTf.covered, multiTimeframeFailureCode: multiTf.failureCode ?? null, multiTimeframeWindowCoverage: multiTf.windowCoverage ?? null, multiTimeframeDegradedWindows: multiTf.degradedWindows ?? 0, futuresTimeframeRequested: futuresTf.requested, futuresTimeframeCovered: futuresTf.covered, futuresTimeframeFailed: futuresTf.failed ?? 0, futuresTimeframeShortHistory: futuresTf.shortHistory ?? 0, futuresTimeframeFailureCode: futuresTf.failureCode ?? null, pacingWaitedMs: (spotPacer?.diagnostics?.waitedMs || 0) + (futures.pacing?.waitedMs || 0), rateLimitedSymbols: microstructures.filter((row) => row.failureCode === 'UPSTREAM_RATE_LIMITED').length },
   };
 }

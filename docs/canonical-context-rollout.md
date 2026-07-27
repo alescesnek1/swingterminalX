@@ -21,6 +21,26 @@ cutover (a separate, later step).
 | `MARKET_CONTEXT_MULTI_TF_ENABLED` | `false` | Collect 1h/4h/12h/7d % change (Binance rolling-window ticker) for the top-N symbols. Off = scanner shows only 24h; 1h/4h/12h/7d are UNKNOWN. |
 | `MARKET_CONTEXT_MULTI_TF_TOP_N` | `300` | How many symbols get 1h/4h/12h/7d change. Max **1200**. **Ranked by 24h volume, NOT by the dislocation budget** — so with the default 300 the coins RADAR now surfaces (deepest drawdowns, often mid-caps far down the volume list) frequently have no multi-timeframe data and the scanner shows blanks for them. Set to `1000` to cover the whole USD-stable universe (measured live: 750 TRADING pairs exist, so 1000 covers all of them). |
 
+### Futures-only listings (why some coins showed a dash in every timeframe)
+
+Multi-timeframe comes from the **spot** rolling-window ticker, and Binance futures has
+no equivalent endpoint. Measured live: **319 TRADING symbols exist on futures but not on
+spot** (ESPORTSUSDT, PIEVERSEUSDT, 1000SHIBUSDT, GWEIUSDT, …). Those rows render with the
+`ALPHA` badge and had **no 1h/4h/12h/7d at all** while 24h was populated — which reads as
+a broken row rather than an uncollected venue.
+
+They are now derived from **their own futures 1h candles** (one `/fapi/v1/klines`
+request per symbol, `interval=1h&limit=169`, weight 5, drawn from the futures pacer),
+never borrowed from a spot pair whose percentage change is a different number.
+Spot-listed bases are skipped: the reader already prefers the spot row.
+
+A listing younger than 7 days keeps its 1h/4h/12h and leaves **7d absent → UNKNOWN**,
+rather than being measured against the oldest candle that happens to exist. Failures and
+short histories are counted in `futuresTimeframeFailed` / `futuresTimeframeShortHistory`
+plus a `[MARKET_CONTEXT] futures_timeframe_partial` warning.
+
+Cost at 319 futures-only symbols: ~1600 weight against the futures budget of 1500/min.
+
 ### Measured multi-timeframe cost (local live test, 2026-07-27)
 
 The spot pacer budget is **3600 weight/min** and the collector runs every **180s**.

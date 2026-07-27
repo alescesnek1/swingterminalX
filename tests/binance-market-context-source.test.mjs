@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildBinancePublicUrl, fetchBinancePublicJson, collectBinanceMarketContext, collectMultiTimeframe, rankByQuoteVolume, rankMicrostructureBudget, MULTI_TF_RETRY_BACKOFF_MS, MULTI_TF_RETRY_WAIT_BUDGET_MS } from '../netlify/functions/_binance-market-context-source.mjs';
+import { buildBinancePublicUrl, fetchBinancePublicJson, collectBinanceMarketContext, collectMultiTimeframe, rankByQuoteVolume, rankMicrostructureBudget, MULTI_TF_RETRY_BACKOFF_MS, MULTI_TF_RETRY_WAIT_BUDGET_MS, collectFuturesTimeframes, FUTURES_TF_REQUEST_WEIGHT } from '../netlify/functions/_binance-market-context-source.mjs';
 const json = (body) => ({ ok: true, json: async () => body });
 function mockFetch({ failDepth = false, failFutures = false } = {}) { return async (url) => { const parsed = new URL(url); const path = parsed.pathname; if (failFutures && parsed.origin === 'https://fapi.binance.com') return { ok: false, status: 451, json: async () => ({}) }; if (failDepth && path.endsWith('/depth')) return { ok: false, status: 451, json: async () => ({}) }; if (path.endsWith('/exchangeInfo')) return json({ symbols: [{ symbol: 'BTCUSDT', status: 'TRADING', isSpotTradingAllowed: true, baseAsset: 'BTC', quoteAsset: 'USDT' }] }); if (path.endsWith('/ticker/24hr')) return json([{ symbol: 'BTCUSDT', lastPrice: '100', priceChangePercent: '1', highPrice: '101', lowPrice: '99', volume: '4', quoteVolume: '400', count: 2 }]); if (path.endsWith('/klines')) return json([[1, '1', '2', '0', '1', '5', 2, '5', 1]]); if (path.endsWith('/depth')) return json({ lastUpdateId: 7, bids: [['99', '1']], asks: [['101', '1']] }); if (path.endsWith('/aggTrades')) return json([{ a: 9, p: '100', q: '1', m: false, T: 1000, M: true }]); throw new Error('unexpected endpoint'); }; }
 test('Binance source rejects a non-allowlisted host and path', async () => { await assert.rejects(() => fetchBinancePublicJson('https://evil.example/api/v3/ticker/24hr'), /NOT_ALLOWED/); await assert.rejects(() => fetchBinancePublicJson('https://api.binance.com/api/v3/ticker/24hr'), /NOT_ALLOWED/); assert.match(buildBinancePublicUrl('spot', 'ticker'), /^https:\/\/data-api\.binance\.vision\/api\/v3\/ticker\/24hr$/); });
@@ -205,4 +205,92 @@ test('the first window may use the budget, and the shortfall stays truthful', as
   assert.deepEqual(waits, [12_000, 18_000], 'second wait is clamped by the remaining budget');
   assert.equal(mt.windowCoverage['1h'].covered, 3, 'the window recovered');
   assert.equal(mt.degradedWindows, 0);
+});
+
+// ── futures-only listings: timeframes from their OWN candles ─────────────────
+// Multi-timeframe comes from the spot rolling-window ticker and Binance futures has no
+// equivalent endpoint, so any base asset trading ONLY on futures (measured live: 319 of
+// them) showed a dash in every timeframe column while 24h was populated. Deriving them
+// from the futures symbol's own 1h candles fixes that without borrowing a spot pair's
+// percentage, which is a different number.
+function klineFetch({ candles = 169, fail = [] } = {}) {
+  return async (url) => {
+    const parsed = new URL(url);
+    const symbol = parsed.searchParams.get('symbol');
+    if (fail.includes(symbol)) return { ok: false, status: 500, json: async () => ({}) };
+    // close walks 100, 101, 102 ... so every window has a distinct, checkable value.
+    return json(Array.from({ length: candles }, (_, i) => [i, '0', '0', '0', String(100 + i), '1', i]));
+  };
+}
+
+test('a futures-only symbol gets all four windows from one kline request', async () => {
+  const out = await collectFuturesTimeframes(['ESPORTSUSDT'], { fetchImpl: klineFetch() });
+  assert.equal(out.covered, 1);
+  assert.equal(out.failed, 0);
+  const e = out.symbols.get('ESPORTSUSDT');
+  // last close 268 (100+168); 1h ago 267, 4h ago 264, 12h ago 256, 168h ago 100.
+  assert.equal(e.change1hPct, +(((268 - 267) / 267) * 100).toFixed(3));
+  assert.equal(e.change4hPct, +(((268 - 264) / 264) * 100).toFixed(3));
+  assert.equal(e.change12hPct, +(((268 - 256) / 256) * 100).toFixed(3));
+  assert.equal(e.change7dPct, 168);
+});
+
+test('a young listing keeps its short windows and leaves 7d UNKNOWN, never approximated', async () => {
+  // 30 candles: 1h/4h/12h are real, 7d has no reference at all.
+  const out = await collectFuturesTimeframes(['NEWUSDT'], { fetchImpl: klineFetch({ candles: 30 }) });
+  const e = out.symbols.get('NEWUSDT');
+  assert.ok(Number.isFinite(e.change1hPct));
+  assert.ok(Number.isFinite(e.change12hPct));
+  assert.equal('change7dPct' in e, false, '7d is absent, not computed against the oldest candle we happen to hold');
+  assert.equal(out.shortHistory, 1, 'the shortfall is counted');
+});
+
+test('a failed symbol is counted, never given a fabricated value', async () => {
+  const out = await collectFuturesTimeframes(['AUSDT', 'BUSDT'], { fetchImpl: klineFetch({ fail: ['AUSDT'] }) });
+  assert.equal(out.failed, 1);
+  assert.equal(out.covered, 1);
+  assert.equal(out.symbols.has('AUSDT'), false);
+  assert.ok(out.symbols.has('BUSDT'));
+});
+
+test('futures timeframes are read from the futures venue, and charged to the pacer', async () => {
+  const urls = [];
+  const charges = [];
+  const impl = async (url) => { urls.push(url); return klineFetch()(url); };
+  const pacer = { take: async (w) => { charges.push(w); }, get diagnostics() { return {}; } };
+  await collectFuturesTimeframes(['ESPORTSUSDT'], { fetchImpl: impl, pacer });
+  assert.match(urls[0], /^https:\/\/fapi\.binance\.com\/fapi\/v1\/klines\?/, 'the futures venue, not spot');
+  assert.match(urls[0], /interval=1h/);
+  assert.match(urls[0], /limit=169/);
+  assert.deepEqual(charges, [FUTURES_TF_REQUEST_WEIGHT]);
+});
+
+test('spot-listed symbols are not re-collected from futures klines', async () => {
+  // BTCUSDT is on both venues, so the spot row already carries its timeframes and the
+  // reader prefers it; spending futures weight on it again would buy nothing.
+  const urls = [];
+  const impl = async (url) => {
+    const parsed = new URL(url);
+    // Microstructure also reads /fapi/v1/klines, so the timeframe pass is identified by
+    // its own signature (interval=1h, limit=169) rather than by the path alone.
+    urls.push(`${parsed.pathname}?${parsed.searchParams.get('symbol') || ''}&interval=${parsed.searchParams.get('interval') || ''}&limit=${parsed.searchParams.get('limit') || ''}`);
+    // Venue-specific, as Binance really is: spot does NOT list a futures-only symbol.
+    const BTC = { symbol: 'BTCUSDT', status: 'TRADING', isSpotTradingAllowed: true, baseAsset: 'BTC', quoteAsset: 'USDT' };
+    const ONLY_FUT = { symbol: 'ONLYFUTUSDT', status: 'TRADING', baseAsset: 'ONLYFUT', quoteAsset: 'USDT' };
+    const isFutures = parsed.origin === 'https://fapi.binance.com';
+    if (parsed.pathname.endsWith('/exchangeInfo')) return json({ symbols: isFutures ? [BTC, ONLY_FUT] : [BTC] });
+    if (parsed.pathname.endsWith('/ticker/24hr')) {
+      const ticker = (symbol, quoteVolume) => ({ symbol, lastPrice: '100', priceChangePercent: '1', highPrice: '1', lowPrice: '1', volume: '1', quoteVolume, count: 1 });
+      return json(isFutures ? [ticker('BTCUSDT', '9e8'), ticker('ONLYFUTUSDT', '1e6')] : [ticker('BTCUSDT', '9e8')]);
+    }
+    if (parsed.pathname === '/api/v3/ticker') return json([{ symbol: 'BTCUSDT', priceChangePercent: '0.5' }]);
+    if (parsed.pathname.endsWith('/klines')) return klineFetch()(url);
+    if (parsed.pathname.endsWith('/depth')) return json({ lastUpdateId: 1, bids: [['1', '1']], asks: [['2', '1']] });
+    if (parsed.pathname.endsWith('aggTrades')) return json([{ a: 1, p: '1', q: '1', m: false, T: 1, M: true }]);
+    throw new Error('unexpected ' + parsed.pathname);
+  };
+  await collectBinanceMarketContext({ fetchImpl: impl, microstructureTopN: 1, includeFutures: true, includeMultiTimeframe: true, weightBudgetPerMin: 0 });
+  const tfKlineCalls = urls.filter((u) => u.startsWith('/fapi/v1/klines?') && u.includes('interval=1h') && u.includes('limit=169')).map((u) => u.split('?')[1].split('&')[0]);
+  assert.equal(tfKlineCalls.includes('BTCUSDT'), false, 'the spot-listed base is not re-collected');
+  assert.deepEqual(tfKlineCalls, ['ONLYFUTUSDT'], 'only the futures-only base is collected');
 });
