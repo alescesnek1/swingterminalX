@@ -209,13 +209,30 @@
 > **`integrate/canonical-context`**. The RADAR plumbing rebuild above is committed
 > as five commits on top of `91de7ab`: `ada8448` (budget by dislocation),
 > `182df98` (venue keying), `3b681ce` (atomized RADAR state + migration),
-> `87826fc` (Cockpit DB read + visible source fallback), plus this docs commit.
-> Still-uncommitted working-tree edits, unrelated to that work: `.gitignore`
-> (ignore `artifacts/backtests/`), `docs/kucoin-architecture.md` (+§14 KuCoin
-> public-candle backtest MVP), `.claude/settings.local.json`. The deployed branch
-> **`origin/main` is `cf426d3`** ("Keep spot collection when futures is
-> unavailable") — the whole canonical-context line (~30 commits) is **NOT merged
-> to `main`** yet. Uncommitted working-tree edits only: `.gitignore` (ignore
+> `87826fc` (Cockpit DB read + visible source fallback), plus `596b768` docs.
+>
+> **MERGED AND DEPLOYED (owner-approved).** `origin/main` moved
+> `cf426d3` → **`547f79c`** via a `--no-ff` merge of the whole canonical-context
+> line (45 commits). Local `main` had 13 divergent pre-reconcile commits; `git
+> cherry` proved every one patch-equivalent to a branch commit and
+> `backup/pre-reconcile-20260724` preserves them, so `main` was reset to
+> `origin/main` before merging. The merged tree is byte-identical to the tested
+> branch tree, and the full suite passed on `main` before the push
+> (1883 pass / 0 fail / 26 skipped).
+>
+> **Four additive migrations apply on this deploy:**
+> `20260724200000_add_radar_run_results`,
+> `20260724220000_add_ticker_multi_timeframe`,
+> `20260726180000_add_microstructure_absorb`,
+> `20260727100000_add_radar_candidate_state`. All are
+> `CREATE TABLE/INDEX/ADD COLUMN … IF NOT EXISTS`; no `DROP`, `TRUNCATE`,
+> `DELETE`, or `ALTER COLUMN`, and columns added to existing tables are nullable.
+> Every migration blob was verified LF in the commit (a CRLF copy blocks Netlify
+> deploys by content hash). **Not yet verified: the migration SQL has never
+> actually executed — tests mock the DB, so Netlify applying it on this deploy is
+> its first real run.**
+>
+> Still-uncommitted working-tree edits, unrelated: `.gitignore` (ignore
 > `artifacts/backtests/`), `docs/kucoin-architecture.md` (+§14 KuCoin
 > public-candle backtest MVP), `.claude/settings.local.json`. **Supersedes every
 > older "Current local state" line below that still claims `origin/main =
