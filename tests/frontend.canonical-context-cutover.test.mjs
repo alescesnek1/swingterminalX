@@ -139,3 +139,36 @@ test('canonical panels are folded into the existing diagnostics, not stacked abo
   // If the anchor is ever renamed the data is appended, never silently dropped.
   assert.match(withDiagnostics('<table>ONLY</table>', { providerStatus: {}, candidates: [] }, esc), /radar-canonical-panels/);
 });
+
+// ── the source switch must never be silent ───────────────────────────────────
+// The legacy Fleet radar has no server rolling microstructure, so Strict Absorb
+// renders "DATA OFF" on every row. Switching to it without saying so is what made
+// the panel look self-contradictory: a real canonical verdict one cycle, "DATA OFF"
+// the next, with nothing on screen explaining that the data source had changed.
+const indexHtml = fs.readFileSync(new URL('../apps/edge/public/index.html', import.meta.url), 'utf8');
+
+test('falling back to the legacy radar states the active source and the reason', () => {
+  assert.match(terminalJs, /function _radarLegacySourceNoticeHtml\(reason, esc\)/);
+  assert.match(terminalJs, /Showing the legacy browser-computed RADAR/);
+  // It must say DATA OFF here means a missing source, not a rejected absorption.
+  assert.match(terminalJs, /no server rolling microstructure/);
+  assert.match(terminalJs, /not<\/b> a rejected absorption/);
+  // The reason is escaped, never interpolated raw.
+  assert.match(terminalJs, /esc\(String\(reason \|\| 'unknown'\)\)/);
+  // And the switch is logged, not just drawn.
+  assert.match(terminalJs, /radar panel is showing the legacy browser feed/);
+});
+
+test('a failed canonical read replaces the stale context instead of leaving it in place', () => {
+  // Previously __canonicalContext was assigned only on success, so a failed fetch
+  // left the previous cycle's object rendering as if it were current.
+  assert.match(terminalJs, /failed: true, failureReason:/);
+  assert.match(terminalJs, /window\.__canonicalContext\.failed \? `\/api\/context failed/);
+});
+
+test('every versioned asset carries the same single bumped cache-bust token', () => {
+  const tokens = [...indexHtml.matchAll(/\?v=([0-9a-z]+)/g)].map((m) => m[1]);
+  assert.ok(tokens.length >= 11, 'all versioned assets are still tokenised');
+  assert.equal(new Set(tokens).size, 1, 'exactly one token across index.html');
+  assert.equal(tokens[0], '6j3', 'token was bumped for this JS change');
+});
