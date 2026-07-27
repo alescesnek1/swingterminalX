@@ -21,6 +21,33 @@ cutover (a separate, later step).
 | `MARKET_CONTEXT_MULTI_TF_ENABLED` | `false` | Collect 1h/4h/12h/7d % change (Binance rolling-window ticker) for the top-N symbols. Off = scanner shows only 24h; 1h/4h/12h/7d are UNKNOWN. |
 | `MARKET_CONTEXT_MULTI_TF_TOP_N` | `300` | How many symbols get 1h/4h/12h/7d change. Max **1200**. **Ranked by 24h volume, NOT by the dislocation budget** — so with the default 300 the coins RADAR now surfaces (deepest drawdowns, often mid-caps far down the volume list) frequently have no multi-timeframe data and the scanner shows blanks for them. Set to `1000` to cover the whole USD-stable universe (measured live: 750 TRADING pairs exist, so 1000 covers all of them). |
 
+### 🔴 REQUIRED for any non-trivial universe: `MARKET_CONTEXT_BACKGROUND_ENABLED=true`
+
+`market-context-collect-scheduled.mjs` runs the collector **inline** unless this flag is
+exactly `'true'`, and a Netlify **scheduled** function is killed at **30 seconds** — with
+no error, no log and no partial write. The cycle simply never publishes, the terminal
+freezes on its last good run, and that is indistinguishable from a market that did not
+move. Observed live: a **161-second** cycle against the 30s ceiling, data frozen for
+**36 minutes** while the UI showed only a `STALE` badge.
+
+Set all three:
+
+| Env | Value |
+|---|---|
+| `MARKET_CONTEXT_BACKGROUND_ENABLED` | `true` |
+| `CONTROL_BASE_URL` | `https://swingterminalx.netlify.app` |
+| `BOT_WORKER_TOKEN` | (already configured — the dispatch authenticates with it) |
+
+The background function gets ~15 minutes, so a 161s cycle is comfortable there. Without
+`CONTROL_BASE_URL` **or** the token the dispatch fails closed and logs
+`background_dispatch_misconfigured`.
+
+The inline path now **refuses** a configuration it cannot finish, logging
+`cycle_cannot_fit_scheduled_ceiling` with the projected pacing time and the fix, and
+returning `503 CYCLE_EXCEEDS_SCHEDULED_CEILING` — instead of being killed mid-flight.
+Projected pacing for the 200 / 500 / futures-on configuration is **98s**, so it is
+refused inline and must run in the background.
+
 ### ⚠️ Cycle budget — why the terminal can go STALE
 
 The collector is scheduled every **180s**. If pacing takes longer than that, the cycle

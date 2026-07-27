@@ -15,6 +15,27 @@ export const DEFAULT_FUTURES_MICROSTRUCTURE_TOP_N = 20;
 // The collector's own schedule (market-context-collect-scheduled.mjs: '*/3 * * * *').
 // Used only to report a cycle that cannot finish inside it.
 export const COLLECTOR_INTERVAL_MS = 180_000;
+// Netlify's ceiling for a SCHEDULED function. The background function gets ~15 minutes;
+// the scheduled one is killed at 30s with no error, no log and no partial write — the
+// only symptom is that nothing publishes and the terminal freezes on its last good run.
+export const SCHEDULED_FUNCTION_CEILING_MS = 30_000;
+
+// Projects how long one cycle will spend being rate-paced, from the configuration
+// alone. Pure arithmetic, no requests: it exists so an impossible configuration can be
+// refused up front instead of being killed mid-flight.
+export function estimateCyclePacingMs({ microstructureTopN = 0, futuresMicrostructureTopN = 0, multiTimeframeSymbols = 0, futuresTimeframeSymbols = 0, includeFutures = false, includeMultiTimeframe = false } = {}) {
+  const paced = (weight, budgetPerMin) => Math.max(0, ((weight / budgetPerMin) - 1) * WEIGHT_WINDOW_MS);
+  const spotWeight = Number(microstructureTopN || 0) * VENUE_REQUEST_WEIGHTS.spot
+    + (includeMultiTimeframe ? Math.ceil(Number(multiTimeframeSymbols || 0) / MULTI_TF_BATCH) * MULTI_TF_WINDOWS.length * MULTI_TF_BATCH_WEIGHT : 0);
+  const futuresWeight = includeFutures
+    ? Number(futuresMicrostructureTopN || 0) * VENUE_REQUEST_WEIGHTS.futures
+      + (includeMultiTimeframe ? Number(futuresTimeframeSymbols || 0) * FUTURES_TF_REQUEST_WEIGHT : 0)
+    : 0;
+  const spotMs = paced(spotWeight, VENUE_WEIGHT_BUDGETS_PER_MIN.spot);
+  const futuresMs = paced(futuresWeight, VENUE_WEIGHT_BUDGETS_PER_MIN.futures);
+  // The venues run sequentially in collectBinanceMarketContext, so their waits add.
+  return { spotWeight, futuresWeight, spotMs, futuresMs, totalMs: spotMs + futuresMs };
+}
 // Each measured symbol costs 3 public GETs (klines/depth/aggTrades) and ~9 request
 // weight. A full USD-stable universe is ~500 symbols = ~4.5k weight per cycle,
 // inside Binance's 6000/min budget. What it does NOT fit is the 30s scheduled
