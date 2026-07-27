@@ -170,5 +170,25 @@ test('every versioned asset carries the same single bumped cache-bust token', ()
   const tokens = [...indexHtml.matchAll(/\?v=([0-9a-z]+)/g)].map((m) => m[1]);
   assert.ok(tokens.length >= 11, 'all versioned assets are still tokenised');
   assert.equal(new Set(tokens).size, 1, 'exactly one token across index.html');
-  assert.equal(tokens[0], '6j4', 'token was bumped for this JS change');
+  assert.equal(tokens[0], '6j5', 'token was bumped for this JS change');
+});
+
+// The measurement budget targets the deepest drawdowns, and DISLOCATION is 20% of
+// SETUP_SCORE, so measured coins are also the highest-setup coins and sort to the top.
+// The default 20-row window is then often entirely measured and every visible row
+// legitimately reads STRICT OK -- which looks like "STRICT OK on everything", i.e.
+// like a bug. Stating the coverage split is what distinguishes "all measured" from
+// "all confirmed".
+test('the RADAR matrix states microstructure coverage for shown rows and all candidates', () => {
+  assert.match(terminalJs, /const _measuredOf = \(list\) =>/);
+  assert.match(terminalJs, /rollingMicrostructurePresent === true/);
+  assert.match(terminalJs, /shown rows/);
+  assert.match(terminalJs, /candidates carry it/);
+  // It must say STRICT N/A is neither a confirmation nor a rejection.
+  assert.match(terminalJs, /neither a confirmed nor a rejected absorption/);
+  // And when the whole window is measured, say so instead of implying universe-wide.
+  assert.match(terminalJs, /reflects the measured set, not the whole universe/);
+  // Counts are escaped, never interpolated raw.
+  assert.match(terminalJs, /esc\(String\(_shownMeasured\)\)/);
+  assert.match(terminalJs, /esc\(String\(_totalMeasured\)\)/);
 });

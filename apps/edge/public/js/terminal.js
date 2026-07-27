@@ -9649,7 +9649,27 @@ function _renderTradingRadar(radar, esc) {
     </select>
   </div>`;
 
-  const matrixTableHtml = `<div class="radar-matrix-wrap"><table class="radar-matrix">
+  // Microstructure coverage, stated rather than left to be inferred.
+  //
+  // The measurement budget is spent on the deepest drawdowns, and DISLOCATION is 20%
+  // of SETUP_SCORE, so the measured coins are also the highest-setup coins and sort
+  // to the top. The default 20-row window is therefore often entirely measured, and
+  // every visible row legitimately reads STRICT OK. That is correct but reads as
+  // "STRICT OK on everything", i.e. as a bug -- so the shown-vs-total split is
+  // printed, which is what distinguishes "all measured" from "all confirmed".
+  const _measuredOf = (list) => list.filter((c) => c && c.rollingMicrostructurePresent === true).length;
+  const _shownMeasured = _measuredOf(rowsToRender);
+  const _totalMeasured = _measuredOf(candidates);
+  const coverageHtml = `<div class="radar-coverage-note" style="margin:6px 0 8px; font-size:12px; color:#9aa3b2;">
+    Strict Absorb can only be measured where microstructure was collected:
+    <b style="color:#f6f7fb;">${esc(String(_shownMeasured))}/${esc(String(rowsToRender.length))}</b> shown rows
+    and <b style="color:#f6f7fb;">${esc(String(_totalMeasured))}/${esc(String(candidates.length))}</b> candidates carry it.
+    ${_shownMeasured === rowsToRender.length && rowsToRender.length > 0
+      ? 'Every shown row is measured, so STRICT OK here reflects the measured set, not the whole universe — raise the row limit to see the unmeasured tail.'
+      : 'Rows without it read STRICT N/A: not measured, which is neither a confirmed nor a rejected absorption.'}
+  </div>`;
+
+  const matrixTableHtml = coverageHtml + `<div class="radar-matrix-wrap"><table class="radar-matrix">
     <thead>
       <tr>
         <th>Symbol</th><th>Status</th><th>Safety</th><th>Dist</th><th>Setup</th><th>Exec</th><th>Conf</th>
