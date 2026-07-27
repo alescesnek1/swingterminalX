@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildBinancePublicUrl, fetchBinancePublicJson, collectBinanceMarketContext, collectMultiTimeframe, rankByQuoteVolume, rankMicrostructureBudget } from '../netlify/functions/_binance-market-context-source.mjs';
+import { buildBinancePublicUrl, fetchBinancePublicJson, collectBinanceMarketContext, collectMultiTimeframe, rankByQuoteVolume, rankMicrostructureBudget, MULTI_TF_RETRY_BACKOFF_MS, MULTI_TF_RETRY_WAIT_BUDGET_MS } from '../netlify/functions/_binance-market-context-source.mjs';
 const json = (body) => ({ ok: true, json: async () => body });
 function mockFetch({ failDepth = false, failFutures = false } = {}) { return async (url) => { const parsed = new URL(url); const path = parsed.pathname; if (failFutures && parsed.origin === 'https://fapi.binance.com') return { ok: false, status: 451, json: async () => ({}) }; if (failDepth && path.endsWith('/depth')) return { ok: false, status: 451, json: async () => ({}) }; if (path.endsWith('/exchangeInfo')) return json({ symbols: [{ symbol: 'BTCUSDT', status: 'TRADING', isSpotTradingAllowed: true, baseAsset: 'BTC', quoteAsset: 'USDT' }] }); if (path.endsWith('/ticker/24hr')) return json([{ symbol: 'BTCUSDT', lastPrice: '100', priceChangePercent: '1', highPrice: '101', lowPrice: '99', volume: '4', quoteVolume: '400', count: 2 }]); if (path.endsWith('/klines')) return json([[1, '1', '2', '0', '1', '5', 2, '5', 1]]); if (path.endsWith('/depth')) return json({ lastUpdateId: 7, bids: [['99', '1']], asks: [['101', '1']] }); if (path.endsWith('/aggTrades')) return json([{ a: 9, p: '100', q: '1', m: false, T: 1000, M: true }]); throw new Error('unexpected endpoint'); }; }
 test('Binance source rejects a non-allowlisted host and path', async () => { await assert.rejects(() => fetchBinancePublicJson('https://evil.example/api/v3/ticker/24hr'), /NOT_ALLOWED/); await assert.rejects(() => fetchBinancePublicJson('https://api.binance.com/api/v3/ticker/24hr'), /NOT_ALLOWED/); assert.match(buildBinancePublicUrl('spot', 'ticker'), /^https:\/\/data-api\.binance\.vision\/api\/v3\/ticker\/24hr$/); });
@@ -134,7 +134,7 @@ test('a shortfall that survives every retry is reported, never left as a blank',
   const { impl } = rollingFetch({ failWindow: '7d', failTimes: 99 });
   const mt = await collectMultiTimeframe('spot', MT_TICKERS, { fetchImpl: impl, topN: 3, sleep: async () => {} });
   assert.equal(mt.degradedWindows, 1, 'the degraded window is counted');
-  assert.deepEqual(mt.windowCoverage['7d'], { covered: 0, requested: 3, failedBatches: 1, unresolved: 3 });
+  assert.deepEqual(mt.windowCoverage['7d'], { covered: 0, requested: 3, failedBatches: 1, unresolved: 3, retryWaitedMs: 30_000, retryBudgetExhausted: false });
   // The other windows are unaffected and still complete.
   assert.equal(mt.windowCoverage['1h'].covered, 3);
   // The symbols keep their other windows rather than being dropped entirely.
@@ -156,4 +156,53 @@ test('every retry attempt is charged to the pacer, so it cannot outrun the budge
   // 4 windows, one batch each, plus one extra charge for the retried attempt.
   assert.equal(charges.length, 5);
   assert.ok(charges.every((w) => w === 200), 'each charge is the documented batch weight');
+});
+
+// ── the retry wait is bounded for the WHOLE collection ──────────────────────
+// Binance's allowance is a rolling 60s window, so the backoff has to be long enough
+// for weight to age out (12s, then 24s). But retries are per BATCH and a full pass has
+// 32 of them, so an unbounded backoff could add minutes to a cycle that is scheduled
+// every 180s -- and overrunning starts a second, overlapping run that competes for the
+// same IP allowance and causes the very 429s being retried.
+test('the backoff is long enough to clear a rolling weight window', () => {
+  assert.equal(MULTI_TF_RETRY_BACKOFF_MS, 12_000);
+  // Progressive: the second attempt waits twice as long as the first.
+  assert.ok(MULTI_TF_RETRY_BACKOFF_MS * 2 >= 24_000);
+});
+
+test('retry waiting is capped across every window, not per window', async () => {
+  // Every batch of every window is rate limited forever, so the retry path is fully
+  // exercised: without a shared cap this would wait 4 windows x 12s + 24s each.
+  const { impl } = rollingFetch({ failWindow: null, failTimes: 0 });
+  const alwaysLimited = async () => ({ ok: false, status: 429, json: async () => ({}) });
+  const waits = [];
+  const mt = await collectMultiTimeframe('spot', MT_TICKERS, { fetchImpl: alwaysLimited, topN: 3, sleep: async (ms) => { waits.push(ms); } });
+  const total = waits.reduce((sum, ms) => sum + ms, 0);
+  assert.equal(total, MULTI_TF_RETRY_WAIT_BUDGET_MS, 'total wait equals the budget, never more');
+  assert.equal(mt.retryWaitedMs, MULTI_TF_RETRY_WAIT_BUDGET_MS);
+  assert.equal(mt.degradedWindows, 4, 'every window is reported degraded');
+  // Once the cap is spent, later windows stop waiting and say so.
+  assert.equal(mt.windowCoverage['7d'].retryWaitedMs, 0);
+  assert.equal(mt.windowCoverage['7d'].retryBudgetExhausted, true);
+  assert.ok(impl, 'unused helper kept for symmetry');
+});
+
+test('a cycle that never hits a rate limit spends no retry wait at all', async () => {
+  const { impl } = rollingFetch();
+  const waits = [];
+  const mt = await collectMultiTimeframe('spot', MT_TICKERS, { fetchImpl: impl, topN: 3, sleep: async (ms) => { waits.push(ms); } });
+  assert.deepEqual(waits, []);
+  assert.equal(mt.retryWaitedMs, 0);
+  assert.equal(mt.degradedWindows, 0);
+  for (const w of ['1h', '4h', '12h', '7d']) assert.equal(mt.windowCoverage[w].retryBudgetExhausted, false);
+});
+
+test('the first window may use the budget, and the shortfall stays truthful', async () => {
+  // 1h fails twice then succeeds: it should consume 12s + 24s and recover.
+  const { impl } = rollingFetch({ failWindow: '1h', failTimes: 2 });
+  const waits = [];
+  const mt = await collectMultiTimeframe('spot', MT_TICKERS, { fetchImpl: impl, topN: 3, sleep: async (ms) => { waits.push(ms); } });
+  assert.deepEqual(waits, [12_000, 18_000], 'second wait is clamped by the remaining budget');
+  assert.equal(mt.windowCoverage['1h'].covered, 3, 'the window recovered');
+  assert.equal(mt.degradedWindows, 0);
 });

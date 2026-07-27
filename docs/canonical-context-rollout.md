@@ -36,12 +36,29 @@ four windows, 0 failed batches.** Headroom is ~57s, so microstructure can grow t
 roughly 480 symbols before a cycle stops fitting in the interval.
 
 **Without the pacer the same run 429s** and, because windows are fetched in order
-(1h → 4h → 12h → 7d), the shortfall always lands on `7d`: an unpaced 750-symbol run
-lost 250 symbols' 7d values. A rate-limited batch is now retried (a 429 means "later",
-not "no such data"), and any surviving shortfall is reported per window in
-`multiTimeframeWindowCoverage` plus a `[MARKET_CONTEXT] multi_timeframe_degraded`
-warning — so a two-thirds-empty 7d column can never again look like a property of the
-market rather than a failed fetch.
+(1h → 4h → 12h → 7d), the shortfall always lands on `7d`. A rate-limited batch is
+retried (a 429 means "later", not "no such data"), and any surviving shortfall is
+reported per window in `multiTimeframeWindowCoverage` plus a
+`[MARKET_CONTEXT] multi_timeframe_degraded` warning — so a two-thirds-empty 7d column
+can never again look like a property of the market rather than a failed fetch.
+
+Measured on the unpaced worst case (750 symbols, full speed, deliberately rate-limited):
+
+| Backoff | Result |
+|---|---|
+| none (drop on first 429) | 500/750 with all four windows, 250 missing `7d` |
+| 3s / 6s | 650/750, 100 missing `7d` |
+| **12s / 24s, 30s total cap** | **750/750, 0 missing, 48.5s** |
+
+Binance's allowance is a **rolling 60s window**, which is why a 3s pause cleared almost
+nothing — the retry fired straight back into the same exhausted budget.
+
+`MULTI_TF_RETRY_WAIT_BUDGET_MS` (30s) caps retry waiting for the **whole** collection,
+not per window. Retries are per batch and a full pass has 32 of them, so an unbounded
+backoff could add minutes to a cycle scheduled every 180s — and overrunning starts a
+second, overlapping run that competes for the same IP allowance and causes the very
+429s being retried. Once the cap is spent, remaining failures are reported rather than
+waited on, and `retryBudgetExhausted` says so per window.
 | `MARKET_CONTEXT_RADAR_ENABLED` | `false` | Master switch for the server RADAR publisher. Writes both the per-run history (`radar_run_snapshots`/`radar_run_candidates`) and the atomized current state (`radar_candidate_state`, one upserted row per `(market, symbol)`), which is what `/api/context` and the alert path read. |
 | `MARKET_CONTEXT_RETENTION_ENABLED` | `false` | Master switch for the hourly retention sweep. |
 | `MARKET_CONTEXT_RETENTION_MARKET_HOURS` | `48` | How long to keep heavy market rows (min 6h floor). |

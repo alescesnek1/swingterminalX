@@ -287,12 +287,25 @@ function chunkList(items, size) { const out = []; for (let i = 0; i < items.leng
 // Binance has no history for. Measured locally: an unpaced 750-symbol run lost 250
 // symbols' 7d values that way, because 7d is fetched last and therefore loses first.
 const MULTI_TF_RETRY_ATTEMPTS = 2;
-const MULTI_TF_RETRY_BACKOFF_MS = 3_000;
+// Binance's weight allowance is a ROLLING 60s window, so a 3s pause cleared almost
+// nothing: a retry fired straight back into the same exhausted budget and failed
+// again. Backoff is progressive (12s, then 24s) to actually let weight age out.
+export const MULTI_TF_RETRY_BACKOFF_MS = 12_000;
+// Retries are per BATCH and there are 32 of them in a full universe pass, so an
+// unbounded backoff could add minutes to a cycle. The collector is scheduled every
+// 180s and a measured full cycle already takes ~123s, so the retry wait is capped
+// for the WHOLE collection: overrunning the interval starts a second, overlapping
+// run that competes for the same IP allowance and causes the very 429s being
+// retried. Once the cap is spent, remaining failures are reported instead of waited
+// on — an honest shortfall beats a cycle that never finishes.
+export const MULTI_TF_RETRY_WAIT_BUDGET_MS = 30_000;
 
-async function fetchRollingWindow(market, symbols, windowSize, fetchImpl, pacer, sleep = (ms) => new Promise((r) => setTimeout(r, ms))) {
+async function fetchRollingWindow(market, symbols, windowSize, fetchImpl, pacer, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), retryBudget = { remainingMs: MULTI_TF_RETRY_WAIT_BUDGET_MS }) {
   const map = new Map();
   let failedBatches = 0;
   let unresolved = 0;
+  let retryWaitedMs = 0;
+  let budgetExhausted = false;
   for (const batch of chunkList(symbols, MULTI_TF_BATCH)) {
     let payload = null;
     let lastReason = null;
@@ -309,13 +322,19 @@ async function fetchRollingWindow(market, symbols, windowSize, fetchImpl, pacer,
         // Only a rate limit is worth retrying; a rejected or malformed request will
         // fail identically however long we wait.
         if (lastReason !== 'UPSTREAM_RATE_LIMITED' || attempt === MULTI_TF_RETRY_ATTEMPTS) break;
-        await sleep(MULTI_TF_RETRY_BACKOFF_MS * (attempt + 1));
+        // Never wait longer than the collection has left: a partial result reported
+        // truthfully is better than a cycle that overruns its own schedule.
+        const wait = Math.min(MULTI_TF_RETRY_BACKOFF_MS * (attempt + 1), Math.max(0, retryBudget.remainingMs));
+        if (wait <= 0) { budgetExhausted = true; break; }
+        retryBudget.remainingMs -= wait;
+        retryWaitedMs += wait;
+        await sleep(wait);
       }
     }
     if (!payload) {
       failedBatches += 1;
       unresolved += batch.length;
-      console.warn('[MARKET_CONTEXT] multi_timeframe_batch_failed', { market, windowSize, symbolCount: batch.length, reason: lastReason, attempts: MULTI_TF_RETRY_ATTEMPTS + 1 });
+      console.warn('[MARKET_CONTEXT] multi_timeframe_batch_failed', { market, windowSize, symbolCount: batch.length, reason: lastReason, attempts: MULTI_TF_RETRY_ATTEMPTS + 1, retryBudgetExhausted: budgetExhausted });
       continue;
     }
     for (const row of Array.isArray(payload) ? payload : []) { const pct = finite(row?.priceChangePercent); if (row?.symbol && pct !== null) map.set(row.symbol, pct); }
@@ -323,7 +342,7 @@ async function fetchRollingWindow(market, symbols, windowSize, fetchImpl, pacer,
   // A shortfall must be reported, not inferred from a blank cell: a value missing
   // because the fetch failed and a value missing because the pair is days old are
   // different facts, and only the caller can label them.
-  return { map, failedBatches, unresolved, requested: symbols.length, covered: map.size };
+  return { map, failedBatches, unresolved, requested: symbols.length, covered: map.size, retryWaitedMs, retryBudgetExhausted: budgetExhausted };
 }
 
 // Multi-timeframe (1h/4h/12h/7d) % change for the top-N symbols by 24h quote
@@ -334,10 +353,16 @@ export async function collectMultiTimeframe(market, tickers, { fetchImpl = fetch
   const byWindow = {};
   const windowCoverage = {};
   let degradedWindows = 0;
+  // ONE retry-wait budget for the whole collection, not one per window. Windows are
+  // fetched in order, so a per-window budget would let the earlier windows spend four
+  // times the intended wait and push the cycle past its own schedule.
+  const retryBudget = { remainingMs: MULTI_TF_RETRY_WAIT_BUDGET_MS };
+  let retryWaitedMs = 0;
   for (const window of MULTI_TF_WINDOWS) {
-    const outcome = await fetchRollingWindow(market, symbols, window.windowSize, fetchImpl, pacer, sleep);
+    const outcome = await fetchRollingWindow(market, symbols, window.windowSize, fetchImpl, pacer, sleep, retryBudget);
     byWindow[window.key] = outcome.map;
-    windowCoverage[window.windowSize] = { covered: outcome.covered, requested: outcome.requested, failedBatches: outcome.failedBatches, unresolved: outcome.unresolved };
+    windowCoverage[window.windowSize] = { covered: outcome.covered, requested: outcome.requested, failedBatches: outcome.failedBatches, unresolved: outcome.unresolved, retryWaitedMs: outcome.retryWaitedMs, retryBudgetExhausted: outcome.retryBudgetExhausted };
+    retryWaitedMs += outcome.retryWaitedMs;
     if (outcome.failedBatches > 0) degradedWindows += 1;
   }
   const result = new Map();
@@ -346,8 +371,8 @@ export async function collectMultiTimeframe(market, tickers, { fetchImpl = fetch
   // (7d) first. Without this line a 7d column that is two thirds empty looks like a
   // property of the market rather than a failed fetch, which is exactly how the gap
   // went unnoticed.
-  if (degradedWindows > 0) console.warn('[MARKET_CONTEXT] multi_timeframe_degraded', { market, requested: symbols.length, degradedWindows, windowCoverage });
-  return { symbols: result, requested: symbols.length, covered: result.size, windows: MULTI_TF_WINDOWS.map((window) => window.windowSize), windowCoverage, degradedWindows };
+  if (degradedWindows > 0) console.warn('[MARKET_CONTEXT] multi_timeframe_degraded', { market, requested: symbols.length, degradedWindows, retryWaitedMs, retryBudgetRemainingMs: retryBudget.remainingMs, windowCoverage });
+  return { symbols: result, requested: symbols.length, covered: result.size, windows: MULTI_TF_WINDOWS.map((window) => window.windowSize), windowCoverage, degradedWindows, retryWaitedMs };
 }
 
 export async function collectBinanceMarketContext(options = {}) {
