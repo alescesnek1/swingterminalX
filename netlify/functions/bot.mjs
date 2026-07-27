@@ -1393,7 +1393,8 @@ function autoTraderStatus(fleet, identity = null) {
     liveEnabled: process.env.AUTO_LIVE_TRADING_ENABLED === 'true',
     effectiveMode,
     status: statusLabel,
-    candidate: persisted.candidate || null,
+    // NOTE: `candidate` is set once, further down with the other persisted
+    // fields. A duplicate key here was silently overridden by that later one.
     score: Number.isFinite(Number(persisted.score)) ? Number(persisted.score) : null,
     reasons: Array.isArray(persisted.reasons) ? persisted.reasons : [],
     riskBlocks,
@@ -1700,8 +1701,17 @@ function liveDailyCounters(fleet, now = Date.now()) {
   return { trades, realizedLoss, realizedPnl, dayStartMs };
 }
 
-function normalizeOpenPositionsSummary(input, sessionId) {
+// `reportedMode` is the mode from the reporting worker's request body, passed in
+// EXPLICITLY. This helper is declared at module scope, so the handler's `body` is
+// not in its closure: the previous `body.mode` reads here threw
+// `ReferenceError: body is not defined` on every worker-heartbeat that actually
+// carried an open position, crashing the endpoint with a 500. The worker swallows
+// that HTTP failure and continues, so the control plane silently lost track of
+// open positions. Regression coverage: tests/bot.open-position-report.test.mjs.
+function normalizeOpenPositionsSummary(input, sessionId, reportedMode) {
   if (!Array.isArray(input)) return [];
+  // Fail closed: only an explicit 'live_spot' counts as real money.
+  const isLiveSpot = reportedMode === 'live_spot';
   const out = [];
   for (const p of input.slice(0, 10)) {
     if (!p || typeof p !== 'object') continue;
@@ -1717,10 +1727,17 @@ function normalizeOpenPositionsSummary(input, sessionId) {
       closeOrderId: null,
       status: 'open',
       sessionId,
-      mode: body.mode === 'live_spot' ? 'live_spot' : 'testnet',
+      mode: isLiveSpot ? 'live_spot' : 'testnet',
       error: null,
-      testnet: true,
-      realProductionOrder: body.mode === 'live_spot',
+      // `testnet` MUST track `mode`. It was hardcoded `true`, which was
+      // unreachable while the ReferenceError above crashed this function first —
+      // but on its own it is worse than the crash: the worker hydrates backend
+      // records via hydrateOpenPositionsFromBackend() and then branches on
+      // `pos.testnet` when closing (scripts/local-binance-worker.mjs). A live
+      // position labelled testnet gets a SIMULATED paper close, so the position
+      // is reported closed while real money stays exposed.
+      testnet: !isLiveSpot,
+      realProductionOrder: isLiveSpot,
       receivedAt: new Date().toISOString(),
     });
   }
@@ -3031,7 +3048,7 @@ async function handleFleetWorker(req, base, body) {
     if (!workerId) return json(req, { ok: false, error: 'workerId is required' }, 400);
 
     const nowIso = new Date().toISOString();
-    const reportedOpenPositions = normalizeOpenPositionsSummary(body.openPositions, sessionId);
+    const reportedOpenPositions = normalizeOpenPositionsSummary(body.openPositions, sessionId, body.mode);
     if (!session && reportedOpenPositions.length > 0) {
       session = recoverSessionWithOpenPositions(fleet, sessionId, workerId, body, reportedOpenPositions, 'worker-heartbeat');
     }
@@ -3183,7 +3200,8 @@ async function handleFleetWorker(req, base, body) {
       autoControl: autoControlForSession(fleet, session),
       durable: fleetStoreInfo().durable,
       globalKillSwitchActive: killSwitchActive,
-      stopRequested: session.stopRequested === true,
+      // NOTE: `stopRequested` is set once, below with the other command flags.
+      // A duplicate key here was silently overridden by that later one.
       entryBlockedReason: entryBlock.entryBlockedReason,
       canAcceptEntryIntent: entryBlock.canAcceptEntryIntent,
       livePreflightFresh: livePreflightFresh(fleet),

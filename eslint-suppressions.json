@@ -1,0 +1,323 @@
+{
+  "apps/edge/netlify/edge-functions/analyze.js": {
+    "repo-contract/no-silent-catch": {
+      "count": 4
+    }
+  },
+  "apps/edge/netlify/edge-functions/briefing.js": {
+    "repo-contract/no-silent-catch": {
+      "count": 4
+    }
+  },
+  "apps/edge/netlify/edge-functions/funding-divergence.js": {
+    "repo-contract/no-indistinguishable-catch-return": {
+      "count": 1
+    },
+    "repo-contract/no-silent-catch": {
+      "count": 1
+    }
+  },
+  "apps/edge/netlify/edge-functions/lib/binance.js": {
+    "no-useless-escape": {
+      "count": 1
+    }
+  },
+  "apps/edge/netlify/edge-functions/lib/orchestrator.js": {
+    "no-useless-assignment": {
+      "count": 1
+    },
+    "no-useless-escape": {
+      "count": 2
+    },
+    "repo-contract/no-silent-catch": {
+      "count": 1
+    }
+  },
+  "apps/edge/netlify/edge-functions/lib/redis.js": {
+    "repo-contract/no-indistinguishable-catch-return": {
+      "count": 1
+    }
+  },
+  "apps/edge/netlify/edge-functions/lib/security.js": {
+    "no-useless-assignment": {
+      "count": 1
+    },
+    "repo-contract/no-indistinguishable-catch-return": {
+      "count": 1
+    },
+    "repo-contract/no-silent-catch": {
+      "count": 1
+    }
+  },
+  "apps/edge/netlify/edge-functions/market-briefing.js": {
+    "preserve-caught-error": {
+      "count": 2
+    },
+    "repo-contract/no-silent-catch": {
+      "count": 3
+    }
+  },
+  "apps/edge/netlify/edge-functions/news.js": {
+    "no-useless-escape": {
+      "count": 1
+    }
+  },
+  "apps/edge/netlify/edge-functions/regime.js": {
+    "repo-contract/no-silent-catch": {
+      "count": 1
+    }
+  },
+  "apps/edge/netlify/edge-functions/sniper-detect.js": {
+    "repo-contract/no-indistinguishable-catch-return": {
+      "count": 1
+    },
+    "repo-contract/no-silent-catch": {
+      "count": 1
+    }
+  },
+  "apps/edge/public/js/ai-analysis.js": {
+    "repo-contract/no-silent-catch": {
+      "count": 2
+    }
+  },
+  "apps/edge/public/js/terminal.js": {
+    "no-misleading-character-class": {
+      "count": 1
+    },
+    "no-undef": {
+      "count": 1
+    },
+    "no-useless-assignment": {
+      "count": 8
+    },
+    "repo-contract/no-indistinguishable-catch-return": {
+      "count": 16
+    },
+    "repo-contract/no-silent-catch": {
+      "count": 100
+    }
+  },
+  "apps/edge/public/js/toast.js": {
+    "repo-contract/no-silent-catch": {
+      "count": 1
+    }
+  },
+  "apps/ingest/src/aggregator.js": {
+    "no-useless-escape": {
+      "count": 1
+    }
+  },
+  "apps/ingest/src/feeds/binance.js": {
+    "repo-contract/no-silent-catch": {
+      "count": 3
+    }
+  },
+  "apps/ingest/src/paperbot.js": {
+    "no-useless-assignment": {
+      "count": 1
+    },
+    "repo-contract/no-indistinguishable-catch-return": {
+      "count": 1
+    },
+    "repo-contract/no-silent-catch": {
+      "count": 3
+    }
+  },
+  "apps/ingest/src/stream.js": {
+    "repo-contract/no-indistinguishable-catch-return": {
+      "count": 2
+    },
+    "repo-contract/no-silent-catch": {
+      "count": 8
+    }
+  },
+  "netlify/functions/_auth.mjs": {
+    "no-useless-assignment": {
+      "count": 1
+    },
+    "repo-contract/no-indistinguishable-catch-return": {
+      "count": 1
+    }
+  },
+  "netlify/functions/_market-context-store.mjs": {
+    "repo-contract/no-silent-catch": {
+      "count": 1
+    }
+  },
+  "netlify/functions/_observability.mjs": {
+    "repo-contract/no-indistinguishable-catch-return": {
+      "count": 1
+    }
+  },
+  "netlify/functions/_personal-watch-notifier.mjs": {
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "netlify/functions/_price-history.mjs": {
+    "repo-contract/no-indistinguishable-catch-return": {
+      "count": 3
+    },
+    "repo-contract/no-silent-catch": {
+      "count": 1
+    }
+  },
+  "netlify/functions/admin-observability.mjs": {
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "netlify/functions/admin-price-history-collect.mjs": {
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "netlify/functions/admin-price-history-signals.mjs": {
+    "no-useless-assignment": {
+      "count": 2
+    }
+  },
+  "netlify/functions/admin-price-history.mjs": {
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "netlify/functions/bot.mjs": {
+    "no-useless-assignment": {
+      "count": 3
+    },
+    "repo-contract/no-indistinguishable-catch-return": {
+      "count": 2
+    },
+    "repo-contract/no-silent-catch": {
+      "count": 1
+    }
+  },
+  "netlify/functions/market-context-collect-scheduled.mjs": {
+    "repo-contract/no-indistinguishable-catch-return": {
+      "count": 1
+    }
+  },
+  "netlify/functions/morning-briefing.mjs": {
+    "no-useless-assignment": {
+      "count": 1
+    },
+    "repo-contract/no-silent-catch": {
+      "count": 1
+    }
+  },
+  "netlify/functions/personal-alerts-diagnostic.mjs": {
+    "repo-contract/no-silent-catch": {
+      "count": 1
+    }
+  },
+  "netlify/functions/personal-alerts.mjs": {
+    "repo-contract/no-silent-catch": {
+      "count": 1
+    }
+  },
+  "netlify/functions/radar-microstructure-refresh.mjs": {
+    "repo-contract/no-silent-catch": {
+      "count": 1
+    }
+  },
+  "scripts/auto/auto-loop.mjs": {
+    "repo-contract/no-silent-catch": {
+      "count": 1
+    }
+  },
+  "scripts/auto/microstructure-enrichment.mjs": {
+    "repo-contract/no-silent-catch": {
+      "count": 1
+    }
+  },
+  "scripts/briefing/gemini-node.mjs": {
+    "no-useless-escape": {
+      "count": 2
+    }
+  },
+  "scripts/cockpit/trade-cockpit.mjs": {
+    "no-useless-assignment": {
+      "count": 3
+    }
+  },
+  "scripts/local-binance-worker.mjs": {
+    "repo-contract/no-indistinguishable-catch-return": {
+      "count": 1
+    },
+    "repo-contract/no-silent-catch": {
+      "count": 4
+    }
+  },
+  "scripts/radar/klines-producer.mjs": {
+    "repo-contract/no-indistinguishable-catch-return": {
+      "count": 1
+    }
+  },
+  "scripts/radar/long-short-producer.mjs": {
+    "repo-contract/no-indistinguishable-catch-return": {
+      "count": 1
+    }
+  },
+  "scripts/radar/radar-microstructure-producer.mjs": {
+    "no-useless-assignment": {
+      "count": 1
+    },
+    "repo-contract/no-indistinguishable-catch-return": {
+      "count": 1
+    }
+  },
+  "scripts/radar/rolling-microstructure-producer.mjs": {
+    "repo-contract/no-indistinguishable-catch-return": {
+      "count": 2
+    }
+  },
+  "scripts/radar/run-kucoin-radar-backtest.mjs": {
+    "preserve-caught-error": {
+      "count": 1
+    }
+  },
+  "scripts/radar/trading-radar.mjs": {
+    "no-prototype-builtins": {
+      "count": 1
+    },
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "scripts/safety/chain-safety.mjs": {
+    "no-useless-assignment": {
+      "count": 2
+    }
+  },
+  "tests/ai.orchestrator.test.mjs": {
+    "repo-contract/no-indistinguishable-catch-return": {
+      "count": 1
+    }
+  },
+  "tests/e2e-close.mjs": {
+    "repo-contract/no-silent-catch": {
+      "count": 2
+    }
+  },
+  "tests/frontend.radar-human-ux.test.mjs": {
+    "no-useless-escape": {
+      "count": 7
+    }
+  },
+  "tests/worker.live-preflight.test.mjs": {
+    "repo-contract/no-silent-catch": {
+      "count": 4
+    }
+  },
+  "tests/worker.subprocess.test.mjs": {
+    "repo-contract/no-silent-catch": {
+      "count": 1
+    }
+  },
+  "tests/worker.trade-result.test.mjs": {
+    "repo-contract/no-silent-catch": {
+      "count": 1
+    }
+  }
+}

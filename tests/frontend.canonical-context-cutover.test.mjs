@@ -170,7 +170,10 @@ test('every versioned asset carries the same single bumped cache-bust token', ()
   const tokens = [...indexHtml.matchAll(/\?v=([0-9a-z]+)/g)].map((m) => m[1]);
   assert.ok(tokens.length >= 11, 'all versioned assets are still tokenised');
   assert.equal(new Set(tokens).size, 1, 'exactly one token across index.html');
-  assert.equal(tokens[0], '6j8', 'token was bumped for this JS change');
+  // Pinned on purpose: bumping this literal is the deliberate act that proves a
+  // JS/CSS change was paired with a cache-bust. 6j8 → 6k1 for the central client
+  // error log (js/error-log.js, new; toast.js changed).
+  assert.equal(tokens[0], '6k1', 'token was bumped for this JS change');
 });
 
 // The measurement budget targets the deepest drawdowns, and DISLOCATION is 20% of

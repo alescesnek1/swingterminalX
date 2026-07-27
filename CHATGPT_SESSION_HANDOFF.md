@@ -726,6 +726,10 @@ Doc map:
 - `docs/radar-microstructure.md` — provider-backed static microstructure (the
   fail-closed `MARKET_DATA_PROVIDER=none` default, the "451" story).
 - `docs/radar-rolling-microstructure-design.md` — **design only, not implemented.**
+- `docs/error-observability.md` — the client error log (`errors()` in devtools),
+  the machine-enforced error-observability ESLint rules, and the
+  `eslint-suppressions.json` debt baseline. Read before touching any failure
+  path or adding a `<script>` to `index.html`.
 
 ## 5. Git / deploy guardrails
 
@@ -1200,6 +1204,43 @@ email allowlist (§9), not a billing tier.
 ## 11. Known completed work / recent milestones
 
 From current git history (most recent first, condensed — see `git log` for full):
+- **Error observability + static analysis, phase 1 (LOCAL, UNPUSHED, branch
+  `feat/error-observability-lint`)** — three things:
+  1. **A production bug found and fixed.** `normalizeOpenPositionsSummary()`
+     in `netlify/functions/bot.mjs` read `body.mode` from a module-scope
+     helper where the request `body` is not in scope, so **every
+     `worker-heartbeat` that actually carried an open position threw
+     `ReferenceError: body is not defined` and answered 500** (reproduced
+     directly). The worker logs that HTTP failure and continues, so the
+     control plane silently lost track of open positions. Every pre-existing
+     heartbeat test passed `openPositions: []`, which is why it was never
+     caught. Fixed by passing `reportedMode` in explicitly, fail-closed (only
+     an explicit `'live_spot'` counts as live). The record's `testnet` flag
+     was also hardcoded `true`; that is worse than the crash, because the
+     worker hydrates backend records and then branches on `pos.testnet` when
+     closing — a live position labelled testnet gets a **simulated** paper
+     close, reporting the position closed while real money stays exposed. It
+     now tracks `mode`. Regression coverage:
+     `tests/bot.open-position-report.test.mjs`. Also removed two duplicate
+     object keys in `bot.mjs` (`candidate`, `stopRequested` — both identical
+     expressions, so no behaviour change) and a real `TypeError` risk in
+     `terminal.js` where `|| ''` only guarded the spot branch of a ternary.
+  2. **Central client error log** — `apps/edge/public/js/error-log.js`, loaded
+     first in `index.html`. A `window.fetch` interceptor records every non-OK
+     response and network failure; `toast.js` forwards all ~67 existing
+     `Toast.error/warn` call sites. Owner types **`errors()`** in devtools for
+     a table of every failure with its reason. URLs are redacted (tokens),
+     response bodies are never read, repeats fold into a counter.
+  3. **Static analysis** — ESLint 10 + `tools/eslint/repo-contract-plugin.mjs`,
+     which turns the non-negotiable rules into build errors
+     (`no-silent-catch`, `no-indistinguishable-catch-return`,
+     `no-sensitive-log`). `npm run lint` is now a required gate alongside
+     `npm test`; `.github/workflows/static-analysis.yml` runs both.
+     241 pre-existing violations are held in `eslint-suppressions.json` so
+     the gate applies to new code; `npm run lint:debt` reports the remainder
+     (154 silent catches, 126 of them in `terminal.js`). **No secret-logging
+     violations exist in the repo** — that rule found zero real hits.
+     Full detail: `docs/error-observability.md`.
 - **Price-history RADAR chain (LOCAL, UNPUSHED — `c26652a` → `3d75047` → `d6e047e`)** — advisory frontend readiness overlay; bounded top-five backend context; then a max +3 setup-only score support. Unknown/degraded context is zero; Flow/OI/Funding, safety, failed reclaim, strict rolling absorption, all existing gates, and baseline Telegram eligibility remain required/unchanged. Runtime safety review passed; no fetch, scheduler, credential, private endpoint, orderbook input, trading path, or alert sender was added.
 - **Scheduled price-history collection (LOCAL, UNPUSHED, branch
   `feat/price-history-scheduler`)** — production-risk review completed

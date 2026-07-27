@@ -163,6 +163,24 @@ must always be able to tell that something broke and what broke.
   is indistinguishable from a genuinely valid result.** A caught error must
   return a value the caller can tell apart from real data — never silently
   collapse into a number/boolean/array that looks legitimate downstream.
+- **These rules are now machine-enforced — do not work around the linter.**
+  `tools/eslint/repo-contract-plugin.mjs` turns three of them into ESLint
+  errors: `repo-contract/no-silent-catch`,
+  `repo-contract/no-indistinguishable-catch-return`, and
+  `repo-contract/no-sensitive-log`. **`npm run lint` must pass before you
+  commit, alongside `npm test`.** Pre-existing violations live in
+  `eslint-suppressions.json` (see `npm run lint:debt`); that baseline is for
+  *existing* debt only — **never add a new entry to it to get a fresh
+  violation past the gate.** If a rule is genuinely wrong for one site, use
+  `// eslint-disable-next-line <rule> -- <written reason>`; a disable without
+  a reason is a review failure. Full detail: `docs/error-observability.md`.
+- **Client failures must reach the central error log.** Any new client-side
+  failure path must either go through `Toast.error` / `Toast.warn` (which
+  forwards automatically) or call `window.ErrorLog.record(...)`. Never remove
+  `apps/edge/public/js/error-log.js` from the top of `index.html` — it must
+  load before every other script so its `window.fetch` interceptor is in
+  place before the first request. Owner-facing lookup is `errors()` in
+  devtools.
 - **Missing or failed data must render as `UNKNOWN` — never as a bearish/SELL
   signal or any other trading label.** A computed score, panic indicator, or
   signal that could not be computed (missing inputs, thrown error) must never
@@ -183,6 +201,19 @@ must always be able to tell that something broke and what broke.
 
 - `npm test` runs Node's built-in runner over `tests/**/*.test.mjs`.
 - Add tests next to the existing ones (`node:test` + `node:assert/strict`, `.mjs`).
+
+## Static analysis
+
+- **`npm run lint` must pass before every commit** (same bar as `npm test`).
+  Exit 1 = a new violation. Exit 2 = a suppressed violation was fixed but its
+  baseline entry is stale → run `npm run lint:prune` and commit the smaller
+  baseline.
+- `npm run lint:debt` prints what `eslint-suppressions.json` is still holding
+  back, by rule and by file. Never grow that baseline to pass a new violation.
+- `eslint.config.mjs` covers three runtimes (Deno edge / Node / browser). A new
+  file added to `index.html` must go in the matching browser block — classic
+  `<script>` vs `<script type="module">` — or it will fail to parse.
+- Detail and rationale: `docs/error-observability.md`.
 
 ## MANDATORY: keep the ChatGPT handoff current
 

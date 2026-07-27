@@ -2696,8 +2696,12 @@ async function loadOrderbook(d, binance, opts) {
     return;
   }
   const market = (d?.binance_market === 'futures' || d?.exchange === 'ALPHA') ? 'futures' : 'spot';
-  const pair = (market === 'futures' ? (d?.futures_pair || d?.pair) : (d?.spot_pair || d?.pair) || '')
-    .replace('/', '');
+  // The `|| ''` used to sit inside the ternary's else-branch, so it only ever
+  // guarded the SPOT path: a futures coin with neither futures_pair nor pair
+  // reached `.replace()` on undefined and threw a TypeError here, before the
+  // `if (!pair)` message below could explain anything to the user.
+  const pairRaw = market === 'futures' ? (d?.futures_pair || d?.pair) : (d?.spot_pair || d?.pair);
+  const pair = String(pairRaw || '').replace('/', '');
   if (!pair) {
     slot.innerHTML = '<div style="color:var(--txt3)">Binance pár pro tento coin se nepodařilo určit.</div>';
     if (status) status.textContent = '–';
