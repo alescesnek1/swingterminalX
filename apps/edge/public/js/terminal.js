@@ -1828,6 +1828,62 @@ function _dedupeCanonicalByBase(rows) {
   return Array.from(byBase.values());
 }
 
+// The canonical feed is Binance ticker data and carries NO market cap — the
+// `market_ticker_observations` table has no such column, so /api/context can
+// never supply one. Every canonical row therefore arrived with market_cap and
+// market_cap_rank absent, which (a) blanked market cap everywhere in the UI and
+// (b) silently collapsed every market-cap ordering into "whatever order the rows
+// arrived in" while the UI still claimed to be sorted by rank.
+//
+// Enrich from the legacy CoinGecko-backed /api/markets. Coins outside CG's
+// covered universe legitimately have no market cap; they stay absent (never 0)
+// so the UI can render them as UNKNOWN and sort them last. The outcome is
+// recorded on window.__marketCapEnrichment so the UI can state WHY market cap is
+// missing instead of showing a blank that reads like real data.
+async function _enrichCanonicalWithMarketCap(rows, authHeaders) {
+  const total = rows.length;
+  try {
+    const r = await fetch('/api/markets', { headers: { 'Accept': 'application/json', ...authHeaders } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const cg = await r.json();
+    if (!Array.isArray(cg)) throw new Error('unexpected /api/markets payload shape');
+
+    const byBase = new Map();
+    for (const c of cg) {
+      const base = String(c.symbol || '').split(':')[0].toUpperCase();
+      if (!base) continue;
+      const mc = Number(c.market_cap);
+      // market_cap: 0 is how /api/markets marks a Binance-only listing with no
+      // CoinGecko entry — that is "unknown", not "worth nothing".
+      if (!Number.isFinite(mc) || mc <= 0) continue;
+      const prev = byBase.get(base);
+      if (!prev || mc > prev.market_cap) {
+        byBase.set(base, { market_cap: mc, market_cap_rank: Number(c.market_cap_rank) || null });
+      }
+    }
+
+    let matched = 0;
+    for (const row of rows) {
+      const hit = byBase.get(String(row.symbol || '').toUpperCase());
+      if (!hit) continue;
+      row.market_cap = hit.market_cap;
+      if (hit.market_cap_rank) row.market_cap_rank = hit.market_cap_rank;
+      matched++;
+    }
+
+    window.__marketCapEnrichment = { ok: true, matched, total, reason: null, at: Date.now() };
+    if (!matched && total) {
+      console.warn('[CANONICAL] market-cap enrichment matched 0 of ' + total + ' canonical rows — symbols may not line up with /api/markets');
+    }
+  } catch (e) {
+    const reason = (e && e.message) || 'error';
+    window.__marketCapEnrichment = { ok: false, matched: 0, total, reason, at: Date.now() };
+    console.warn('[CANONICAL] market-cap enrichment from /api/markets failed:', reason);
+    window.Toast?.error?.('Market cap unavailable', `/api/markets enrichment failed — ${reason}. Market-cap ordering falls back to 24h volume.`, { endpoint: '/api/markets' });
+  }
+  return rows;
+}
+
 async function _fetchCanonicalMarkets(authHeaders) {
   const r = await fetch('/api/context', { headers: { 'Accept': 'application/json', ...authHeaders } });
   if (!r.ok) { const body = await r.text().catch(() => ''); throw new Error('HTTP ' + r.status + ' — ' + body.slice(0, 120)); }
@@ -1835,6 +1891,7 @@ async function _fetchCanonicalMarkets(authHeaders) {
   if (!j || j.ok === false) throw new Error('context error: ' + ((j && j.reason) || 'unknown'));
   const tickers = (j.market && Array.isArray(j.market.tickers)) ? j.market.tickers : [];
   const rows = _dedupeCanonicalByBase(tickers.map(_mapCanonicalTicker).filter((row) => row.symbol));
+  await _enrichCanonicalWithMarketCap(rows, authHeaders);
   // Expose the canonical RADAR + provider status for the RADAR/Absorb panels.
   window.__canonicalContext = { radar: j.radar || null, market: { observedAt: j.market?.observedAt || null, freshness: j.market?.freshness || null }, run: j.run || null, receivedAt: Date.now() };
   window.__marketsFreshness = { ok: true, servedFrom: 'canonical', stale: j.market?.freshness === 'STALE', generatedAt: j.market?.observedAt ? Date.parse(j.market.observedAt) : null };
@@ -2994,7 +3051,7 @@ function _hmWire(wrap) {
     // above so they are safe by construction.
     tip.innerHTML = `<div class="hm-tip__sym">${_esc(String(d.symbol||'').toUpperCase())}</div>
       <div class="hm-tip__row"><span>24h</span><b style="color:${c === null ? 'var(--txt3)' : c >= 0 ? 'var(--grn)' : 'var(--red)'}">${c === null ? 'no data' : (c>=0?'+':'')+c.toFixed(2)+'%'}</b></div>
-      <div class="hm-tip__row"><span>Market Cap</span><b>${_esc(_hmFmtCap(mc))}</b></div>
+      <div class="hm-tip__row"><span>Market Cap</span><b${mc > 0 ? '' : ' style="color:var(--amb)"'}>${mc > 0 ? _esc(_hmFmtCap(mc)) : 'no data'}</b></div>
       <div class="hm-tip__row"><span>24h Vol</span><b>${_esc(_hmFmtCap(vol))}</b></div>
       <div class="hm-tip__hint">click → detail</div>`;
     tip.style.display = 'block';
@@ -3053,20 +3110,34 @@ function renderHeatmap() {
     return;
   }
 
-  const pool = all
+  const matched = all
     .filter(d => Number(d.total_volume) > 0)
     .filter(d => {
       if (!searchTerm) return true;
       const s = String(d.symbol||'').toLowerCase();
       const n = String(d.name||'').toLowerCase();
       return s.includes(searchTerm) || n.includes(searchTerm);
-    })
-    .sort((a, b) => {
-      const ra = Number(a.market_cap_rank) || Number.MAX_SAFE_INTEGER;
-      const rb = Number(b.market_cap_rank) || Number.MAX_SAFE_INTEGER;
-      if (ra !== rb) return ra - rb;
-      return (Number(b.market_cap) || 0) - (Number(a.market_cap) || 0);
-    })
+    });
+
+  // Never claim an ordering the data cannot support. The canonical feed carries
+  // no market cap of its own, so when enrichment is missing or failed EVERY coin
+  // would tie on rank and the "sorted by market cap" grid would really be
+  // "sorted by whatever order the rows arrived in". Count the coverage first and
+  // order by what is actually known.
+  const withMc = matched.filter(d => Number(d.market_cap) > 0).length;
+  const orderedByMc = withMc > 0;
+  const pool = matched
+    .sort(orderedByMc
+      ? (a, b) => {
+          // Coins with no market cap sort last rather than to the top.
+          const ra = Number(a.market_cap_rank) > 0 ? Number(a.market_cap_rank)
+            : Number(a.market_cap) > 0 ? Number.MAX_SAFE_INTEGER - 1 : Number.MAX_SAFE_INTEGER;
+          const rb = Number(b.market_cap_rank) > 0 ? Number(b.market_cap_rank)
+            : Number(b.market_cap) > 0 ? Number.MAX_SAFE_INTEGER - 1 : Number.MAX_SAFE_INTEGER;
+          if (ra !== rb) return ra - rb;
+          return (Number(b.market_cap) || 0) - (Number(a.market_cap) || 0);
+        }
+      : (a, b) => (Number(b.total_volume) || 0) - (Number(a.total_volume) || 0))
     .slice(0, limit);
 
   _hm.pool = pool;
@@ -3092,7 +3163,25 @@ function renderHeatmap() {
     </div>`;
   }).join('');
 
-  if (hmCount) hmCount.textContent = pool.length + ' coins · MC rank #1→#' + pool.length + ' · color = 24h change';
+  // The header states the ordering that was ACTUALLY applied, plus why market
+  // cap is unavailable when it is — a silent fallback here reads as "sorted by
+  // market cap" and is the exact bug this replaced.
+  if (hmCount) {
+    const missing = pool.filter(d => !(Number(d.market_cap) > 0)).length;
+    let label;
+    if (orderedByMc) {
+      label = pool.length + ' coins · by market cap #1→#' + pool.length;
+      if (missing) label += ' · ' + missing + ' without market cap, sorted last';
+    } else {
+      const enr = window.__marketCapEnrichment;
+      const why = !enr ? 'feed carries none'
+        : enr.ok === false ? '/api/markets failed: ' + (enr.reason || 'error')
+        : 'no coin matched /api/markets';
+      label = pool.length + ' coins · by 24h volume — NO market cap (' + why + ')';
+    }
+    hmCount.textContent = label + ' · color = 24h change';
+    hmCount.style.color = orderedByMc ? 'var(--txt3)' : 'var(--amb)';
+  }
 }
 
 function renderAlerts() {
@@ -3503,9 +3592,9 @@ window.showHeatmapDetail = function(d) {
     <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-bottom:16px; color:var(--txt2);">
       <div>Price<br><b style="color:var(--txt);">${_esc(fmt(d.current_price))}</b></div>
       <div>24h Chg<br><b style="color:${c === null ? 'var(--txt3)' : c >= 0 ? 'var(--grn)' : 'var(--red)'}">${c === null ? 'no data' : (c>=0?'+':'')+c.toFixed(2)+'%'}</b></div>
-      <div>Rank<br><b style="color:var(--txt);">${_esc(String(rank))}</b></div>
+      <div>Rank<br><b style="color:${Number(d.market_cap_rank) > 0 ? 'var(--txt)' : 'var(--amb)'};">${Number(d.market_cap_rank) > 0 ? _esc(String(rank)) : 'no data'}</b></div>
       <div>24h Vol<br><b style="color:var(--txt);">${_esc(_hmFmtCap(vol))}</b></div>
-      <div style="grid-column: span 2;">Market Cap<br><b style="color:var(--txt);">${_esc(_hmFmtCap(mc))}</b></div>
+      <div style="grid-column: span 2;">Market Cap<br><b style="color:${mc > 0 ? 'var(--txt)' : 'var(--amb)'};">${mc > 0 ? _esc(_hmFmtCap(mc)) : 'no data' + (window.__marketCapEnrichment && window.__marketCapEnrichment.ok === false ? ' — /api/markets failed' : '')}</b></div>
     </div>
     <button onclick="document.getElementById('hm-detail').style.display='none'; pickCoin('${_esc(String(d.id||'').toLowerCase())}'); const t=document.querySelector('#tabs .tab'); if(t) sv('scanner', t);" style="width:100%; padding:10px; background:var(--s3); color:var(--acc); border:1px solid var(--acc); border-radius:var(--rad); cursor:pointer; font-weight:700; font-family:inherit;">
       GO TO SCANNER

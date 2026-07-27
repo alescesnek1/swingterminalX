@@ -170,7 +170,7 @@ test('every versioned asset carries the same single bumped cache-bust token', ()
   const tokens = [...indexHtml.matchAll(/\?v=([0-9a-z]+)/g)].map((m) => m[1]);
   assert.ok(tokens.length >= 11, 'all versioned assets are still tokenised');
   assert.equal(new Set(tokens).size, 1, 'exactly one token across index.html');
-  assert.equal(tokens[0], '6j7', 'token was bumped for this JS change');
+  assert.equal(tokens[0], '6j8', 'token was bumped for this JS change');
 });
 
 // The measurement budget targets the deepest drawdowns, and DISLOCATION is 20% of
@@ -216,4 +216,73 @@ test('the legacy notice renders whether the flag is off, failed, or pending', ()
   const bare = [...terminalJs.matchAll(/mainHtml = _renderTradingRadar\(fleetRadar, _esc\)/g)];
   assert.equal(bare.length, 1, 'exactly one un-annotated legacy render remains (the shape-error guard)');
   assert.match(terminalJs.slice(bare[0].index - 220, bare[0].index), /catch \(e\)/, 'and it sits inside the catch');
+});
+
+// ── Market cap: the canonical feed has none, so it is enriched from /api/markets ──
+//
+// `market_ticker_observations` is Binance ticker data and has no market-cap column,
+// so /api/context can never supply one. Every canonical row arrived with market_cap
+// absent, which blanked market cap across the UI and silently collapsed the heatmap's
+// "sorted by market cap" ordering into "whatever order the rows arrived in".
+
+function extractAsyncFunction(name) {
+  const start = terminalJs.indexOf(`async function ${name}(`);
+  assert.notEqual(start, -1, `${name} exists`);
+  let depth = 0;
+  for (let j = terminalJs.indexOf('{', start); j < terminalJs.length; j += 1) {
+    if (terminalJs[j] === '{') depth += 1;
+    else if (terminalJs[j] === '}') { depth -= 1; if (depth === 0) return terminalJs.slice(start, j + 1); }
+  }
+  throw new Error(`unbalanced ${name}`);
+}
+
+function makeEnricher(fetchStub, win) {
+  const make = new Function('fetch', 'window', 'console',
+    `${extractAsyncFunction('_enrichCanonicalWithMarketCap')}\nreturn _enrichCanonicalWithMarketCap;`);
+  return make(fetchStub, win, { warn() {}, error() {} });
+}
+
+test('canonical rows are enriched with market cap, and market_cap 0 stays UNKNOWN', async () => {
+  const seen = [];
+  const fetchStub = async (url) => {
+    seen.push(url);
+    return { ok: true, json: async () => ([
+      { symbol: 'BTC', market_cap: 2e12, market_cap_rank: 1 },
+      { symbol: 'ETH:USDT', market_cap: 4e11, market_cap_rank: 2 },
+      // /api/markets marks a Binance-only listing with no CoinGecko entry as 0 —
+      // that is "unknown", never "worth nothing".
+      { symbol: 'ONLYBIN', market_cap: 0, market_cap_rank: 0 },
+    ]) };
+  };
+  const win = {};
+  const enrich = makeEnricher(fetchStub, win);
+  const rows = [{ symbol: 'BTC' }, { symbol: 'ETH' }, { symbol: 'ONLYBIN' }, { symbol: 'UNLISTED' }];
+
+  await enrich(rows, {});
+
+  assert.deepEqual(seen, ['/api/markets']);
+  assert.equal(rows[0].market_cap, 2e12);
+  assert.equal(rows[0].market_cap_rank, 1);
+  assert.equal(rows[1].market_cap, 4e11, 'pair suffix is stripped before matching');
+  assert.equal('market_cap' in rows[2], false, 'a 0 market cap must not be copied as a real value');
+  assert.equal('market_cap' in rows[3], false, 'a coin outside the CG universe stays absent');
+  assert.equal(win.__marketCapEnrichment.ok, true);
+  assert.equal(win.__marketCapEnrichment.matched, 2);
+  assert.equal(win.__marketCapEnrichment.total, 4);
+});
+
+test('a failed market-cap enrichment is recorded and leaves rows absent, never 0', async () => {
+  const win = {};
+  const enrich = makeEnricher(async () => ({ ok: false, status: 503, text: async () => '' }), win);
+  const rows = [{ symbol: 'BTC' }];
+
+  await enrich(rows, {});
+
+  assert.equal('market_cap' in rows[0], false, 'a failed fetch must not fabricate a market cap');
+  assert.equal(win.__marketCapEnrichment.ok, false);
+  assert.match(win.__marketCapEnrichment.reason, /HTTP 503/);
+});
+
+test('the canonical fetch runs the market-cap enrichment', () => {
+  assert.match(terminalJs, /await _enrichCanonicalWithMarketCap\(rows, authHeaders\)/);
 });

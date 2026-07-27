@@ -13,7 +13,37 @@
 > `/reply` or `/admin_summary` support system** here. If you find yourself
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
-> _HEATMAP redesigned to the v4 tile grid (2026-07-27, local-only, uncommitted):_
+> _Market cap was missing app-wide under the canonical read — now enriched from
+> /api/markets (2026-07-27, local, committed, NOT yet on main):_ Reported as "market cap
+> missing in the heatmap, on all of them". Root cause is **not** the heatmap: the
+> canonical feed is Binance ticker data and `market_ticker_observations` has **no
+> market-cap column at all**, so `/api/context` can never supply one and
+> `_mapCanonicalTicker` emitted rows without `market_cap` / `market_cap_rank`. With
+> `window.RADAR_CANONICAL_CONTEXT_READ = true` (index.html) that blanked market cap
+> **everywhere** — heatmap, bubbles, and every market-cap sort — and silently collapsed
+> those sorts into arrival order (the canonical query orders by `quote_volume DESC`).
+> The heatmap made it worse by *labelling* that order "MC rank #1→#N".
+>
+> New `_enrichCanonicalWithMarketCap(rows, authHeaders)` runs inside
+> `_fetchCanonicalMarkets`: one extra GET to the legacy CoinGecko-backed
+> `/api/markets`, matched by base symbol, copying `market_cap` + `market_cap_rank`.
+> `market_cap: 0` (how `/api/markets` marks a Binance-only listing with no CG entry) is
+> treated as UNKNOWN and **not** copied — absent, never 0. Outcome is recorded on
+> `window.__marketCapEnrichment` `{ok, matched, total, reason}`; a failure logs, raises a
+> Toast, and leaves rows absent.
+>
+> The heatmap now derives its ordering from actual coverage: any market cap → sort by
+> rank with the capless coins **last** and the header saying how many; zero coverage →
+> sort by 24h volume with an **amber** header naming the reason ("feed carries none" /
+> "/api/markets failed: HTTP 503"). Missing market cap renders as "no data" in the tile
+> tooltip and the detail panel, not as a formatted value. Owner chose enrichment over a
+> DB/collector change and chose to keep market cap in the tooltip/detail rather than
+> adding a third line to the tiles. The durable fix — carrying market cap in the
+> canonical context itself — is still open. Cache-bust `6j7` → `6j8`. Tests: two
+> behaviour tests for the enricher (0-is-unknown, failure recorded) plus an
+> ordering-honesty test; suite green (1914 pass / 0 fail / 26 skipped).
+>
+> _HEATMAP redesigned to the v4 tile grid (2026-07-27, on `main`, deployed):_
 > The canvas treemap renderer is gone. The HEATMAP tab now renders the **terminal-v4
 > design**: a uniform CSS-grid of tiles (symbol above, 24h % below), colour = 24h
 > change on v4's four-band palette, ordered by market-cap rank #1 → #N, row-major.
