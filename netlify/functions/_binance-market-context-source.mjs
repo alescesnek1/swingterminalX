@@ -49,9 +49,61 @@ export function rankByQuoteVolume(tickers) {
   return eligible.sort((a, b) => (finite(b.quoteVolume) || 0) - (finite(a.quoteVolume) || 0));
 }
 
+// The microstructure budget decides which coins can ever produce an EXECUTION_SCORE
+// at all: order-book support and flow confirmation are 25% + 25% of it, and a coin
+// with no measurement cannot reach the 65 gate, so it can never become ENTRY_READY.
+//
+// Allocating that budget purely by liquidity spent every slot on the largest majors
+// — which are precisely the coins that rarely produce the setup RADAR looks for (a
+// 2-3x ATR dislocation followed by a long flush). The coins that DO flush sit far
+// down the volume list and were never measured, so the entry branch was structurally
+// dead for exactly the population the strategy targets.
+//
+// The budget is therefore split, both parts drawn from the liquid pool so an illiquid
+// pair the universe filter would reject anyway never consumes a slot:
+//   - a fixed number of top-liquidity slots, so BTC/ETH/major context never drops out
+//   - the remainder to the deepest 24h DOWN moves, i.e. the real dislocation candidates
+// A pump is not this setup, so only negative moves earn a dislocation slot. A symbol
+// with no usable 24h change counts as zero dislocation: it stays eligible through the
+// liquidity slots but never displaces a symbol with a measured real drop.
+export const DEFAULT_MICROSTRUCTURE_POOL_SIZE = 400;
+export const DEFAULT_MICROSTRUCTURE_MAJOR_SLOTS = 20;
+
+function dislocationDepthPct(ticker) {
+  const change = finite(ticker?.priceChangePercent);
+  return change !== null && change < 0 ? -change : 0;
+}
+
+export function rankMicrostructureBudget(tickers, options = {}) {
+  const topN = boundedTopN(options.topN);
+  const poolSize = clampCount(options.poolSize, DEFAULT_MICROSTRUCTURE_POOL_SIZE, MAX_MICROSTRUCTURE_TOP_N);
+  const majorSlots = clampCount(options.majorSlots, DEFAULT_MICROSTRUCTURE_MAJOR_SLOTS, poolSize);
+  const pool = rankByQuoteVolume(tickers).slice(0, poolSize);
+  const selected = pool.slice(0, majorSlots);
+  const taken = new Set(selected.map((t) => t.symbol));
+  const dislocated = pool.slice(majorSlots)
+    .map((ticker) => ({ ticker, depth: dislocationDepthPct(ticker) }))
+    // Deterministic: depth first, then symbol, so an identical universe always
+    // yields an identical measured set (and the tests are not order-dependent).
+    .sort((a, b) => b.depth - a.depth || String(a.ticker.symbol).localeCompare(String(b.ticker.symbol)));
+  for (const { ticker } of dislocated) {
+    if (selected.length >= topN) break;
+    if (taken.has(ticker.symbol)) continue;
+    taken.add(ticker.symbol);
+    selected.push(ticker);
+  }
+  return selected.slice(0, topN);
+}
+
 function boundedTopN(value) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? Math.min(Math.trunc(number), MAX_MICROSTRUCTURE_TOP_N) : DEFAULT_MICROSTRUCTURE_TOP_N;
+}
+// Bounded positive count with an explicit fallback — a missing, zero, negative, or
+// non-numeric value takes the fallback rather than collapsing the budget to nothing.
+function clampCount(value, fallback, max) {
+  const number = Math.trunc(Number(value));
+  return Number.isFinite(number) && number > 0 ? Math.min(number, max) : Math.min(fallback, max);
 }
 function failureCode(error) {
   const message = String(error?.message || error || '');
@@ -206,13 +258,17 @@ function boundedConcurrency(value) {
   return Number.isFinite(n) && n > 0 ? Math.min(Math.trunc(n), MAX_MICROSTRUCTURE_CONCURRENCY) : DEFAULT_MICROSTRUCTURE_CONCURRENCY;
 }
 
-async function collectVenue(market, { fetchImpl, microstructureTopN, concurrency, pacer }) {
+async function collectVenue(market, { fetchImpl, microstructureTopN, microstructurePoolSize, microstructureMajorSlots, concurrency, pacer }) {
   const [info, tickersPayload] = await Promise.all([fetchBinancePublicJson(buildBinancePublicUrl(market, 'exchangeInfo'), { fetchImpl }), fetchBinancePublicJson(buildBinancePublicUrl(market, 'ticker'), { fetchImpl })]);
   const tickers = normalizeTickers(market, tickersPayload, instrumentIndex(market, info));
   if (!tickers.length) throw new Error('BINANCE_EMPTY_TICKER_UNIVERSE');
   const rankable = rankByQuoteVolume(tickers);
   if (!rankable.length) console.warn('[MARKET_CONTEXT] microstructure_universe_empty', { market, tickerCount: tickers.length, quotes: RANKABLE_QUOTE_ASSETS });
-  const candidates = rankable.slice(0, boundedTopN(microstructureTopN));
+  const candidates = rankMicrostructureBudget(tickers, { topN: microstructureTopN, poolSize: microstructurePoolSize, majorSlots: microstructureMajorSlots });
+  // Which coins the budget actually bought is the difference between "RADAR found no
+  // setup" and "RADAR could not have found one", so the split is logged every cycle.
+  const dislocationSlots = candidates.filter((t) => dislocationDepthPct(t) > 0).length;
+  console.info('[MARKET_CONTEXT] microstructure_budget', { market, measured: candidates.length, poolCandidates: rankable.length, withDrawdown: dislocationSlots, deepestDropPct: candidates.length ? +Math.max(...candidates.map(dislocationDepthPct)).toFixed(2) : null });
   const microstructures = await mapBounded(candidates, boundedConcurrency(concurrency), async (ticker) => {
     if (pacer) await pacer.take(venueRequestWeight(market));
     return collectMicrostructurePair(market, ticker, fetchImpl);
@@ -263,8 +319,11 @@ export async function collectBinanceMarketContext(options = {}) {
   // multi-timeframe reads draw on the same per-minute allowance, so they must
   // share a budget — two independent pacers each believe they have the full one.
   const spotPacer = makePacer('spot');
+  // How the measurement budget is allocated across the liquid pool. Optional: unset
+  // values take the module defaults, so existing callers keep working unchanged.
+  const budgetShape = { microstructurePoolSize: options.microstructurePoolSize, microstructureMajorSlots: options.microstructureMajorSlots };
   let spot;
-  try { spot = await collectVenue('spot', { fetchImpl, microstructureTopN: topN, concurrency, pacer: spotPacer }); }
+  try { spot = await collectVenue('spot', { fetchImpl, microstructureTopN: topN, ...budgetShape, concurrency, pacer: spotPacer }); }
   catch (error) { return { ok: false, reason: failureCode(error), dataStatus: 'unavailable' }; }
   let futures = { tickers: [], microstructures: [], status: 'unsupported', failureCode: null };
   if (options.includeFutures === true) {
@@ -272,7 +331,7 @@ export async function collectBinanceMarketContext(options = {}) {
     // fraction of spot's, so the same symbol count that spot absorbs comfortably
     // gets the futures venue rate-limited outright.
     const futuresTopN = Number.isFinite(Number(options.futuresMicrostructureTopN)) && Number(options.futuresMicrostructureTopN) > 0 ? boundedTopN(options.futuresMicrostructureTopN) : topN;
-    try { const collected = await collectVenue('futures', { fetchImpl, microstructureTopN: futuresTopN, concurrency, pacer: makePacer('futures') }); futures = { ...collected, status: 'complete', failureCode: null }; }
+    try { const collected = await collectVenue('futures', { fetchImpl, microstructureTopN: futuresTopN, ...budgetShape, concurrency, pacer: makePacer('futures') }); futures = { ...collected, status: 'complete', failureCode: null }; }
     catch (error) { futures = { tickers: [], microstructures: [], status: 'unavailable', failureCode: failureCode(error) }; }
   }
   const microstructures = [...spot.microstructures, ...futures.microstructures];
