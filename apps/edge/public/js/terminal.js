@@ -1791,6 +1791,12 @@ function _mapCanonicalTicker(t) {
     spot_pair: t.market === 'futures' ? undefined : pair,
     futures_pair: t.market === 'futures' ? pair : undefined,
     source: 'canonical', listingSource: 'Binance',
+    // Server-classified safety. Absent means UNKNOWN — never silently "safe".
+    safetyStatus: t.safety_status || undefined,
+    safetyReason: t.safety_reason || undefined,
+    safetyBasis: t.safety_basis || undefined,
+    safetySource: t.safety_source || undefined,
+    listingSafetyStatus: t.listing_safety_status || undefined,
     current_price: n(t.last_price) ?? 0, price_change_percentage_24h: n(t.price_change_percent) ?? 0,
     total_volume: n(t.quote_volume) ?? 0, high_24h: n(t.high_price), low_24h: n(t.low_price),
     _funding: 0, _oi: 0, _oiDelta: 0,

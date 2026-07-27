@@ -30,6 +30,13 @@ function tickerToMarket(t) {
     priceChangePercent: num(t.price_change_percent), change24hPct: num(t.price_change_percent),
     change1hPct: num(t.change_1h_pct), change4hPct: num(t.change_4h_pct), change12hPct: num(t.change_12h_pct), change7dPct: num(t.change_7d_pct),
     highPrice: num(t.high_price), lowPrice: num(t.low_price), baseVolume: num(t.base_volume), tradeCount: t.trade_count ?? null,
+    // The reclaim evaluator looks for its source levels under the scanner's field
+    // names (high_24h / low_24h, see RECLAIM_SOURCE_FIELD_NAMES). Emitting only
+    // the camelCase highPrice/lowPrice meant it found NO source field at all and
+    // every canonical candidate reported RECLAIM_DATA_SOURCE_MISSING — "no reclaim
+    // data" — even with a perfectly good 24h range in the row.
+    high_24h: num(t.high_price), low_24h: num(t.low_price),
+    high24h: num(t.high_price), low24h: num(t.low_price),
   };
 }
 
@@ -125,8 +132,13 @@ export async function runRadarContextPublisher(deps = {}) {
     const rollingNowMs = measuredAt.length ? Math.max(nowMs, ...measuredAt) : nowMs;
     const rollingSnapshot = bridge.buildCollectorRollingSnapshot(bundle.microSymbols || [], { nowMs: rollingNowMs, updatedAtMs: rollingNowMs });
     const validatedRolling = rolling.normalizeRollingMicrostructureSnapshot(rollingSnapshot, { nowMs: rollingNowMs });
-    const klinesSnapshot = buildKlinesSnapshot(bundle.microSymbols || [], nowMs);
-    const result = radar.evaluateTradingRadar({ markets, source: 'canonical_context', fetchedAt: bundle.run.observedAt, now: nowMs, rollingMicrostructureSnapshot: rollingSnapshot, klinesSnapshot });
+    const klinesSnapshot = buildKlinesSnapshot(bundle.microSymbols || [], rollingNowMs);
+    // `now` must not predate the snapshot it is evaluating. The RADAR's own
+    // staleness check is `updatedAtMs > now + 60s`, so passing the run's START
+    // time against data completed ~94s later marked the whole snapshot STALE —
+    // which the matrix renders as "DATA OFF" on every row. The moment the data
+    // was complete is the truthful "now" for evaluating that data.
+    const result = radar.evaluateTradingRadar({ markets, source: 'canonical_context', fetchedAt: bundle.run.observedAt, now: rollingNowMs, rollingMicrostructureSnapshot: rollingSnapshot, klinesSnapshot });
     const candidates = Array.isArray(result.candidates) ? result.candidates : [];
     const entryReadyCount = Array.isArray(result.entryReady) ? result.entryReady.length : 0;
     const providerStatus = buildProviderStatus(validatedRolling, bundle, nowMs);

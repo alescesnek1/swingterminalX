@@ -19,7 +19,13 @@ export const MICROSTRUCTURE_CONCURRENCY = DEFAULT_MICROSTRUCTURE_CONCURRENCY;
 // it is bounded to the top-N by 24h quote volume; every other symbol stays
 // UNKNOWN for these fields (never faked).
 export const DEFAULT_MULTI_TF_TOP_N = 300;
-export const MAX_MULTI_TF_TOP_N = 500;
+// The terminal lists ~1000 coins; anything past this ceiling shows UNKNOWN for
+// 1h/4h/12h/7d, which reads as a broken row rather than an honest gap. The
+// rolling-window ticker is weight-capped at 200 per request, so covering the
+// whole list costs ~8000 weight per cycle — real money against the per-minute
+// allowance, which is why these requests go through the pacer too.
+export const MAX_MULTI_TF_TOP_N = 1200;
+export const MULTI_TF_BATCH_WEIGHT = 200;
 const MULTI_TF_BATCH = 100;
 const MULTI_TF_WINDOWS = Object.freeze([{ key: 'change1hPct', windowSize: '1h' }, { key: 'change4hPct', windowSize: '4h' }, { key: 'change12hPct', windowSize: '12h' }, { key: 'change7dPct', windowSize: '7d' }]);
 
@@ -219,9 +225,13 @@ function chunkList(items, size) { const out = []; for (let i = 0; i < items.leng
 // One rolling window (e.g. 1h) for a bounded symbol list, batched to respect the
 // 100-symbols-per-request limit. A failed batch leaves its symbols UNKNOWN for
 // this window — it is never backfilled from another source or invented.
-async function fetchRollingWindow(market, symbols, windowSize, fetchImpl) {
+async function fetchRollingWindow(market, symbols, windowSize, fetchImpl, pacer) {
   const map = new Map();
   for (const batch of chunkList(symbols, MULTI_TF_BATCH)) {
+    // Shares the venue's per-minute allowance with the microstructure reads, so
+    // it must draw from the same pacer — otherwise widening this coverage simply
+    // moves the rate-limit failure from one endpoint to another.
+    if (pacer) await pacer.take(MULTI_TF_BATCH_WEIGHT);
     let payload;
     try { payload = await fetchBinancePublicJson(buildBinancePublicUrl(market, 'rollingTicker', { symbols: JSON.stringify(batch), windowSize }), { fetchImpl }); }
     catch (error) { console.warn('[MARKET_CONTEXT] multi_timeframe_batch_failed', { market, windowSize, symbolCount: batch.length, reason: failureCode(error) }); continue; }
@@ -232,11 +242,11 @@ async function fetchRollingWindow(market, symbols, windowSize, fetchImpl) {
 
 // Multi-timeframe (1h/4h/12h/7d) % change for the top-N symbols by 24h quote
 // volume. Windows are fetched sequentially to stay well inside the weight budget.
-export async function collectMultiTimeframe(market, tickers, { fetchImpl = fetch, topN = DEFAULT_MULTI_TF_TOP_N } = {}) {
+export async function collectMultiTimeframe(market, tickers, { fetchImpl = fetch, topN = DEFAULT_MULTI_TF_TOP_N, pacer = null } = {}) {
   const bounded = Math.min(Math.max(Math.trunc(Number(topN) || DEFAULT_MULTI_TF_TOP_N), 1), MAX_MULTI_TF_TOP_N);
   const symbols = rankByQuoteVolume(tickers).slice(0, bounded).map((t) => t.symbol);
   const byWindow = {};
-  for (const window of MULTI_TF_WINDOWS) byWindow[window.key] = await fetchRollingWindow(market, symbols, window.windowSize, fetchImpl);
+  for (const window of MULTI_TF_WINDOWS) byWindow[window.key] = await fetchRollingWindow(market, symbols, window.windowSize, fetchImpl, pacer);
   const result = new Map();
   for (const symbol of symbols) { const entry = {}; for (const window of MULTI_TF_WINDOWS) { const value = byWindow[window.key].get(symbol); if (value !== undefined) entry[window.key] = value; } if (Object.keys(entry).length) result.set(symbol, entry); }
   return { symbols: result, requested: symbols.length, covered: result.size, windows: MULTI_TF_WINDOWS.map((window) => window.windowSize) };
@@ -249,8 +259,12 @@ export async function collectBinanceMarketContext(options = {}) {
   // One pacer per venue: spot and futures are separate services with separate
   // per-IP weight allowances, so spending on one must not throttle the other.
   const makePacer = (market) => (options.weightBudgetPerMin === 0 ? null : createWeightPacer(options.weightBudgetPerMin ?? venueWeightBudget(market)));
+  // ONE pacer per venue for the whole cycle. The microstructure reads and the
+  // multi-timeframe reads draw on the same per-minute allowance, so they must
+  // share a budget — two independent pacers each believe they have the full one.
+  const spotPacer = makePacer('spot');
   let spot;
-  try { spot = await collectVenue('spot', { fetchImpl, microstructureTopN: topN, concurrency, pacer: makePacer('spot') }); }
+  try { spot = await collectVenue('spot', { fetchImpl, microstructureTopN: topN, concurrency, pacer: spotPacer }); }
   catch (error) { return { ok: false, reason: failureCode(error), dataStatus: 'unavailable' }; }
   let futures = { tickers: [], microstructures: [], status: 'unsupported', failureCode: null };
   if (options.includeFutures === true) {
@@ -267,13 +281,13 @@ export async function collectBinanceMarketContext(options = {}) {
   // keep no 1h/4h/12h/7d fields → the reader surfaces them as UNKNOWN.
   let multiTf = { symbols: new Map(), requested: 0, covered: 0 };
   if (options.includeMultiTimeframe === true) {
-    try { multiTf = await collectMultiTimeframe('spot', spot.tickers, { fetchImpl, topN: options.multiTimeframeTopN }); }
+    try { multiTf = await collectMultiTimeframe('spot', spot.tickers, { fetchImpl, topN: options.multiTimeframeTopN, pacer: spotPacer }); }
     catch (error) { multiTf = { symbols: new Map(), requested: 0, covered: 0, failureCode: failureCode(error) }; }
     for (const row of spot.tickers) { const entry = multiTf.symbols.get(row.symbol); if (entry) Object.assign(row, entry); }
   }
   return {
     ok: true, observedAt: new Date(), collectedAt: new Date(), dataStatus: futures.status === 'complete' && allMicrostructureComplete ? 'complete' : 'partial',
     rows: [...spot.tickers, ...futures.tickers], microstructure: microstructures,
-    diagnostics: { spotTickerCount: spot.tickers.length, futuresTickerCount: futures.tickers.length, microstructureCount: microstructures.length, futuresStatus: futures.status, futuresFailureCode: futures.failureCode, microstructureTopN: topN, multiTimeframeRequested: multiTf.requested, multiTimeframeCovered: multiTf.covered, pacingWaitedMs: (spot.pacing?.waitedMs || 0) + (futures.pacing?.waitedMs || 0), rateLimitedSymbols: microstructures.filter((row) => row.failureCode === 'UPSTREAM_RATE_LIMITED').length },
+    diagnostics: { spotTickerCount: spot.tickers.length, futuresTickerCount: futures.tickers.length, microstructureCount: microstructures.length, futuresStatus: futures.status, futuresFailureCode: futures.failureCode, microstructureTopN: topN, multiTimeframeRequested: multiTf.requested, multiTimeframeCovered: multiTf.covered, multiTimeframeFailureCode: multiTf.failureCode ?? null, pacingWaitedMs: (spotPacer?.diagnostics?.waitedMs || 0) + (futures.pacing?.waitedMs || 0), rateLimitedSymbols: microstructures.filter((row) => row.failureCode === 'UPSTREAM_RATE_LIMITED').length },
   };
 }

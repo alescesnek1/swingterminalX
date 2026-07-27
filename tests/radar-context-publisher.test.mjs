@@ -128,3 +128,32 @@ test('a long collection cycle does not make its own measurements look stale', as
   assert.equal(coverage.SYMBOL_STATUS.BTCUSDT, 'READY', 'the late measurement is still trusted');
   assert.equal(capture.payload.providerStatus.ABSORB_MODE, 'STRICT');
 });
+
+// Regression: the reclaim evaluator looks up its source levels under the
+// scanner's field names (high_24h / low_24h). Emitting only camelCase
+// highPrice/lowPrice meant it found NO source field, so every canonical
+// candidate reported "no reclaim data" despite carrying a full 24h range.
+test('canonical tickers expose the reclaim source fields under the names it reads', async () => {
+  const capture = {};
+  const bundle = fullBundle();
+  await runRadarContextPublisher({ env: { MARKET_CONTEXT_RADAR_ENABLED: 'true' }, store: fakeStore(capture), withTransaction: async (cb) => cb({}), radar, bridge, rolling, bundle });
+  const btc = capture.payload.candidates.find((c) => c.symbol === 'BTCUSDT');
+  assert.ok(btc, 'BTCUSDT is a candidate');
+  assert.notEqual(btc.RECLAIM_SOURCE_DATA_STATUS, 'RECLAIM_DATA_SOURCE_MISSING');
+  // Safety resolves from the listing axis alone — no chain metadata needed.
+  assert.equal(btc.safetyStatus, 'SAFE');
+});
+
+// Regression: the RADAR's own snapshot staleness check is `updatedAtMs > now + 60s`.
+// Passing the run's START time while evaluating data completed ~94s later marked
+// the entire snapshot STALE, which the matrix renders as "DATA OFF" on every row.
+test('a long cycle does not mark its own rolling snapshot STALE (matrix "DATA OFF")', async () => {
+  const capture = {};
+  const bundle = fullBundle();
+  bundle.microSymbols[0].observedAtMs = NOW + 95_000;
+  await runRadarContextPublisher({ env: { MARKET_CONTEXT_RADAR_ENABLED: 'true' }, store: fakeStore(capture), withTransaction: async (cb) => cb({}), radar, bridge, rolling, bundle });
+  const btc = capture.payload.candidates.find((c) => c.symbol === 'BTCUSDT');
+  assert.ok(btc, 'BTCUSDT is a candidate');
+  assert.notEqual(btc.STRICT_ABSORB_STATUS, 'ABSORB_DATA_STALE');
+  assert.notEqual(btc.ABSORB_STATUS, 'ABSORB_DATA_STALE');
+});
