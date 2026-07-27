@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildBinancePublicUrl, fetchBinancePublicJson, collectBinanceMarketContext, collectMultiTimeframe, rankByQuoteVolume, rankMicrostructureBudget, MULTI_TF_RETRY_BACKOFF_MS, MULTI_TF_RETRY_WAIT_BUDGET_MS, collectFuturesTimeframes, FUTURES_TF_REQUEST_WEIGHT } from '../netlify/functions/_binance-market-context-source.mjs';
+import fs from 'node:fs';
+import { buildBinancePublicUrl, fetchBinancePublicJson, collectBinanceMarketContext, collectMultiTimeframe, rankByQuoteVolume, rankMicrostructureBudget, MULTI_TF_RETRY_BACKOFF_MS, MULTI_TF_RETRY_WAIT_BUDGET_MS, collectFuturesTimeframes, FUTURES_TF_REQUEST_WEIGHT, DEFAULT_FUTURES_MICROSTRUCTURE_TOP_N, COLLECTOR_INTERVAL_MS } from '../netlify/functions/_binance-market-context-source.mjs';
 const json = (body) => ({ ok: true, json: async () => body });
 function mockFetch({ failDepth = false, failFutures = false } = {}) { return async (url) => { const parsed = new URL(url); const path = parsed.pathname; if (failFutures && parsed.origin === 'https://fapi.binance.com') return { ok: false, status: 451, json: async () => ({}) }; if (failDepth && path.endsWith('/depth')) return { ok: false, status: 451, json: async () => ({}) }; if (path.endsWith('/exchangeInfo')) return json({ symbols: [{ symbol: 'BTCUSDT', status: 'TRADING', isSpotTradingAllowed: true, baseAsset: 'BTC', quoteAsset: 'USDT' }] }); if (path.endsWith('/ticker/24hr')) return json([{ symbol: 'BTCUSDT', lastPrice: '100', priceChangePercent: '1', highPrice: '101', lowPrice: '99', volume: '4', quoteVolume: '400', count: 2 }]); if (path.endsWith('/klines')) return json([[1, '1', '2', '0', '1', '5', 2, '5', 1]]); if (path.endsWith('/depth')) return json({ lastUpdateId: 7, bids: [['99', '1']], asks: [['101', '1']] }); if (path.endsWith('/aggTrades')) return json([{ a: 9, p: '100', q: '1', m: false, T: 1000, M: true }]); throw new Error('unexpected endpoint'); }; }
 test('Binance source rejects a non-allowlisted host and path', async () => { await assert.rejects(() => fetchBinancePublicJson('https://evil.example/api/v3/ticker/24hr'), /NOT_ALLOWED/); await assert.rejects(() => fetchBinancePublicJson('https://api.binance.com/api/v3/ticker/24hr'), /NOT_ALLOWED/); assert.match(buildBinancePublicUrl('spot', 'ticker'), /^https:\/\/data-api\.binance\.vision\/api\/v3\/ticker\/24hr$/); });
@@ -293,4 +294,41 @@ test('spot-listed symbols are not re-collected from futures klines', async () =>
   const tfKlineCalls = urls.filter((u) => u.startsWith('/fapi/v1/klines?') && u.includes('interval=1h') && u.includes('limit=169')).map((u) => u.split('?')[1].split('&')[0]);
   assert.equal(tfKlineCalls.includes('BTCUSDT'), false, 'the spot-listed base is not re-collected');
   assert.deepEqual(tfKlineCalls, ['ONLYFUTUSDT'], 'only the futures-only base is collected');
+});
+
+// ── futures must not inherit the spot symbol count ───────────────────────────
+// A futures symbol costs 27 weight against a 1500/min allowance; a spot symbol costs 9
+// against 3600/min, so the same N is ~7x more expensive there. The unset fallback used
+// to be the SPOT topN, which put 200x27 = 5400 weight on a 1500/min budget: 180s of
+// pacing for futures microstructure alone, on a collector scheduled every 180s. Cycles
+// never finished, nothing published, and the terminal just showed STALE.
+test('an unset futures topN falls back to the small futures default, not the spot count', async () => {
+  const measured = { spot: new Set(), futures: new Set() };
+  const impl = async (url) => {
+    const p = new URL(url);
+    const isFut = p.origin === 'https://fapi.binance.com';
+    const syms = Array.from({ length: 60 }, (_, i) => ({ symbol: `S${i}USDT`, status: 'TRADING', isSpotTradingAllowed: true, baseAsset: `S${i}`, quoteAsset: 'USDT' }));
+    if (p.pathname.endsWith('/exchangeInfo')) return json({ symbols: syms });
+    if (p.pathname.endsWith('/ticker/24hr')) return json(syms.map((s, i) => ({ symbol: s.symbol, lastPrice: '1', priceChangePercent: '-1', highPrice: '1', lowPrice: '1', volume: '1', quoteVolume: String(1e9 - i), count: 1 })));
+    if (p.pathname === '/api/v3/ticker') return json([]);
+    if (p.pathname.endsWith('/klines')) { (isFut ? measured.futures : measured.spot).add(p.searchParams.get('symbol')); return json([[1, '1', '1', '1', '1', '1', 2]]); }
+    if (p.pathname.endsWith('/depth')) return json({ lastUpdateId: 1, bids: [['1', '1']], asks: [['2', '1']] });
+    if (p.pathname.endsWith('aggTrades')) return json([{ a: 1, p: '1', q: '1', m: false, T: 1, M: true }]);
+    throw new Error('unexpected ' + p.pathname);
+  };
+  // microstructureTopN 50, futures topN deliberately UNSET.
+  await collectBinanceMarketContext({ fetchImpl: impl, microstructureTopN: 50, includeFutures: true, weightBudgetPerMin: 0 });
+  assert.equal(measured.spot.size, 50, 'spot uses the requested count');
+  assert.equal(measured.futures.size, DEFAULT_FUTURES_MICROSTRUCTURE_TOP_N, 'futures uses its own small default');
+  assert.ok(measured.futures.size < measured.spot.size, 'futures is never as wide as spot by default');
+});
+
+test('a cycle that cannot finish inside its own schedule says so', () => {
+  // The interval the warning compares against is the collector's real cron.
+  assert.equal(COLLECTOR_INTERVAL_MS, 180_000);
+  const src = fs.readFileSync(new URL('../netlify/functions/_binance-market-context-source.mjs', import.meta.url), 'utf8');
+  assert.match(src, /cycle_exceeds_schedule/);
+  assert.match(src, /pacingWaitedMs > COLLECTOR_INTERVAL_MS/);
+  // The warning must name the knobs, not just the fact.
+  assert.match(src, /reduce MICROSTRUCTURE_TOP_N \/ FUTURES_MICROSTRUCTURE_TOP_N \/ MULTI_TF_TOP_N/);
 });

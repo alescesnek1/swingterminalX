@@ -21,6 +21,30 @@ cutover (a separate, later step).
 | `MARKET_CONTEXT_MULTI_TF_ENABLED` | `false` | Collect 1h/4h/12h/7d % change (Binance rolling-window ticker) for the top-N symbols. Off = scanner shows only 24h; 1h/4h/12h/7d are UNKNOWN. |
 | `MARKET_CONTEXT_MULTI_TF_TOP_N` | `300` | How many symbols get 1h/4h/12h/7d change. Max **1200**. **Ranked by 24h volume, NOT by the dislocation budget** — so with the default 300 the coins RADAR now surfaces (deepest drawdowns, often mid-caps far down the volume list) frequently have no multi-timeframe data and the scanner shows blanks for them. Set to `1000` to cover the whole USD-stable universe (measured live: 750 TRADING pairs exist, so 1000 covers all of them). |
 
+### ⚠️ Cycle budget — why the terminal can go STALE
+
+The collector is scheduled every **180s**. If pacing takes longer than that, the cycle
+never publishes in time, the next run starts on top of it, and the terminal shows
+`STALE` with nothing explaining why. Measured:
+
+| Stage | Weight | Budget | Paced time |
+|---|---|---|---|
+| Spot microstructure 200 × 9 + multi-TF 6400 | 8200 | 3600/min | 120s |
+| **Futures microstructure 200 × 27** | **5400** | **1500/min** | **180s** |
+| Futures-only timeframes 319 × 5 | 1595 | (same) | +60s |
+| | | | **360s → 2× over the interval** |
+
+**A futures symbol costs 27 weight against a 1500/min allowance; a spot symbol costs 9
+against 3600/min — the same N is ~7× more expensive on futures.**
+`MARKET_CONTEXT_FUTURES_MICROSTRUCTURE_TOP_N` unset used to fall back to the *spot*
+count, which is what produced the 5400. It now falls back to
+`DEFAULT_FUTURES_MICROSTRUCTURE_TOP_N` = **20** (540 weight, 0s of pacing), and a cycle
+that still cannot fit logs `[MARKET_CONTEXT] cycle_exceeds_schedule` naming the knobs.
+
+With futures microstructure at 20 the whole cycle is ~180s — it fits, but with no
+headroom. For real margin either set `MARKET_CONTEXT_MULTI_TF_TOP_N` lower, keep
+`MARKET_CONTEXT_FUTURES_ENABLED=false`, or lengthen the collector cron.
+
 ### Futures-only listings (why some coins showed a dash in every timeframe)
 
 Multi-timeframe comes from the **spot** rolling-window ticker, and Binance futures has

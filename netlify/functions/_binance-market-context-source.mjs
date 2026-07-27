@@ -4,6 +4,17 @@
 export const BINANCE_SPOT_ORIGIN = 'https://data-api.binance.vision';
 export const BINANCE_FUTURES_ORIGIN = 'https://fapi.binance.com';
 export const DEFAULT_MICROSTRUCTURE_TOP_N = 5; // Conservative default; the ceiling below is what the background collector uses.
+// Futures must NOT inherit the spot symbol count. A futures symbol costs 27 request
+// weight against a 1500/min allowance; a spot symbol costs 9 against 3600/min — so the
+// same N is roughly seven times more expensive there. Falling back to the spot topN
+// (which is what used to happen when this env was unset) put 200 symbols x 27 = 5400
+// weight on a 1500/min budget: 180s of pure pacing for futures microstructure alone,
+// on a collector scheduled every 180s. Cycles then never finished before the next one
+// started, nothing published, and the terminal showed STALE.
+export const DEFAULT_FUTURES_MICROSTRUCTURE_TOP_N = 20;
+// The collector's own schedule (market-context-collect-scheduled.mjs: '*/3 * * * *').
+// Used only to report a cycle that cannot finish inside it.
+export const COLLECTOR_INTERVAL_MS = 180_000;
 // Each measured symbol costs 3 public GETs (klines/depth/aggTrades) and ~9 request
 // weight. A full USD-stable universe is ~500 symbols = ~4.5k weight per cycle,
 // inside Binance's 6000/min budget. What it does NOT fit is the 30s scheduled
@@ -455,8 +466,9 @@ export async function collectBinanceMarketContext(options = {}) {
   if (options.includeFutures === true) {
     // Futures carries its own, much smaller topN: its per-minute allowance is a
     // fraction of spot's, so the same symbol count that spot absorbs comfortably
-    // gets the futures venue rate-limited outright.
-    const futuresTopN = Number.isFinite(Number(options.futuresMicrostructureTopN)) && Number(options.futuresMicrostructureTopN) > 0 ? boundedTopN(options.futuresMicrostructureTopN) : topN;
+    // gets the futures venue rate-limited outright. Unset falls back to the small
+    // futures default — NEVER to the spot count (see DEFAULT_FUTURES_MICROSTRUCTURE_TOP_N).
+    const futuresTopN = Number.isFinite(Number(options.futuresMicrostructureTopN)) && Number(options.futuresMicrostructureTopN) > 0 ? boundedTopN(options.futuresMicrostructureTopN) : DEFAULT_FUTURES_MICROSTRUCTURE_TOP_N;
     futuresPacer = makePacer('futures');
     try { const collected = await collectVenue('futures', { fetchImpl, microstructureTopN: futuresTopN, ...budgetShape, concurrency, pacer: futuresPacer }); futures = { ...collected, status: 'complete', failureCode: null }; }
     catch (error) { futures = { tickers: [], microstructures: [], status: 'unavailable', failureCode: failureCode(error) }; }
@@ -486,9 +498,21 @@ export async function collectBinanceMarketContext(options = {}) {
       }
     }
   }
+  // A cycle that spends longer being paced than its own schedule allows does not fail
+  // loudly — it just never publishes in time, the next run starts on top of it, and the
+  // terminal shows STALE with nothing saying why. Report the overrun instead.
+  const pacingWaitedMs = (spotPacer?.diagnostics?.waitedMs || 0) + (futuresPacer?.diagnostics?.waitedMs || 0);
+  if (pacingWaitedMs > COLLECTOR_INTERVAL_MS) {
+    console.warn('[MARKET_CONTEXT] cycle_exceeds_schedule', {
+      pacingWaitedMs, intervalMs: COLLECTOR_INTERVAL_MS,
+      spotWaitedMs: spotPacer?.diagnostics?.waitedMs || 0, futuresWaitedMs: futuresPacer?.diagnostics?.waitedMs || 0,
+      microstructureTopN: topN, futuresEnabled: options.includeFutures === true,
+      hint: 'reduce MICROSTRUCTURE_TOP_N / FUTURES_MICROSTRUCTURE_TOP_N / MULTI_TF_TOP_N, or disable futures',
+    });
+  }
   return {
     ok: true, observedAt: new Date(), collectedAt: new Date(), dataStatus: futures.status === 'complete' && allMicrostructureComplete ? 'complete' : 'partial',
     rows: [...spot.tickers, ...futures.tickers], microstructure: microstructures,
-    diagnostics: { spotTickerCount: spot.tickers.length, futuresTickerCount: futures.tickers.length, microstructureCount: microstructures.length, futuresStatus: futures.status, futuresFailureCode: futures.failureCode, microstructureTopN: topN, multiTimeframeRequested: multiTf.requested, multiTimeframeCovered: multiTf.covered, multiTimeframeFailureCode: multiTf.failureCode ?? null, multiTimeframeWindowCoverage: multiTf.windowCoverage ?? null, multiTimeframeDegradedWindows: multiTf.degradedWindows ?? 0, futuresTimeframeRequested: futuresTf.requested, futuresTimeframeCovered: futuresTf.covered, futuresTimeframeFailed: futuresTf.failed ?? 0, futuresTimeframeShortHistory: futuresTf.shortHistory ?? 0, futuresTimeframeFailureCode: futuresTf.failureCode ?? null, pacingWaitedMs: (spotPacer?.diagnostics?.waitedMs || 0) + (futures.pacing?.waitedMs || 0), rateLimitedSymbols: microstructures.filter((row) => row.failureCode === 'UPSTREAM_RATE_LIMITED').length },
+    diagnostics: { spotTickerCount: spot.tickers.length, futuresTickerCount: futures.tickers.length, microstructureCount: microstructures.length, futuresStatus: futures.status, futuresFailureCode: futures.failureCode, microstructureTopN: topN, multiTimeframeRequested: multiTf.requested, multiTimeframeCovered: multiTf.covered, multiTimeframeFailureCode: multiTf.failureCode ?? null, multiTimeframeWindowCoverage: multiTf.windowCoverage ?? null, multiTimeframeDegradedWindows: multiTf.degradedWindows ?? 0, futuresTimeframeRequested: futuresTf.requested, futuresTimeframeCovered: futuresTf.covered, futuresTimeframeFailed: futuresTf.failed ?? 0, futuresTimeframeShortHistory: futuresTf.shortHistory ?? 0, futuresTimeframeFailureCode: futuresTf.failureCode ?? null, pacingWaitedMs, rateLimitedSymbols: microstructures.filter((row) => row.failureCode === 'UPSTREAM_RATE_LIMITED').length },
   };
 }
