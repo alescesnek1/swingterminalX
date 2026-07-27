@@ -102,3 +102,58 @@ test('budget allocation still refuses non-USD-stable quotes and respects topN', 
   assert.equal(rankMicrostructureBudget(BUDGET_UNIVERSE, { topN: 1, ...shape }).length, 1);
   assert.deepEqual(rankMicrostructureBudget([], { topN: 5 }), []);
 });
+
+// ── multi-timeframe: a 429 is "later", not "no such data" ────────────────────
+// Windows are fetched in order (1h, 4h, 12h, 7d), so a budget shortfall always costs
+// the LAST window first. Dropping a rate-limited batch on the first failure left
+// every symbol in it with no 7d value, indistinguishable from a new listing Binance
+// has no history for. Measured live: an unpaced 750-symbol run lost 250 symbols' 7d.
+function rollingFetch({ failWindow = null, failTimes = 0, status = 429 } = {}) {
+  const attempts = { count: 0, weights: 0 };
+  const impl = async (url) => {
+    const parsed = new URL(url);
+    const windowSize = parsed.searchParams.get('windowSize');
+    const symbols = JSON.parse(parsed.searchParams.get('symbols') || '[]');
+    if (windowSize === failWindow && attempts.count < failTimes) { attempts.count += 1; return { ok: false, status, json: async () => ({}) }; }
+    return json(symbols.map((s) => ({ symbol: s, priceChangePercent: '1.5' })));
+  };
+  return { impl, attempts };
+}
+const MT_TICKERS = Array.from({ length: 3 }, (_, i) => ({ symbol: `M${i}USDT`, quoteAsset: 'USDT', quoteVolume: String(1e6 - i) }));
+
+test('a rate-limited multi-timeframe batch is retried and recovers its window', async () => {
+  const { impl } = rollingFetch({ failWindow: '7d', failTimes: 1 });
+  const mt = await collectMultiTimeframe('spot', MT_TICKERS, { fetchImpl: impl, topN: 3, sleep: async () => {} });
+  assert.equal(mt.degradedWindows, 0, 'the retry recovered the window');
+  assert.equal(mt.windowCoverage['7d'].covered, 3);
+  assert.equal(mt.windowCoverage['7d'].failedBatches, 0);
+  for (const [, entry] of mt.symbols) assert.equal(entry.change7dPct, 1.5);
+});
+
+test('a shortfall that survives every retry is reported, never left as a blank', async () => {
+  const { impl } = rollingFetch({ failWindow: '7d', failTimes: 99 });
+  const mt = await collectMultiTimeframe('spot', MT_TICKERS, { fetchImpl: impl, topN: 3, sleep: async () => {} });
+  assert.equal(mt.degradedWindows, 1, 'the degraded window is counted');
+  assert.deepEqual(mt.windowCoverage['7d'], { covered: 0, requested: 3, failedBatches: 1, unresolved: 3 });
+  // The other windows are unaffected and still complete.
+  assert.equal(mt.windowCoverage['1h'].covered, 3);
+  // The symbols keep their other windows rather than being dropped entirely.
+  for (const [, entry] of mt.symbols) { assert.equal(entry.change1hPct, 1.5); assert.equal(entry.change7dPct, undefined); }
+});
+
+test('a non-rate-limit failure is not retried, because waiting cannot fix it', async () => {
+  const { impl, attempts } = rollingFetch({ failWindow: '4h', failTimes: 99, status: 400 });
+  const mt = await collectMultiTimeframe('spot', MT_TICKERS, { fetchImpl: impl, topN: 3, sleep: async () => {} });
+  assert.equal(attempts.count, 1, 'a rejected request is attempted exactly once');
+  assert.equal(mt.windowCoverage['4h'].failedBatches, 1);
+});
+
+test('every retry attempt is charged to the pacer, so it cannot outrun the budget', async () => {
+  const { impl } = rollingFetch({ failWindow: '7d', failTimes: 1 });
+  const charges = [];
+  const pacer = { take: async (w) => { charges.push(w); }, get diagnostics() { return {}; } };
+  await collectMultiTimeframe('spot', MT_TICKERS, { fetchImpl: impl, topN: 3, pacer, sleep: async () => {} });
+  // 4 windows, one batch each, plus one extra charge for the retried attempt.
+  assert.equal(charges.length, 5);
+  assert.ok(charges.every((w) => w === 200), 'each charge is the documented batch weight');
+});

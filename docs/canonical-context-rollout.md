@@ -19,7 +19,29 @@ cutover (a separate, later step).
 | `MARKET_CONTEXT_MICROSTRUCTURE_POOL_SIZE` | `400` | Size of the liquid pool the budget may draw from (ranked by USD-stable 24h quote volume). Bounds tradeability: a pair outside this pool never consumes a measurement slot, because the universe filter would reject it anyway. |
 | `MARKET_CONTEXT_MICROSTRUCTURE_MAJOR_SLOTS` | `20` | Slots reserved for the top-liquidity coins, so BTC/ETH/major context is always measured. Every remaining slot goes to the deepest 24h drawdowns inside the pool — the coins that can actually carry a dislocation+flush setup. A pump earns no slot. |
 | `MARKET_CONTEXT_MULTI_TF_ENABLED` | `false` | Collect 1h/4h/12h/7d % change (Binance rolling-window ticker) for the top-N symbols. Off = scanner shows only 24h; 1h/4h/12h/7d are UNKNOWN. |
-| `MARKET_CONTEXT_MULTI_TF_TOP_N` | `300` | How many symbols get 1h/4h/12h/7d change. Max **1200**. **Ranked by 24h volume, NOT by the dislocation budget** — so with the default 300 the coins RADAR now surfaces (deepest drawdowns, often mid-caps far down the volume list) frequently have no multi-timeframe data and the scanner shows blanks for them. Set to ~`1000` to cover the listed universe; the tail beyond it stays UNKNOWN, never faked. |
+| `MARKET_CONTEXT_MULTI_TF_TOP_N` | `300` | How many symbols get 1h/4h/12h/7d change. Max **1200**. **Ranked by 24h volume, NOT by the dislocation budget** — so with the default 300 the coins RADAR now surfaces (deepest drawdowns, often mid-caps far down the volume list) frequently have no multi-timeframe data and the scanner shows blanks for them. Set to `1000` to cover the whole USD-stable universe (measured live: 750 TRADING pairs exist, so 1000 covers all of them). |
+
+### Measured multi-timeframe cost (local live test, 2026-07-27)
+
+The spot pacer budget is **3600 weight/min** and the collector runs every **180s**.
+
+| Spend | Weight |
+|---|---|
+| Microstructure, 200 symbols × 9 | 1800 |
+| Multi-timeframe, 750 symbols → 8 batches × 4 windows × 200 | 6400 |
+| **Total** | **8200** → ~123s of the 180s cycle (107s of it pacer waiting) |
+
+Verified end-to-end against the real Binance spot endpoint: **750/750 symbols with all
+four windows, 0 failed batches.** Headroom is ~57s, so microstructure can grow to
+roughly 480 symbols before a cycle stops fitting in the interval.
+
+**Without the pacer the same run 429s** and, because windows are fetched in order
+(1h → 4h → 12h → 7d), the shortfall always lands on `7d`: an unpaced 750-symbol run
+lost 250 symbols' 7d values. A rate-limited batch is now retried (a 429 means "later",
+not "no such data"), and any surviving shortfall is reported per window in
+`multiTimeframeWindowCoverage` plus a `[MARKET_CONTEXT] multi_timeframe_degraded`
+warning — so a two-thirds-empty 7d column can never again look like a property of the
+market rather than a failed fetch.
 | `MARKET_CONTEXT_RADAR_ENABLED` | `false` | Master switch for the server RADAR publisher. Writes both the per-run history (`radar_run_snapshots`/`radar_run_candidates`) and the atomized current state (`radar_candidate_state`, one upserted row per `(market, symbol)`), which is what `/api/context` and the alert path read. |
 | `MARKET_CONTEXT_RETENTION_ENABLED` | `false` | Master switch for the hourly retention sweep. |
 | `MARKET_CONTEXT_RETENTION_MARKET_HOURS` | `48` | How long to keep heavy market rows (min 6h floor). |

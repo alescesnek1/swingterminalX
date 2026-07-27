@@ -281,31 +281,73 @@ function chunkList(items, size) { const out = []; for (let i = 0; i < items.leng
 // One rolling window (e.g. 1h) for a bounded symbol list, batched to respect the
 // 100-symbols-per-request limit. A failed batch leaves its symbols UNKNOWN for
 // this window — it is never backfilled from another source or invented.
-async function fetchRollingWindow(market, symbols, windowSize, fetchImpl, pacer) {
+// Retry budget for a rate-limited batch. A 429 is a "come back later", not a "this
+// data does not exist" — dropping the batch on the first one silently left every
+// symbol in it without that window, indistinguishable from a genuinely new listing
+// Binance has no history for. Measured locally: an unpaced 750-symbol run lost 250
+// symbols' 7d values that way, because 7d is fetched last and therefore loses first.
+const MULTI_TF_RETRY_ATTEMPTS = 2;
+const MULTI_TF_RETRY_BACKOFF_MS = 3_000;
+
+async function fetchRollingWindow(market, symbols, windowSize, fetchImpl, pacer, sleep = (ms) => new Promise((r) => setTimeout(r, ms))) {
   const map = new Map();
+  let failedBatches = 0;
+  let unresolved = 0;
   for (const batch of chunkList(symbols, MULTI_TF_BATCH)) {
-    // Shares the venue's per-minute allowance with the microstructure reads, so
-    // it must draw from the same pacer — otherwise widening this coverage simply
-    // moves the rate-limit failure from one endpoint to another.
-    if (pacer) await pacer.take(MULTI_TF_BATCH_WEIGHT);
-    let payload;
-    try { payload = await fetchBinancePublicJson(buildBinancePublicUrl(market, 'rollingTicker', { symbols: JSON.stringify(batch), windowSize }), { fetchImpl }); }
-    catch (error) { console.warn('[MARKET_CONTEXT] multi_timeframe_batch_failed', { market, windowSize, symbolCount: batch.length, reason: failureCode(error) }); continue; }
+    let payload = null;
+    let lastReason = null;
+    for (let attempt = 0; attempt <= MULTI_TF_RETRY_ATTEMPTS; attempt += 1) {
+      // Shares the venue's per-minute allowance with the microstructure reads, so
+      // it must draw from the same pacer — otherwise widening this coverage simply
+      // moves the rate-limit failure from one endpoint to another. Charged on every
+      // attempt, so a retry cannot smuggle weight past the budget.
+      if (pacer) await pacer.take(MULTI_TF_BATCH_WEIGHT);
+      try { payload = await fetchBinancePublicJson(buildBinancePublicUrl(market, 'rollingTicker', { symbols: JSON.stringify(batch), windowSize }), { fetchImpl }); break; }
+      catch (error) {
+        lastReason = failureCode(error);
+        payload = null;
+        // Only a rate limit is worth retrying; a rejected or malformed request will
+        // fail identically however long we wait.
+        if (lastReason !== 'UPSTREAM_RATE_LIMITED' || attempt === MULTI_TF_RETRY_ATTEMPTS) break;
+        await sleep(MULTI_TF_RETRY_BACKOFF_MS * (attempt + 1));
+      }
+    }
+    if (!payload) {
+      failedBatches += 1;
+      unresolved += batch.length;
+      console.warn('[MARKET_CONTEXT] multi_timeframe_batch_failed', { market, windowSize, symbolCount: batch.length, reason: lastReason, attempts: MULTI_TF_RETRY_ATTEMPTS + 1 });
+      continue;
+    }
     for (const row of Array.isArray(payload) ? payload : []) { const pct = finite(row?.priceChangePercent); if (row?.symbol && pct !== null) map.set(row.symbol, pct); }
   }
-  return map;
+  // A shortfall must be reported, not inferred from a blank cell: a value missing
+  // because the fetch failed and a value missing because the pair is days old are
+  // different facts, and only the caller can label them.
+  return { map, failedBatches, unresolved, requested: symbols.length, covered: map.size };
 }
 
 // Multi-timeframe (1h/4h/12h/7d) % change for the top-N symbols by 24h quote
 // volume. Windows are fetched sequentially to stay well inside the weight budget.
-export async function collectMultiTimeframe(market, tickers, { fetchImpl = fetch, topN = DEFAULT_MULTI_TF_TOP_N, pacer = null } = {}) {
+export async function collectMultiTimeframe(market, tickers, { fetchImpl = fetch, topN = DEFAULT_MULTI_TF_TOP_N, pacer = null, sleep } = {}) {
   const bounded = Math.min(Math.max(Math.trunc(Number(topN) || DEFAULT_MULTI_TF_TOP_N), 1), MAX_MULTI_TF_TOP_N);
   const symbols = rankByQuoteVolume(tickers).slice(0, bounded).map((t) => t.symbol);
   const byWindow = {};
-  for (const window of MULTI_TF_WINDOWS) byWindow[window.key] = await fetchRollingWindow(market, symbols, window.windowSize, fetchImpl, pacer);
+  const windowCoverage = {};
+  let degradedWindows = 0;
+  for (const window of MULTI_TF_WINDOWS) {
+    const outcome = await fetchRollingWindow(market, symbols, window.windowSize, fetchImpl, pacer, sleep);
+    byWindow[window.key] = outcome.map;
+    windowCoverage[window.windowSize] = { covered: outcome.covered, requested: outcome.requested, failedBatches: outcome.failedBatches, unresolved: outcome.unresolved };
+    if (outcome.failedBatches > 0) degradedWindows += 1;
+  }
   const result = new Map();
   for (const symbol of symbols) { const entry = {}; for (const window of MULTI_TF_WINDOWS) { const value = byWindow[window.key].get(symbol); if (value !== undefined) entry[window.key] = value; } if (Object.keys(entry).length) result.set(symbol, entry); }
-  return { symbols: result, requested: symbols.length, covered: result.size, windows: MULTI_TF_WINDOWS.map((window) => window.windowSize) };
+  // Windows are fetched in order, so a budget shortfall always costs the LAST window
+  // (7d) first. Without this line a 7d column that is two thirds empty looks like a
+  // property of the market rather than a failed fetch, which is exactly how the gap
+  // went unnoticed.
+  if (degradedWindows > 0) console.warn('[MARKET_CONTEXT] multi_timeframe_degraded', { market, requested: symbols.length, degradedWindows, windowCoverage });
+  return { symbols: result, requested: symbols.length, covered: result.size, windows: MULTI_TF_WINDOWS.map((window) => window.windowSize), windowCoverage, degradedWindows };
 }
 
 export async function collectBinanceMarketContext(options = {}) {
@@ -347,6 +389,6 @@ export async function collectBinanceMarketContext(options = {}) {
   return {
     ok: true, observedAt: new Date(), collectedAt: new Date(), dataStatus: futures.status === 'complete' && allMicrostructureComplete ? 'complete' : 'partial',
     rows: [...spot.tickers, ...futures.tickers], microstructure: microstructures,
-    diagnostics: { spotTickerCount: spot.tickers.length, futuresTickerCount: futures.tickers.length, microstructureCount: microstructures.length, futuresStatus: futures.status, futuresFailureCode: futures.failureCode, microstructureTopN: topN, multiTimeframeRequested: multiTf.requested, multiTimeframeCovered: multiTf.covered, multiTimeframeFailureCode: multiTf.failureCode ?? null, pacingWaitedMs: (spotPacer?.diagnostics?.waitedMs || 0) + (futures.pacing?.waitedMs || 0), rateLimitedSymbols: microstructures.filter((row) => row.failureCode === 'UPSTREAM_RATE_LIMITED').length },
+    diagnostics: { spotTickerCount: spot.tickers.length, futuresTickerCount: futures.tickers.length, microstructureCount: microstructures.length, futuresStatus: futures.status, futuresFailureCode: futures.failureCode, microstructureTopN: topN, multiTimeframeRequested: multiTf.requested, multiTimeframeCovered: multiTf.covered, multiTimeframeFailureCode: multiTf.failureCode ?? null, multiTimeframeWindowCoverage: multiTf.windowCoverage ?? null, multiTimeframeDegradedWindows: multiTf.degradedWindows ?? 0, pacingWaitedMs: (spotPacer?.diagnostics?.waitedMs || 0) + (futures.pacing?.waitedMs || 0), rateLimitedSymbols: microstructures.filter((row) => row.failureCode === 'UPSTREAM_RATE_LIMITED').length },
   };
 }
