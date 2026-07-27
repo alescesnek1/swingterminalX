@@ -14,7 +14,15 @@
 // SECURITY: never trust ownerUserId/email/orgId from a request body — identity is
 // derived only from the verified/decoded token here. Raw tokens are never logged
 // and never returned.
+//
+// NATIVE AUTH (own-database accounts): verifyJwt() dispatches to the native
+// verifier FIRST, but only when NATIVE_AUTH_ENABLED === 'true' AND the token
+// carries our own issuer. When the flag is off this file behaves exactly as it
+// did before — a native-looking token then falls through to the Supabase HS256
+// branch and is rejected there, which is the fail-closed outcome. See
+// docs/native-auth.md.
 import crypto from 'node:crypto';
+import { looksLikeNativeToken, nativeAuthEnabled, verifyAccessToken } from './_native-jwt.mjs';
 
 let _warnedDecodeOnly = false;
 
@@ -141,6 +149,35 @@ export async function verifyJwt(token) {
   const decoded = decodeJwt(token);
   if (!decoded) return { ok: false, reason: 'malformed token', authMode: 'decode_only', verified: false };
   const alg = decoded.header && decoded.header.alg;
+
+  // ── Native (own-database) tokens ──
+  // Dispatch on the UNVERIFIED issuer claim, which is safe because routing is
+  // not a trust decision: verifyAccessToken() re-checks the signature, the
+  // algorithm, the issuer, the audience, and the expiry on its own terms, and a
+  // forged "swing-terminal" issuer simply fails there.
+  //
+  // Native tokens are also HS256, so without this branch they would reach the
+  // Supabase HS256 path below and be checked against SUPABASE_JWT_SECRET — a
+  // guaranteed rejection. That is the correct behaviour while the flag is off,
+  // and it is why enabling native auth is a real cutover rather than a
+  // silently-widening acceptance.
+  if (nativeAuthEnabled() && looksLikeNativeToken(token)) {
+    const native = verifyAccessToken(token);
+    if (!native.ok) {
+      return { ok: false, reason: native.reason, authMode: 'native', verified: false };
+    }
+    return {
+      ok: true,
+      verified: true,
+      authMode: 'verified_native_hs256',
+      userId: native.userId,
+      email: native.email,
+      // Native accounts have no org concept; 'default' matches what the Supabase
+      // path produces for a user without an app_metadata org, so downstream
+      // org comparisons (canControlSession) behave identically.
+      orgId: 'default',
+    };
+  }
 
   if (alg === 'HS256') {
     const secret = process.env.SUPABASE_JWT_SECRET || '';
