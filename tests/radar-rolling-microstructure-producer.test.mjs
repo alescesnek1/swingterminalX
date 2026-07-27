@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { buildRollingSnapshotFromSamples, isAllowedBinanceFuturesBaseUrl, normalizeRollingProducerOptions, runRollingMicrostructureProducer, selectRollingTargets } from '../scripts/radar/rolling-microstructure-producer.mjs';
+import { buildRollingSnapshotFromSamples, isAllowedBinanceFuturesBaseUrl, isAllowedControlBaseUrl, normalizeRollingProducerOptions, runRollingMicrostructureProducer, selectRollingTargets } from '../scripts/radar/rolling-microstructure-producer.mjs';
 const NOW = 1_800_000_000_000; const envEnabled = { WORKER_RADAR_ROLLING_ENABLED: 'true' }; const candidates = [{ futures_pair: 'BTCUSDT' }];
 const response = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
 const depth = (total) => ({ bids: [['100', String(total)]], asks: [['100.05', '1']] });
@@ -35,4 +35,85 @@ test('hostile base URLs fail closed before any injected fetch and cannot produce
     assert.equal(result.reason, 'BINANCE_FUTURES_BASE_URL_NOT_ALLOWED', baseUrl);
     assert.equal(calls, 0, baseUrl);
   }
+});
+function candidateAwareFetch({ candidateRows = candidates, candidateStatus = 200, rows = trades(), fapiStatus = 200 } = {}) {
+  const calls = []; let depthCalls = 0;
+  let fetchImpl = async (url, init = {}) => {
+    const value = String(url); calls.push({ url: value, method: init.method || 'GET', headers: init.headers || {} });
+    if (value.endsWith('/api/bot/radar-candidates')) return response({ ok: true, radarCandidates: candidateRows }, candidateStatus);
+    if (value.includes('/fapi/v1/')) return response({}, fapiStatus);
+    if (value.endsWith('/api/bot/radar-rolling-microstructure')) return response({ ok: true, stored: true });
+    return response({}, 404);
+  };
+  if (fapiStatus === 200) {
+    fetchImpl = async (url, init = {}) => {
+      const value = String(url); calls.push({ url: value, method: init.method || 'GET', headers: init.headers || {} });
+      if (value.endsWith('/api/bot/radar-candidates')) return response({ ok: true, radarCandidates: candidateRows }, candidateStatus);
+      if (value.includes('/fapi/v1/aggTrades')) return response(rows);
+      if (value.includes('/fapi/v1/klines')) return response(klines());
+      if (value.includes('/fapi/v1/depth')) return response(depth(depthCalls++ === 0 ? 100 : 120));
+      if (value.endsWith('/api/bot/radar-rolling-microstructure')) return response({ ok: true, stored: true });
+      return response({}, 404);
+    };
+  }
+  return { fetchImpl, calls };
+}
+const fetchedEnv = { ...envEnabled, CONTROL_BASE_URL: 'https://swingterminalx.netlify.app', BOT_WORKER_TOKEN: 'test-token-must-not-log' };
+
+test('worker-token control URLs allow only the production origin and loopback development hosts', () => {
+  for (const trusted of ['https://swingterminalx.netlify.app', 'http://localhost:8888', 'https://localhost:3443', 'http://127.0.0.1:8888']) assert.equal(isAllowedControlBaseUrl(trusted), true, trusted);
+  for (const hostile of ['https://evil.example.com', 'https://swingterminalx.netlify.app.evil.example.com', 'https://evil.example.com@swingterminalx.netlify.app', 'https://swingterminalx.netlify.app@evil.example.com', 'https://swingterminalx.netlify.app/path', 'https://swingterminalx.netlify.app//', 'https://swingterminalx.netlify.app?next=https://evil.example.com', 'file:///tmp/control', 'ftp://localhost:21', '://malformed', '//swingterminalx.netlify.app']) assert.equal(isAllowedControlBaseUrl(hostile), false, hostile);
+});
+
+test('untrusted control URLs fail before fetch and never attach the worker token', async () => {
+  const hostileUrls = ['https://evil.example.com', 'https://swingterminalx.netlify.app.evil.example.com', 'https://evil.example.com@swingterminalx.netlify.app', 'https://swingterminalx.netlify.app//', 'file:///tmp/control', 'ftp://localhost:21', '://malformed'];
+  for (const controlUrl of hostileUrls) {
+    const calls = []; const logs = []; const workerToken = 'test-token-must-not-log';
+    const result = await runRollingMicrostructureProducer({ env: { ...envEnabled, WORKER_RADAR_ROLLING_POST_ENABLED: 'true', CONTROL_BASE_URL: controlUrl, BOT_WORKER_TOKEN: workerToken }, fetchImpl: async (url, init = {}) => { calls.push({ url: String(url), headers: init.headers || {} }); return response({}); }, now: NOW, depthIntervalMs: 0, waitFn: async () => {}, logger: { log(value) { logs.push(String(value)); } } });
+    assert.equal(result.reason, 'CONTROL_BASE_URL_NOT_ALLOWED', controlUrl);
+    assert.equal(result.posted, false, controlUrl);
+    assert.equal(calls.length, 0, controlUrl);
+    assert.ok(logs.every((line) => !line.includes(workerToken)), controlUrl);
+    const explicitCandidateResult = await runRollingMicrostructureProducer({ env: { ...envEnabled, WORKER_RADAR_ROLLING_POST_ENABLED: 'true', CONTROL_BASE_URL: controlUrl, BOT_WORKER_TOKEN: workerToken }, candidates, fetchImpl: async (url, init = {}) => { calls.push({ url: String(url), headers: init.headers || {} }); return response({}); }, now: NOW, depthIntervalMs: 0, waitFn: async () => {}, logger: { log(value) { logs.push(String(value)); } } });
+    assert.equal(explicitCandidateResult.reason, 'CONTROL_BASE_URL_NOT_ALLOWED', controlUrl);
+    assert.equal(explicitCandidateResult.posted, false, controlUrl);
+    assert.equal(calls.length, 0, controlUrl);
+  }
+});
+
+test('missing explicit candidates loads token-protected candidates without logging the token', async () => {
+  const { fetchImpl, calls } = candidateAwareFetch(); const logs = [];
+  const result = await runRollingMicrostructureProducer({ env: fetchedEnv, fetchImpl, now: NOW, depthIntervalMs: 0, waitFn: async () => {}, logger: { log(value) { logs.push(String(value)); } } });
+  assert.equal(result.dryRun, true); assert.equal(result.snapshot.trusted, true); const call = calls.find((entry) => entry.url.endsWith('/api/bot/radar-candidates'));
+  assert.equal(call.method, 'GET'); assert.equal(call.headers['X-BOT-WORKER-TOKEN'], fetchedEnv.BOT_WORKER_TOKEN); assert.ok(logs.every((line) => !line.includes(fetchedEnv.BOT_WORKER_TOKEN)));
+});
+
+test('candidate fetch failure and zero candidates fail closed without POST', async () => {
+  for (const variant of [{ candidateStatus: 503, reason: 'CANDIDATE_FETCH_FAILED_NO_POST' }, { candidateRows: [], reason: 'NO_CANDIDATES_NO_POST' }]) {
+    const { fetchImpl, calls } = candidateAwareFetch(variant); const result = await runRollingMicrostructureProducer({ env: { ...fetchedEnv, WORKER_RADAR_ROLLING_POST_ENABLED: 'true' }, fetchImpl, now: NOW, depthIntervalMs: 0, waitFn: async () => {}, logger: { log() {} } });
+    assert.equal(result.reason, variant.reason); assert.equal(result.posted, false); assert.equal(calls.some((entry) => entry.method === 'POST'), false);
+  }
+});
+
+test('empty, invalid, thin, and 451 measurements never POST', async () => {
+  const variants = [
+    { candidateRows: [{ alphaPair: 'ALPHA_BTCUSDT' }, { spot_pair: 'BTCUSDT' }], reason: 'NO_CANDIDATES_NO_POST' },
+    { rows: trades({ thin: true }), reason: 'NO_TRUSTED_ROWS_NO_POST' },
+    { fapiStatus: 451, reason: 'BINANCE_EGRESS_BLOCKED_NO_POST' },
+  ];
+  for (const variant of variants) {
+    const { fetchImpl, calls } = candidateAwareFetch(variant); const result = await runRollingMicrostructureProducer({ env: { ...fetchedEnv, WORKER_RADAR_ROLLING_POST_ENABLED: 'true' }, fetchImpl, now: NOW, depthIntervalMs: 0, waitFn: async () => {}, logger: { log() {} } });
+    assert.equal(result.reason, variant.reason); assert.equal(result.posted, false); assert.equal(calls.some((entry) => entry.method === 'POST'), false);
+  }
+});
+
+test('valid fetched futures candidate posts exactly one trusted snapshot', async () => {
+  const { fetchImpl, calls } = candidateAwareFetch({ candidateRows: [{ alphaPair: 'ALPHA_BTCUSDT' }, { spot_pair: 'BTCUSDT' }, { futures_pair: 'BTCUSDT' }] });
+  const result = await runRollingMicrostructureProducer({ env: { ...fetchedEnv, WORKER_RADAR_ROLLING_POST_ENABLED: 'true' }, fetchImpl, now: NOW, depthIntervalMs: 0, waitFn: async () => {}, logger: { log() {} } });
+  assert.equal(result.snapshot.trusted, true); assert.equal(result.posted, true); assert.equal(result.candidateCount, 1); assert.equal(calls.filter((entry) => entry.method === 'POST' && entry.url.endsWith('/api/bot/radar-rolling-microstructure')).length, 1);
+});
+
+test('explicit symbols bypass candidate fetch and invalid symbols stay fail closed', async () => {
+  const { fetchImpl, calls } = candidateAwareFetch(); const result = await runRollingMicrostructureProducer({ env: envEnabled, candidates: [{ futures_pair: 'BTCUSDT' }], fetchImpl, now: NOW, depthIntervalMs: 0, waitFn: async () => {}, logger: { log() {} } });
+  assert.equal(result.snapshot.trusted, true); assert.equal(calls.some((entry) => entry.url.endsWith('/api/bot/radar-candidates')), false);
 });

@@ -2215,7 +2215,10 @@ function withRollingMicrostructureSnapshot(market, rollingMicrostructureSnapshot
   const normalized = normalizeRollingMicrostructureSnapshot(rollingMicrostructureSnapshot, { nowMs });
   if (normalized.stale) return { ...market, microstructureStale: true, rollingMicrostructurePresent: false, rollingMicrostructureStatus: 'STALE' };
   if (normalized.trusted !== true) return { ...market, staticMicrostructureTrusted: false, rollingMicrostructurePresent: false, rollingMicrostructureStatus: 'UNTRUSTED' };
-  const row = getFreshRollingMicrostructureForSymbol(normalized, symbol, { nowMs });
+  // Scope the lookup to THIS candidate's venue. Without it a spot candidate could be
+  // scored on futures depth and flow — a wrong execution reading, not a missing one.
+  // A venue mismatch yields no row, so the candidate stays UNKNOWN and fails closed.
+  const row = getFreshRollingMicrostructureForSymbol(normalized, symbol, { nowMs, market: market.market });
   if (!row) return market;
   return {
     ...market,
@@ -2244,7 +2247,9 @@ function withRollingMicrostructureSnapshot(market, rollingMicrostructureSnapshot
 function withComputedStructuralReclaim(market, klinesSnapshot, nowMs = Date.now()) {
   const symbol = safeKlinesSymbolFromCandidate(market);
   if (!symbol) return market;
-  const candles = getFreshClosedKlinesForSymbol(klinesSnapshot, symbol, { minCandles: 30, nowMs });
+  // Venue-scoped for the same reason as the microstructure lookup: reclaim computed
+  // from the other venue's candles is a wrong level, not a missing one.
+  const candles = getFreshClosedKlinesForSymbol(klinesSnapshot, symbol, { minCandles: 30, nowMs, market: market.market });
   if (!candles) return market;
   const computed = computeStructuralReclaimLevels(candles, { timeframe: klinesSnapshot && klinesSnapshot.timeframe || '1h' });
   if (!computed) return market;

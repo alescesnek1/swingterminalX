@@ -1752,10 +1752,116 @@ async function _getAuthHeaders() {
   } catch { return {}; }
 }
 
+// Canonical Context Store read cutover (task 3). Additive + reversible: OFF by
+// default, so the terminal keeps its legacy /api/markets + Fleet path. Enable with
+// window.RADAR_CANONICAL_CONTEXT_READ = true, or localStorage
+// 'radarCanonicalContextRead' = 'true' (lets the owner shadow-test without a deploy).
+function _canonicalContextEnabled() {
+  try {
+    if (typeof window === 'undefined') return false;
+    if (window.RADAR_CANONICAL_CONTEXT_READ === true) return true;
+    if (window.RADAR_CANONICAL_CONTEXT_READ === false) return false;
+    return window.localStorage?.getItem('radarCanonicalContextRead') === 'true';
+  } catch { return false; }
+}
+
+// Maps one canonical /api/context ticker to the scanner row shape. Missing
+// multi-timeframe fields (symbols outside the collected top-N) are left ABSENT so
+// getTimeframePct returns null — never a fabricated value.
+function _mapCanonicalTicker(t) {
+  const n = (v) => (v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v));
+  // `symbol` must be the BASE asset (BTC), not the pair (BTCUSDT). isOnBinance()
+  // falls back to looking up `symbol + 'USDT'`, so a pair here became
+  // "BTCUSDTUSDT", matched nothing, and every canonical row — Bitcoin included —
+  // rendered with the DEX "not on Binance" badge and no order book. These rows
+  // come straight from Binance, so binance_available is stated outright rather
+  // than left to be inferred.
+  const pair = String(t.symbol || '').toUpperCase();
+  const quote = String(t.quote_asset || '').toUpperCase();
+  const base = String(t.base_asset || '').toUpperCase() || (quote && pair.endsWith(quote) ? pair.slice(0, -quote.length) : pair);
+  const row = {
+    symbol: base, id: base.toLowerCase(), pair, market: t.market || 'spot',
+    binance_available: true, binance_market: t.market === 'futures' ? 'futures' : 'spot',
+    quote_asset: quote || null,
+    // `exchange` is a THREE-VALUE enum the rest of the UI switches on — 'BIN',
+    // 'ALPHA' (Binance USD-M futures) or DEX. loadOrderbook() requires exactly
+    // 'BIN'/'ALPHA', so the descriptive 'Binance' put every canonical coin down
+    // the "not on Binance, no book" path even though its badge rendered as BIN.
+    exchange: t.market === 'futures' ? 'ALPHA' : 'BIN',
+    spot_pair: t.market === 'futures' ? undefined : pair,
+    futures_pair: t.market === 'futures' ? pair : undefined,
+    source: 'canonical', listingSource: 'Binance',
+    // Server-classified safety. Absent means UNKNOWN — never silently "safe".
+    safetyStatus: t.safety_status || undefined,
+    safetyReason: t.safety_reason || undefined,
+    safetyBasis: t.safety_basis || undefined,
+    safetySource: t.safety_source || undefined,
+    listingSafetyStatus: t.listing_safety_status || undefined,
+    current_price: n(t.last_price) ?? 0, price_change_percentage_24h: n(t.price_change_percent) ?? 0,
+    total_volume: n(t.quote_volume) ?? 0, high_24h: n(t.high_price), low_24h: n(t.low_price),
+    _funding: 0, _oi: 0, _oiDelta: 0,
+  };
+  const c1 = n(t.change_1h_pct); if (c1 != null) row._c1 = c1;
+  const c4 = n(t.change_4h_pct); if (c4 != null) row._c4 = c4;
+  const c12 = n(t.change_12h_pct); if (c12 != null) row._c12 = c12;
+  const c24 = n(t.price_change_percent); if (c24 != null) row._c24 = c24;
+  const c7d = n(t.change_7d_pct); if (c7d != null) row._c7d = c7d;
+  return row;
+}
+
+// One row per COIN. Canonical rows are keyed by base asset, and the same base
+// trades on both spot and futures, so BTCUSDT (spot) and BTCUSDT (futures) would
+// otherwise collide and one would silently vanish — which is why the list came
+// back well short of the requested count. Spot wins (it is the venue with a real
+// order book); futures only fills bases spot does not list. Within one venue the
+// deeper pair wins.
+function _dedupeCanonicalByBase(rows) {
+  const byBase = new Map();
+  for (const row of rows) {
+    const prev = byBase.get(row.symbol);
+    if (!prev) { byBase.set(row.symbol, row); continue; }
+    const prevSpot = prev.market === 'spot';
+    const rowSpot = row.market === 'spot';
+    if (rowSpot !== prevSpot) { if (rowSpot) byBase.set(row.symbol, row); continue; }
+    if ((row.total_volume || 0) > (prev.total_volume || 0)) byBase.set(row.symbol, row);
+  }
+  return Array.from(byBase.values());
+}
+
+async function _fetchCanonicalMarkets(authHeaders) {
+  const r = await fetch('/api/context', { headers: { 'Accept': 'application/json', ...authHeaders } });
+  if (!r.ok) { const body = await r.text().catch(() => ''); throw new Error('HTTP ' + r.status + ' — ' + body.slice(0, 120)); }
+  const j = await r.json();
+  if (!j || j.ok === false) throw new Error('context error: ' + ((j && j.reason) || 'unknown'));
+  const tickers = (j.market && Array.isArray(j.market.tickers)) ? j.market.tickers : [];
+  const rows = _dedupeCanonicalByBase(tickers.map(_mapCanonicalTicker).filter((row) => row.symbol));
+  // Expose the canonical RADAR + provider status for the RADAR/Absorb panels.
+  window.__canonicalContext = { radar: j.radar || null, market: { observedAt: j.market?.observedAt || null, freshness: j.market?.freshness || null }, run: j.run || null, receivedAt: Date.now() };
+  window.__marketsFreshness = { ok: true, servedFrom: 'canonical', stale: j.market?.freshness === 'STALE', generatedAt: j.market?.observedAt ? Date.parse(j.market.observedAt) : null };
+  return rows;
+}
+
 async function fetchData() {
   let live = null;
+  const _canonical = _canonicalContextEnabled();
   try {
     const authHeaders = await _getAuthHeaders();
+    if (_canonical) {
+      try {
+        live = await _fetchCanonicalMarkets(authHeaders);
+        SRC = window.__marketsFreshness.stale ? 'STALE' : 'LIVE';
+      } catch (ce) {
+        // Honest fallback: surface the canonical failure, then use the legacy feed.
+        console.warn('[CANONICAL] /api/context read failed; falling back to /api/markets:', ce && ce.message);
+        window.Toast?.error?.('Canonical context unavailable', `Falling back to /api/markets — ${ce && ce.message || 'error'}`, { endpoint: '/api/context' });
+        // The canonical context is only ever assigned on success, so a failed read
+        // would otherwise leave the PREVIOUS cycle's object in place and the RADAR
+        // panel would keep rendering it as if it were current. Replace it with an
+        // explicit failure marker instead of letting stale data pose as fresh.
+        window.__canonicalContext = { radar: null, market: null, run: null, receivedAt: Date.now(), failed: true, failureReason: (ce && ce.message) || 'error' };
+      }
+    }
+    if (!live) {
     const r = await fetch('/api/markets', { headers: { 'Accept': 'application/json', ...authHeaders } });
     if (!r.ok) {
       const body = await r.text().catch(() => '');
@@ -1816,6 +1922,7 @@ async function fetchData() {
     // Batch B: honest source label. Only fresh, live-built snapshots get
     // the green LIVE badge; a stale last-good snapshot is surfaced as STALE.
     SRC = window.__marketsFreshness.stale ? 'STALE' : 'LIVE';
+    }
   } catch(e) {
     SRC = 'ERROR';
     window.__marketsFreshness = { ok: false, servedFrom: 'error', stale: true, generatedAt: null };
@@ -5063,6 +5170,111 @@ function _cpRadarDataInsightHtml(f) {
 // (entry zone, stop, invalidation, TP1/2/3, safety, blocked reason / next
 // trigger) with a primary "Import this RADAR setup" button — or, when nothing
 // is focused, a clear instruction + "Open Trading RADAR" button.
+// ── Cockpit: server RADAR verdict for the ONE selected coin ──────────────────
+// Read straight off the atomized (market, symbol) row via /api/cockpit-radar-state.
+// Everything else in this panel is the browser's copy of the RADAR candidate; this
+// block is the server's own current verdict, so the two can be compared instead of
+// silently assumed identical. Read-only: it changes no gate, score, or import.
+const CP_RADAR_STATE_TTL_MS = 30_000;
+const CP_RADAR_STATE_TIMEOUT_MS = 6000;
+const _cpRadarStateCache = new Map();
+const _cpRadarStateInFlight = new Set();
+
+function _cpRadarStateSlotHtml(symbol) {
+  const sym = String(symbol || '').toUpperCase();
+  const cached = sym ? _cpRadarStateCache.get(sym) : null;
+  const model = cached ? cached.model : (sym ? { state: 'loading' } : { state: 'waiting' });
+  return `<div class="cp-radar-state" id="cockpit-radar-state-slot" data-state-symbol="${_esc(sym)}">${_cpRadarStateInnerHtml(model)}</div>`;
+}
+
+function _cpRadarStateRow(label, value, extra) {
+  return `<div class="cp-radar-insight__row"><span>${_esc(label)}</span><b>${_esc(value)}</b>${extra ? ` <span class="cp-radar-insight__na">${_esc(extra)}</span>` : ''}</div>`;
+}
+// A score that was not computed must read UNKNOWN — never 0, which a user could take
+// for a real reading.
+function _cpScore(value) { return (value === null || value === undefined) ? 'UNKNOWN' : String(value); }
+function _cpLevel(value) { return (value === null || value === undefined) ? 'UNKNOWN' : _cpFmt(value); }
+
+function _cpRadarStateInnerHtml(model) {
+  const title = '<div class="cp-radar-insight__title">Server RADAR verdict <span class="cp-radar-insight__ctx">from the canonical database · read-only</span></div>';
+  const wrap = (inner) => `<div class="cp-radar-insight">${title}${inner}</div>`;
+  if (!model || model.state === 'waiting') return wrap('<div class="cp-radar-insight__row cp-radar-insight__note">Select a coin to read its server RADAR verdict.</div>');
+  if (model.state === 'loading') return wrap('<div class="cp-radar-insight__row cp-radar-insight__note">Loading the server verdict…</div>');
+  if (model.state === 'auth') return wrap('<div class="cp-radar-insight__row cp-radar-insight__note">Sign in to read the server RADAR verdict.</div>');
+  // "Never scored" and "the read failed" are different facts and must not share a
+  // rendering — a blank/absent verdict may never stand in for an error.
+  if (model.state === 'notScored') {
+    return wrap(`<div class="cp-radar-insight__row cp-radar-insight__note">No server RADAR verdict for <b>${_esc(model.symbol || '--')}</b> yet — it is outside the measured microstructure budget, so the server has not scored it. This is a coverage gap, <b>not</b> a rejected setup.</div>`);
+  }
+  if (model.state === 'error') {
+    return wrap(`<div class="cp-radar-insight__row cp-radar-insight__note"><b style="color:#ffaa00;">Server verdict unavailable</b> — ${_esc(model.message || 'unknown error')}. This is a failed read, not a "no setup" result.</div>`);
+  }
+  const s = model.data || {};
+  const sc = s.scores || {};
+  const plan = s.plan || {};
+  const staleNote = s.freshness === 'STALE' ? 'STALE — older than two collector cycles'
+    : s.freshness === 'UNKNOWN' ? 'age unknown' : '';
+  const tps = [plan.tp1, plan.tp2, plan.tp3].map((v) => _cpLevel(v)).join(' / ');
+  const zone = (plan.entryZoneLow != null && plan.entryZoneHigh != null) ? `${_cpFmt(plan.entryZoneLow)} – ${_cpFmt(plan.entryZoneHigh)}` : 'UNKNOWN';
+  return wrap(
+    _cpRadarStateRow('Status', `${s.status || 'UNKNOWN'}${s.entryType && s.entryType !== 'NONE' ? ` · ${s.entryType}` : ''}`, s.entryReady === true ? 'entry gates confirmed' : 'not entry-ready')
+    + _cpRadarStateRow('Freshness', s.freshness || 'UNKNOWN', staleNote)
+    + _cpRadarStateRow('Setup / Exec / Conf', `${_cpScore(sc.setup)} / ${_cpScore(sc.execution)} / ${_cpScore(sc.confidence)}`)
+    + _cpRadarStateRow('R/R · Regime', `${_cpScore(sc.riskReward)} · ${_cpScore(sc.marketRegime)}`)
+    + _cpRadarStateRow('Dislocation · Flush · Stabil.', `${_cpScore(sc.dislocation)} · ${_cpScore(sc.flush)} · ${_cpScore(sc.stabilization)}`)
+    + _cpRadarStateRow('Book · Flow · Derivatives', `${_cpScore(sc.orderBookSupport)} · ${_cpScore(sc.flowConfirmation)} · ${_cpScore(sc.derivativesRisk)}`)
+    + _cpRadarStateRow('Reclaim', (s.reclaim && s.reclaim.status) || 'UNKNOWN')
+    + _cpRadarStateRow('Absorb', `${(s.absorb && s.absorb.status) || 'UNKNOWN'}`, s.absorb ? `${s.absorb.mode || 'UNKNOWN'} · strict ${s.absorb.strictConfirmed ? 'confirmed' : 'not confirmed'}` : '')
+    + _cpRadarStateRow('Entry zone', zone)
+    + _cpRadarStateRow('Stop · Invalidation', `${_cpLevel(plan.stopLoss)} · ${_cpLevel(plan.hardInvalidation)}`)
+    + _cpRadarStateRow('TP1 / TP2 / TP3', tps)
+    + _cpRadarStateRow('Position size', plan.positionSizeGuidance || 'UNKNOWN')
+    + _cpRadarStateRow('Data', `${s.dataStatus || 'unknown'}`, (s.missingInputs && s.missingInputs.length) ? `missing: ${s.missingInputs.join(', ')}` : '')
+  );
+}
+
+function _cpRadarStatePaint(symbol, model) {
+  _cpRadarStateCache.set(symbol, { at: Date.now(), model });
+  const slot = document.getElementById('cockpit-radar-state-slot');
+  if (slot && (slot.getAttribute('data-state-symbol') || '') === symbol) slot.innerHTML = _cpRadarStateInnerHtml(model);
+}
+
+async function _refreshCockpitRadarState() {
+  const slot = document.getElementById('cockpit-radar-state-slot');
+  if (!slot) return;
+  const symbol = (slot.getAttribute('data-state-symbol') || '').toUpperCase();
+  if (!symbol) { slot.innerHTML = _cpRadarStateInnerHtml({ state: 'waiting' }); return; }
+  const cached = _cpRadarStateCache.get(symbol);
+  if (cached && (Date.now() - cached.at) < CP_RADAR_STATE_TTL_MS) { slot.innerHTML = _cpRadarStateInnerHtml(cached.model); return; }
+  if (_cpRadarStateInFlight.has(symbol)) return; // one in-flight read per coin
+  _cpRadarStateInFlight.add(symbol);
+  slot.innerHTML = _cpRadarStateInnerHtml(cached ? cached.model : { state: 'loading' });
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), CP_RADAR_STATE_TIMEOUT_MS);
+  try {
+    const authHeaders = await _getAuthHeaders();
+    if (!authHeaders.Authorization) { _cpRadarStatePaint(symbol, { state: 'auth' }); return; }
+    const r = await fetch(`/api/cockpit-radar-state?symbol=${encodeURIComponent(symbol)}`, { signal: ctrl.signal, headers: { 'Accept': 'application/json', ...authHeaders } });
+    let body = null; try { body = await r.json(); } catch { /* fall back to the HTTP status as the reason */ }
+    // 404 is the honest "server has not scored this coin", not a failure.
+    if (r.status === 404 || (body && body.found === false)) { _cpRadarStatePaint(symbol, { state: 'notScored', symbol }); return; }
+    if (!r.ok || !body || body.ok !== true) {
+      const reason = (body && body.reason) || `HTTP ${r.status}`;
+      console.warn('[CP-RADAR-STATE]', r.status, symbol, reason);
+      _cpRadarStatePaint(symbol, { state: 'error', message: reason });
+      return;
+    }
+    _cpRadarStatePaint(symbol, { state: 'ok', data: body.state });
+  } catch (e) {
+    const message = e && e.name === 'AbortError' ? `timed out after ${CP_RADAR_STATE_TIMEOUT_MS}ms` : (e && e.message) || 'network error';
+    console.warn('[CP-RADAR-STATE] read failed:', symbol, message);
+    _cpRadarStatePaint(symbol, { state: 'error', message });
+  } finally {
+    clearTimeout(timer);
+    _cpRadarStateInFlight.delete(symbol);
+  }
+}
+
 function _cpRadarFocusHtml() {
   const f = _cpRadarFocus();
   if (!f) {
@@ -5103,6 +5315,7 @@ function _cpRadarFocusHtml() {
       <div><span>Next trigger</span><b>${_esc(f.nextRequiredConfirmation || 'none')}</b></div>
     </div>
     ${_cpRadarDataInsightHtml(f)}
+    ${_cpRadarStateSlotHtml(f.symbol)}
     ${_liveMicroSlotHtml('cockpit-live-microstructure-slot', _resolveLiveMicroTarget(f))}
     <button type="button" id="cockpit-import-radar" class="cockpit-primary-btn">Import this RADAR setup</button>
   </div>`;
@@ -5166,6 +5379,9 @@ function renderCockpit() {
   // Advisory-only live microstructure read (cache-backed + deduped — a no-op
   // network-wise when the same candidate is already loaded).
   try { _refreshLiveMicrostructure('cockpit-live-microstructure-slot'); } catch (e) { console.warn('[LIVE-MICRO] cockpit refresh failed:', e && e.message); }
+  // Server RADAR verdict for the selected coin, read from the atomized DB row.
+  // Cache-backed and deduped, so repainting the panel costs no extra request.
+  try { _refreshCockpitRadarState(); } catch (e) { console.warn('[CP-RADAR-STATE] cockpit refresh failed:', e && e.message); }
 
   // Funding divergence / extremes — context-only panel (existing DIVERGENCE_MAP).
   const fxEl = document.getElementById('cockpit-funding-context');
@@ -9976,11 +10192,123 @@ window._radarSelect = function(sym) {
   }
 };
 
+// ── Canonical RADAR panels (task 3) ─────────────────────────────────────────
+// Additive display fed by window.__canonicalContext.radar (from /api/context).
+// Provider Status makes the data source honest (ONLINE/STALE/OFFLINE, absorb
+// mode, feeds, coverage); Absorb Diagnostics surfaces STRICT/PROXY status+score
+// per candidate and the funnel. Shown only when the canonical read flag is on.
+function _radarStatusClass(v) {
+  const s = String(v || '').toUpperCase();
+  if (s === 'ONLINE' || s === 'OK' || s === 'STRICT' || s === 'ABSORB_CONFIRMED') return 'radar-score--good';
+  if (s === 'STALE' || s === 'DEGRADED' || s === 'PROXY' || s === 'ABSORB_WATCH' || s === 'ABSORB_PARTIAL_EVIDENCE') return 'radar-score--warn';
+  if (s === 'OFFLINE' || s === 'MISSING' || s === 'DISABLED' || s === 'UNTRUSTED' || s === 'ABSORB_DATA_UNAVAILABLE' || s === 'ABSORB_DATA_STALE' || s === 'ABSORB_PROVIDER_UNTRUSTED') return 'radar-score--bad';
+  return '';
+}
+function _renderProviderStatusPanel(radar, esc) {
+  const p = (radar && radar.providerStatus) || {};
+  const v = (x) => (x === null || x === undefined || x === '') ? '—' : esc(String(x));
+  const cell = (label, key) => `<div class="radar-provider-cell">${esc(label)}: <b class="${_radarStatusClass(p[key])}">${v(p[key])}</b></div>`;
+  return `<details class="radar-diagnostics radar-provider" open><summary>Provider Status</summary><div class="radar-provider-grid">`
+    + cell('Microstructure', 'MICROSTRUCTURE_PROVIDER') + cell('Absorb mode', 'ABSORB_MODE')
+    + cell('Order book', 'ORDER_BOOK_FEED') + cell('Trades', 'TRADES_FEED')
+    + cell('OI', 'OI_FEED') + cell('Funding', 'FUNDING_FEED')
+    + `<div class="radar-provider-cell">Coverage: <b>${v(p.COVERAGE_SYMBOLS)}</b></div>`
+    + `<div class="radar-provider-cell">Window: <b>${v(p.WINDOW_SEC)}</b>s</div>`
+    + `<div class="radar-provider-cell">Last update: <b>${v(p.LAST_UPDATE)}</b></div>`
+    + `<div class="radar-provider-cell">Latency: <b>${v(p.DATA_LATENCY_MS)}</b>ms</div>`
+    + `</div></details>`;
+}
+function _renderAbsorbDiagnosticsPanel(radar, esc) {
+  const cands = Array.isArray(radar && radar.candidates) ? radar.candidates : [];
+  const funnel = (radar && radar.absorbFunnel) || {};
+  const g = (c, col, key) => c[col] ?? (c.payload && c.payload[key]);
+  const rows = cands.slice(0, 25).map((c) => {
+    const sym = esc(String(c.symbol || (c.payload && c.payload.symbol) || '—'));
+    const mode = esc(String(g(c, 'absorb_mode', 'ABSORB_MODE') || '—'));
+    const sSt = String(g(c, 'strict_absorb_status', 'STRICT_ABSORB_STATUS') || '—');
+    const sSc = g(c, 'strict_absorb_score', 'STRICT_ABSORB_SCORE');
+    const pSt = String(g(c, 'proxy_absorb_status', 'PROXY_ABSORB_STATUS') || '—');
+    const pSc = g(c, 'proxy_absorb_score', 'PROXY_ABSORB_SCORE');
+    return `<tr><td>${sym}</td><td>${mode}</td>`
+      + `<td class="${_radarStatusClass(sSt)}">${esc(sSt)}${sSc == null ? '' : ' (' + esc(String(sSc)) + ')'}</td>`
+      + `<td class="${_radarStatusClass(pSt)}">${esc(pSt)}${pSc == null ? '' : ' (' + esc(String(pSc)) + ')'}</td></tr>`;
+  }).join('');
+  const fk = Object.keys(funnel);
+  const funnelHtml = fk.length ? fk.map((k) => `${esc(k)}: <b>${esc(String(funnel[k]))}</b>`).join(' · ') : 'no funnel data';
+  return `<details class="radar-diagnostics radar-absorb" open><summary>Absorb Diagnostics</summary>`
+    + `<div class="radar-absorb-funnel">${funnelHtml}</div>`
+    + `<table class="radar-absorb-table"><thead><tr><th>Symbol</th><th>Mode</th><th>STRICT</th><th>PROXY</th></tr></thead>`
+    + `<tbody>${rows || '<tr><td colspan="4">no candidates</td></tr>'}</tbody></table></details>`;
+}
+function _renderCanonicalRadarPanels(radar, esc) {
+  return `<div class="radar-canonical-panels">${_renderProviderStatusPanel(radar, esc)}${_renderAbsorbDiagnosticsPanel(radar, esc)}</div>`;
+}
+
+// Folds the canonical provider/absorb panels into the RADAR panel's own
+// "Diagnostics & Logs" section instead of stacking them above the Radar Matrix.
+// Falls back to appending at the end if that section is ever renamed, so the
+// data is never silently dropped.
+function _withCanonicalDiagnostics(mainHtml, radar, esc) {
+  if (!radar) return mainHtml;
+  const panels = _renderCanonicalRadarPanels(radar, esc);
+  const anchor = '<details class="radar-diagnostics"><summary>Diagnostics & Logs</summary>';
+  const at = mainHtml.indexOf(anchor);
+  if (at === -1) return mainHtml + panels;
+  const insertAt = at + anchor.length;
+  return mainHtml.slice(0, insertAt) + panels + mainHtml.slice(insertAt);
+}
+
+// Names the active RADAR data source when the canonical read is enabled but the
+// panel is rendering the legacy browser-computed Fleet radar instead. Without this
+// the switch was invisible: the legacy feed has no server rolling microstructure, so
+// Strict Absorb shows "DATA OFF" on every row, which read as the panel contradicting
+// the canonical verdict it had shown a minute earlier. Display-only — it states which
+// source is on screen and changes no gate, score, or value.
+function _radarLegacySourceNoticeHtml(reason, esc) {
+  return '<div class="radar-source-notice" style="border-radius:8px; padding:8px 11px; margin-bottom:10px; background:rgba(255,170,0,0.08); border:1px solid rgba(255,170,0,0.4); font-size:12px; color:#f6f7fb;">'
+    + '<b style="color:#ffaa00;">Showing the legacy browser-computed RADAR</b> — canonical read unavailable (' + esc(String(reason || 'unknown')) + '). '
+    + 'This source carries <b>no server rolling microstructure</b>, so Strict Absorb reads "DATA OFF" for every row here. '
+    + 'That is a missing data source, <b>not</b> a rejected absorption, and it is not the canonical server verdict.'
+    + '</div>';
+}
+
 function renderTradingRadarPanel() {
   const root = document.getElementById('trading-radar-root');
   if (!root) return;
-  const radar = Fleet && Fleet.data ? Fleet.data.tradingRadar : null;
-  root.innerHTML = _renderTradingRadar(radar, _esc);
+  // Canonical read cutover: when enabled and a READY canonical RADAR exists, the
+  // panel renders from it (candidates carry the full evaluator payload); any shape
+  // problem falls back to the legacy Fleet render so the panel never goes blank.
+  const canonicalRadar = _canonicalContextEnabled() && window.__canonicalContext ? window.__canonicalContext.radar : null;
+  const fleetRadar = Fleet && Fleet.data ? Fleet.data.tradingRadar : null;
+  let radar = fleetRadar;
+  let mainHtml;
+  if (canonicalRadar && String(canonicalRadar.status || '').toUpperCase() === 'READY') {
+    try {
+      const mapped = { ...canonicalRadar, candidates: (canonicalRadar.candidates || []).map((c) => (c && c.payload) ? c.payload : c) };
+      radar = mapped;
+      mainHtml = _renderTradingRadar(mapped, _esc);
+    } catch (e) { console.warn('[CANONICAL] radar render fell back to Fleet:', e && e.message); radar = fleetRadar; mainHtml = _renderTradingRadar(fleetRadar, _esc); }
+  } else {
+    // Falling back to the browser-computed Fleet radar is a DIFFERENT data source
+    // with no server rolling microstructure, so Strict Absorb reads "DATA OFF" here
+    // regardless of what the canonical verdict says. Doing that silently is what
+    // made the panel look like it was contradicting itself every cycle, so the
+    // active source and the reason are now stated instead of implied.
+    if (_canonicalContextEnabled()) {
+      const reason = !window.__canonicalContext ? 'not loaded yet'
+        : window.__canonicalContext.failed ? `/api/context failed — ${window.__canonicalContext.failureReason || 'error'}`
+        : !canonicalRadar ? 'no canonical RADAR in the response'
+        : `canonical RADAR status ${String(canonicalRadar.status || 'unknown').toUpperCase()}`;
+      console.warn('[CANONICAL] radar panel is showing the legacy browser feed:', reason);
+      mainHtml = _radarLegacySourceNoticeHtml(reason, _esc) + _renderTradingRadar(fleetRadar, _esc);
+    } else {
+      mainHtml = _renderTradingRadar(fleetRadar, _esc);
+    }
+  }
+  // Provider Status / Absorb Diagnostics belong INSIDE the existing RADAR panel's
+  // diagnostics, not as a second table stacked above it: prepending them pushed the
+  // real Radar Matrix down the page and read as a duplicate, competing panel.
+  root.innerHTML = _withCanonicalDiagnostics(mainHtml, canonicalRadar, _esc);
   // Hardened toggle-state persistence: replaced inline ontoggle="...symbol..." handlers
   // (XSS sink — raw symbol in inline JS string) with safe data-* attributes + delegated
   // event listeners. The symbol is read from element.dataset, never interpolated into JS.

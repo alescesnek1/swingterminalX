@@ -11,6 +11,52 @@
 
 import { loadFleet, mutateFleet } from './_fleet-store.mjs';
 
+// Read the RADAR result the publisher computed from the canonical database,
+// instead of whatever a browser session last wrote into the Fleet. Flag-gated and
+// OFF by default: this decides what may reach Telegram.
+export const RADAR_ALERTS_CANONICAL_ENV_FLAG = 'RADAR_ALERTS_CANONICAL_SOURCE';
+
+// The canonical RADAR is republished once per collector cycle (3 minutes), so the
+// 120s threshold above — written for the browser-driven feed — would mark it stale
+// at the exact moment it is freshly correct. Two cycles is the honest bound:
+// newer means at least one cycle landed, older means collection actually stopped.
+export const CANONICAL_RADAR_STALE_MS = 6 * 60 * 1000;
+
+async function loadContextStore() { return await import('./_market-context-store.mjs'); }
+async function loadDatabase() { return (await import('./_db.mjs')).getDb().pool; }
+
+// Shapes the stored canonical RADAR into what selectRadarEntryAlerts consumes.
+// Every gate downstream is unchanged; only the SOURCE of the candidates moves.
+export function shapeCanonicalRadarForAlerts(radar, nowMs = Date.now()) {
+  const rows = Array.isArray(radar?.candidates) ? radar.candidates : [];
+  const candidates = rows.map((row) => {
+    const payload = row && typeof row.payload === 'object' && row.payload !== null ? row.payload : {};
+    return { ...payload, symbol: payload.symbol || row?.symbol, market: payload.market || row?.market };
+  }).filter((c) => c.symbol);
+  const computedAtMs = radar?.computedAt ? new Date(radar.computedAt).getTime() : NaN;
+  const dataFreshnessMs = Number.isFinite(computedAtMs) ? Math.max(0, nowMs - computedAtMs) : Number.POSITIVE_INFINITY;
+  return {
+    status: String(radar?.status || 'PENDING').toUpperCase(),
+    source: 'canonical_context',
+    computedAt: radar?.computedAt || null,
+    dataFreshnessMs,
+    candidates,
+    entryReady: candidates.filter((c) => ENTRY_READY_STATUSES.includes(String(c.STATUS || c.status || c.stage || ''))),
+  };
+}
+
+export async function loadCanonicalRadarForAlerts(deps = {}) {
+  let store; let database;
+  try { store = deps.store || await loadContextStore(); database = deps.database || await loadDatabase(); }
+  catch { return { ok: false, reason: 'DB_UNAVAILABLE' }; }
+  const read = await store.getPublishedRadar(database);
+  if (!read?.ok) return { ok: false, reason: read?.reason || 'DB_UNAVAILABLE' };
+  const shaped = shapeCanonicalRadarForAlerts(read.radar, deps.nowMs || Date.now());
+  if (shaped.status !== 'READY') return { ok: false, reason: `RADAR_${shaped.status}` };
+  if (shaped.dataFreshnessMs > CANONICAL_RADAR_STALE_MS) return { ok: false, reason: 'RADAR_STALE' };
+  return { ok: true, radar: shaped };
+}
+
 export const RADAR_TELEGRAM_COOLDOWN_MS = 60 * 60 * 1000; // 60 minutes, per-symbol
 
 // Data is considered stale (and therefore non-alertable) once the underlying
@@ -333,7 +379,7 @@ function markSent(state, candidate, nowIso) {
   return state;
 }
 
-export default async () => {
+export async function runRadarTelegramAlertCycle() {
   const telegramMode = 'ENTRY_READY_ONLY';
 
   if (isTelegramHardDisabled()) {
@@ -347,8 +393,23 @@ export default async () => {
   const nowIso = new Date(nowMs).toISOString();
 
   const fleet = await loadFleet();
-  const radar = fleet && fleet.tradingRadar ? fleet.tradingRadar : {};
-  let state = normalizeRadarTelegramAlertState(radar.telegramAlertState);
+  const fleetRadar = fleet && fleet.tradingRadar ? fleet.tradingRadar : {};
+  let state = normalizeRadarTelegramAlertState(fleetRadar.telegramAlertState);
+
+  // Alert-state bookkeeping (cooldowns) always stays in the Fleet; only the market
+  // decision moves. When the canonical source is enabled it is authoritative: if it
+  // cannot be read, NOTHING is sent. Quietly falling back to the Fleet would alert
+  // from a browser-written snapshot that the canonical RADAR never agreed with.
+  let radar = fleetRadar;
+  let radarSource = 'fleet';
+  if (process.env[RADAR_ALERTS_CANONICAL_ENV_FLAG] === 'true') {
+    const canonical = await loadCanonicalRadarForAlerts({ nowMs });
+    if (canonical.ok) { radar = canonical.radar; radarSource = 'canonical'; }
+    else {
+      console.warn(`[cron-alerts] canonical_radar_unavailable: ${canonical.reason}; sent=0 (fail-closed)`);
+      return { ok: true, sent: 0, skipped: 0, skippedReasons: {}, selected: null, lastSentAt: state.lastSentAt || null, telegramMode, radarSource: 'canonical_unavailable', reason: `canonical_${String(canonical.reason).toLowerCase()}` };
+    }
+  }
 
   if (!token || !chatId) {
     const result = { ok: false, sent: 0, skipped: 0, skippedReasons: {}, selected: null, lastSentAt: state.lastSentAt || null, telegramMode, code: TELEGRAM_CODES.MISSING_CREDENTIALS, reason: 'missing_credentials' };
@@ -364,6 +425,7 @@ export default async () => {
   }
 
   const potentials = selectRadarEntryAlerts(radar, state, nowMs);
+  console.log(`[cron-alerts] radar_source=${radarSource} candidates=${(radar.candidates || []).length} entryReady=${(radar.entryReady || []).length} due=${potentials.length}`);
 
   if (!potentials.length) {
     const result = { ok: true, sent: 0, skipped: 0, skippedReasons: {}, selected: null, lastSentAt: state.lastSentAt || null, telegramMode, reason: 'no_entry_ready_due' };
@@ -454,6 +516,22 @@ export default async () => {
 
   console.log(`[cron-alerts] RADAR ENTRY_READY sent=${sentCount} skipped=${skippedCount}`);
   return result;
+}
+
+// A Netlify v2 function must resolve to a Response (or undefined). Returning the
+// plain result object made EVERY scheduled invocation fail with
+// "Function returned an unsupported value" AFTER the work had already run, and
+// Netlify then retried it — three invocations were observed within five seconds
+// for a single tick. Harmless only because Telegram was hard-disabled; with
+// sending enabled those retries are duplicate-alert attempts.
+export default async () => {
+  let result;
+  try { result = await runRadarTelegramAlertCycle(); }
+  catch (error) {
+    console.error('[cron-alerts] cycle_threw', { name: error?.name || 'Error' });
+    return new Response(JSON.stringify({ ok: false, reason: 'ALERT_CYCLE_FAILED' }), { status: 500, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' } });
+  }
+  return new Response(JSON.stringify(result ?? { ok: true }), { status: 200, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' } });
 };
 
 export const config = {

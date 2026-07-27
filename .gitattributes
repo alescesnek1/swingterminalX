@@ -1,0 +1,4 @@
+# SQL migrations must stay LF. Netlify records each applied migration by content
+# hash; a CRLF working-tree copy (Windows autocrlf) reads as "modified after
+# applied" and blocks every deploy. Force LF for migration SQL.
+*.sql text eol=lf

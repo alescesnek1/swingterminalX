@@ -3,20 +3,107 @@
 // are simply absent from this context and must be shown as UNSUPPORTED later.
 export const BINANCE_SPOT_ORIGIN = 'https://data-api.binance.vision';
 export const BINANCE_FUTURES_ORIGIN = 'https://fapi.binance.com';
-export const DEFAULT_MICROSTRUCTURE_TOP_N = 5; // TODO calibrate only after shadow soak.
-export const MAX_MICROSTRUCTURE_TOP_N = 8;
-export const MICROSTRUCTURE_CONCURRENCY = 2;
+export const DEFAULT_MICROSTRUCTURE_TOP_N = 5; // Conservative default; the ceiling below is what the background collector uses.
+// Each measured symbol costs 3 public GETs (klines/depth/aggTrades) and ~9 request
+// weight. A full USD-stable universe is ~500 symbols = ~4.5k weight per cycle,
+// inside Binance's 6000/min budget. What it does NOT fit is the 30s scheduled
+// function limit, so the large universe is only reachable from the background
+// collector; the scheduled path stays small.
+export const MAX_MICROSTRUCTURE_TOP_N = 600;
+export const DEFAULT_MICROSTRUCTURE_CONCURRENCY = 2;
+export const MAX_MICROSTRUCTURE_CONCURRENCY = 32;
+export const MICROSTRUCTURE_CONCURRENCY = DEFAULT_MICROSTRUCTURE_CONCURRENCY;
+// Multi-timeframe (1h/4h/12h/7d) comes from Binance rolling-window ticker, which
+// is per-symbol (weight 4/symbol, capped at 200 for >50 symbols, max 100 symbols
+// per request). Full-universe multi-TF would blow the 6000/min weight budget, so
+// it is bounded to the top-N by 24h quote volume; every other symbol stays
+// UNKNOWN for these fields (never faked).
+export const DEFAULT_MULTI_TF_TOP_N = 300;
+// The terminal lists ~1000 coins; anything past this ceiling shows UNKNOWN for
+// 1h/4h/12h/7d, which reads as a broken row rather than an honest gap. The
+// rolling-window ticker is weight-capped at 200 per request, so covering the
+// whole list costs ~8000 weight per cycle — real money against the per-minute
+// allowance, which is why these requests go through the pacer too.
+export const MAX_MULTI_TF_TOP_N = 1200;
+export const MULTI_TF_BATCH_WEIGHT = 200;
+const MULTI_TF_BATCH = 100;
+const MULTI_TF_WINDOWS = Object.freeze([{ key: 'change1hPct', windowSize: '1h' }, { key: 'change4hPct', windowSize: '4h' }, { key: 'change12hPct', windowSize: '12h' }, { key: 'change7dPct', windowSize: '7d' }]);
 
 const TIMEOUT_MS = 4_500;
 const VENUES = {
-  spot: { origin: BINANCE_SPOT_ORIGIN, exchangeInfo: '/api/v3/exchangeInfo', ticker: '/api/v3/ticker/24hr', klines: '/api/v3/klines', depth: '/api/v3/depth', trades: '/api/v3/aggTrades' },
+  spot: { origin: BINANCE_SPOT_ORIGIN, exchangeInfo: '/api/v3/exchangeInfo', ticker: '/api/v3/ticker/24hr', rollingTicker: '/api/v3/ticker', klines: '/api/v3/klines', depth: '/api/v3/depth', trades: '/api/v3/aggTrades' },
   futures: { origin: BINANCE_FUTURES_ORIGIN, exchangeInfo: '/fapi/v1/exchangeInfo', ticker: '/fapi/v1/ticker/24hr', klines: '/fapi/v1/klines', depth: '/fapi/v1/depth', trades: '/fapi/v1/aggTrades' },
 };
-const ALLOWED_PATHS = new Set(Object.values(VENUES).flatMap((venue) => [venue.exchangeInfo, venue.ticker, venue.klines, venue.depth, venue.trades]));
+const ALLOWED_PATHS = new Set(Object.values(VENUES).flatMap((venue) => [venue.exchangeInfo, venue.ticker, venue.rollingTicker, venue.klines, venue.depth, venue.trades]).filter(Boolean));
+
+// Both bounded budgets below (microstructure depth/trades, multi-timeframe change)
+// rank by 24h `quoteVolume` — a figure denominated in the QUOTE asset. Comparing
+// that raw number across mixed quotes ranks by exchange rate, not by liquidity:
+// an IDR pair (~16k IDR/USD) or a TRY pair (~40 TRY/USD) outranks every major
+// purely through its denominator. Those pairs are also outside the RADAR universe
+// (scripts/radar/trading-radar.mjs QUOTES), so measuring them spends the whole
+// budget on symbols RADAR can never score. Rank only the USD-stable quotes.
+export const RANKABLE_QUOTE_ASSETS = Object.freeze(['USDT', 'USDC']);
+export function rankByQuoteVolume(tickers) {
+  const eligible = (Array.isArray(tickers) ? tickers : []).filter((t) => RANKABLE_QUOTE_ASSETS.includes(t?.quoteAsset));
+  return eligible.sort((a, b) => (finite(b.quoteVolume) || 0) - (finite(a.quoteVolume) || 0));
+}
+
+// The microstructure budget decides which coins can ever produce an EXECUTION_SCORE
+// at all: order-book support and flow confirmation are 25% + 25% of it, and a coin
+// with no measurement cannot reach the 65 gate, so it can never become ENTRY_READY.
+//
+// Allocating that budget purely by liquidity spent every slot on the largest majors
+// — which are precisely the coins that rarely produce the setup RADAR looks for (a
+// 2-3x ATR dislocation followed by a long flush). The coins that DO flush sit far
+// down the volume list and were never measured, so the entry branch was structurally
+// dead for exactly the population the strategy targets.
+//
+// The budget is therefore split, both parts drawn from the liquid pool so an illiquid
+// pair the universe filter would reject anyway never consumes a slot:
+//   - a fixed number of top-liquidity slots, so BTC/ETH/major context never drops out
+//   - the remainder to the deepest 24h DOWN moves, i.e. the real dislocation candidates
+// A pump is not this setup, so only negative moves earn a dislocation slot. A symbol
+// with no usable 24h change counts as zero dislocation: it stays eligible through the
+// liquidity slots but never displaces a symbol with a measured real drop.
+export const DEFAULT_MICROSTRUCTURE_POOL_SIZE = 400;
+export const DEFAULT_MICROSTRUCTURE_MAJOR_SLOTS = 20;
+
+function dislocationDepthPct(ticker) {
+  const change = finite(ticker?.priceChangePercent);
+  return change !== null && change < 0 ? -change : 0;
+}
+
+export function rankMicrostructureBudget(tickers, options = {}) {
+  const topN = boundedTopN(options.topN);
+  const poolSize = clampCount(options.poolSize, DEFAULT_MICROSTRUCTURE_POOL_SIZE, MAX_MICROSTRUCTURE_TOP_N);
+  const majorSlots = clampCount(options.majorSlots, DEFAULT_MICROSTRUCTURE_MAJOR_SLOTS, poolSize);
+  const pool = rankByQuoteVolume(tickers).slice(0, poolSize);
+  const selected = pool.slice(0, majorSlots);
+  const taken = new Set(selected.map((t) => t.symbol));
+  const dislocated = pool.slice(majorSlots)
+    .map((ticker) => ({ ticker, depth: dislocationDepthPct(ticker) }))
+    // Deterministic: depth first, then symbol, so an identical universe always
+    // yields an identical measured set (and the tests are not order-dependent).
+    .sort((a, b) => b.depth - a.depth || String(a.ticker.symbol).localeCompare(String(b.ticker.symbol)));
+  for (const { ticker } of dislocated) {
+    if (selected.length >= topN) break;
+    if (taken.has(ticker.symbol)) continue;
+    taken.add(ticker.symbol);
+    selected.push(ticker);
+  }
+  return selected.slice(0, topN);
+}
 
 function boundedTopN(value) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? Math.min(Math.trunc(number), MAX_MICROSTRUCTURE_TOP_N) : DEFAULT_MICROSTRUCTURE_TOP_N;
+}
+// Bounded positive count with an explicit fallback — a missing, zero, negative, or
+// non-numeric value takes the fallback rather than collapsing the budget to nothing.
+function clampCount(value, fallback, max) {
+  const number = Math.trunc(Number(value));
+  return Number.isFinite(number) && number > 0 ? Math.min(number, max) : Math.min(fallback, max);
 }
 function failureCode(error) {
   const message = String(error?.message || error || '');
@@ -96,6 +183,11 @@ async function collectMicrostructurePair(market, ticker, fetchImpl) {
   const firstFailure = [klines, depth, trades].find((item) => item.status === 'rejected');
   const summary = trades.status === 'fulfilled' ? tradesSummary(trades.value) : { count: 0, takerBuyQuote: 0, takerSellQuote: 0, windowStart: null, windowEnd: null };
   return {
+    // When THIS symbol's data was actually read. The cycle's single observedAt is
+    // stamped after every symbol is done, and with request pacing that can be
+    // minutes later — measuring an early symbol's trades against it puts them all
+    // outside the window, leaving zero samples and no absorption fields at all.
+    fetchedAtMs: Date.now(),
     market, symbol: ticker.symbol, dataStatus: missingInputs.length === 0 ? 'complete' : 'partial',
     failureCode: firstFailure ? failureCode(firstFailure.reason) : null, klines1m: klines.status === 'fulfilled' && Array.isArray(klines.value) ? klines.value.slice(0, 120) : [],
     depthSummary: depth.status === 'fulfilled' ? depthSummary(depth.value) : {}, tradesSummary: summary,
@@ -110,31 +202,151 @@ async function mapBounded(items, limit, callback) {
   });
   await Promise.all(workers); return result;
 }
-async function collectVenue(market, { fetchImpl, microstructureTopN }) {
+// Binance enforces a per-IP REQUEST WEIGHT budget per minute (6000 on spot).
+// Exceeding it returns 418/429 and then bans the IP for minutes to hours, which
+// would take the whole collector down — so the collector paces itself instead of
+// relying on concurrency, which only bounds parallelism and not the rate.
+//
+// Weights used here: klines(limit<=100)=2, depth(limit=100)=5, aggTrades=2 → 9
+// per measured symbol. The budget below leaves headroom for the ticker and
+// multi-timeframe calls that share the same allowance.
+// Weight and allowance are PER VENUE and differ a lot. Spot publishes ~6000/min
+// per IP; USD-M Futures publishes a much tighter one, and its aggTrades endpoint
+// costs several times the spot equivalent. Treating both as "9 weight against
+// 6000" is what made the first paced run useless: the pacer reported
+// pacingWaitedMs 0 — believing it had ample headroom — while Binance rate-limited
+// 111 futures symbols in the same cycle.
+//
+// These are deliberately CONSERVATIVE: calibrated to stay clear of the observed
+// 429s rather than to squeeze the documented maximum, because the penalty for
+// overrunning is an IP ban that stops all collection, not a single failed symbol.
+export const VENUE_REQUEST_WEIGHTS = Object.freeze({ spot: 9, futures: 27 });
+export const VENUE_WEIGHT_BUDGETS_PER_MIN = Object.freeze({ spot: 3600, futures: 1500 });
+export const SYMBOL_REQUEST_WEIGHT = VENUE_REQUEST_WEIGHTS.spot;
+export const DEFAULT_WEIGHT_BUDGET_PER_MIN = VENUE_WEIGHT_BUDGETS_PER_MIN.spot;
+export function venueRequestWeight(market) { return VENUE_REQUEST_WEIGHTS[market] ?? VENUE_REQUEST_WEIGHTS.spot; }
+export function venueWeightBudget(market) { return VENUE_WEIGHT_BUDGETS_PER_MIN[market] ?? VENUE_WEIGHT_BUDGETS_PER_MIN.spot; }
+const WEIGHT_WINDOW_MS = 60_000;
+
+// Rolling-window pacer: admits work only while the last 60s of spent weight stays
+// under budget, otherwise waits for the oldest entry to age out. Each venue gets
+// its own instance — spot and futures are separate services with separate limits.
+export function createWeightPacer(budgetPerMin = DEFAULT_WEIGHT_BUDGET_PER_MIN, { now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  const budget = Number.isFinite(Number(budgetPerMin)) && Number(budgetPerMin) > 0 ? Number(budgetPerMin) : DEFAULT_WEIGHT_BUDGET_PER_MIN;
+  const spent = [];
+  let waitedMs = 0;
+  const prune = (t) => { while (spent.length && t - spent[0].at >= WEIGHT_WINDOW_MS) spent.shift(); };
+  const total = () => spent.reduce((sum, e) => sum + e.weight, 0);
+  return {
+    async take(weight) {
+      const cost = Number.isFinite(Number(weight)) && Number(weight) > 0 ? Number(weight) : 1;
+      for (;;) {
+        const t = now();
+        prune(t);
+        if (total() + cost <= budget || !spent.length) { spent.push({ at: t, weight: cost }); return; }
+        const waitMs = Math.max(1, WEIGHT_WINDOW_MS - (t - spent[0].at));
+        waitedMs += waitMs;
+        await sleep(waitMs);
+      }
+    },
+    get diagnostics() { return { budgetPerMin: budget, waitedMs, windowWeight: total() }; },
+  };
+}
+
+function boundedConcurrency(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.min(Math.trunc(n), MAX_MICROSTRUCTURE_CONCURRENCY) : DEFAULT_MICROSTRUCTURE_CONCURRENCY;
+}
+
+async function collectVenue(market, { fetchImpl, microstructureTopN, microstructurePoolSize, microstructureMajorSlots, concurrency, pacer }) {
   const [info, tickersPayload] = await Promise.all([fetchBinancePublicJson(buildBinancePublicUrl(market, 'exchangeInfo'), { fetchImpl }), fetchBinancePublicJson(buildBinancePublicUrl(market, 'ticker'), { fetchImpl })]);
   const tickers = normalizeTickers(market, tickersPayload, instrumentIndex(market, info));
   if (!tickers.length) throw new Error('BINANCE_EMPTY_TICKER_UNIVERSE');
-  const candidates = [...tickers].sort((a, b) => (finite(b.quoteVolume) || 0) - (finite(a.quoteVolume) || 0)).slice(0, boundedTopN(microstructureTopN));
-  const microstructures = await mapBounded(candidates, MICROSTRUCTURE_CONCURRENCY, (ticker) => collectMicrostructurePair(market, ticker, fetchImpl));
-  return { tickers, microstructures };
+  const rankable = rankByQuoteVolume(tickers);
+  if (!rankable.length) console.warn('[MARKET_CONTEXT] microstructure_universe_empty', { market, tickerCount: tickers.length, quotes: RANKABLE_QUOTE_ASSETS });
+  const candidates = rankMicrostructureBudget(tickers, { topN: microstructureTopN, poolSize: microstructurePoolSize, majorSlots: microstructureMajorSlots });
+  // Which coins the budget actually bought is the difference between "RADAR found no
+  // setup" and "RADAR could not have found one", so the split is logged every cycle.
+  const dislocationSlots = candidates.filter((t) => dislocationDepthPct(t) > 0).length;
+  console.info('[MARKET_CONTEXT] microstructure_budget', { market, measured: candidates.length, poolCandidates: rankable.length, withDrawdown: dislocationSlots, deepestDropPct: candidates.length ? +Math.max(...candidates.map(dislocationDepthPct)).toFixed(2) : null });
+  const microstructures = await mapBounded(candidates, boundedConcurrency(concurrency), async (ticker) => {
+    if (pacer) await pacer.take(venueRequestWeight(market));
+    return collectMicrostructurePair(market, ticker, fetchImpl);
+  });
+  return { tickers, microstructures, pacing: pacer ? pacer.diagnostics : null };
+}
+
+function chunkList(items, size) { const out = []; for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size)); return out; }
+
+// One rolling window (e.g. 1h) for a bounded symbol list, batched to respect the
+// 100-symbols-per-request limit. A failed batch leaves its symbols UNKNOWN for
+// this window — it is never backfilled from another source or invented.
+async function fetchRollingWindow(market, symbols, windowSize, fetchImpl, pacer) {
+  const map = new Map();
+  for (const batch of chunkList(symbols, MULTI_TF_BATCH)) {
+    // Shares the venue's per-minute allowance with the microstructure reads, so
+    // it must draw from the same pacer — otherwise widening this coverage simply
+    // moves the rate-limit failure from one endpoint to another.
+    if (pacer) await pacer.take(MULTI_TF_BATCH_WEIGHT);
+    let payload;
+    try { payload = await fetchBinancePublicJson(buildBinancePublicUrl(market, 'rollingTicker', { symbols: JSON.stringify(batch), windowSize }), { fetchImpl }); }
+    catch (error) { console.warn('[MARKET_CONTEXT] multi_timeframe_batch_failed', { market, windowSize, symbolCount: batch.length, reason: failureCode(error) }); continue; }
+    for (const row of Array.isArray(payload) ? payload : []) { const pct = finite(row?.priceChangePercent); if (row?.symbol && pct !== null) map.set(row.symbol, pct); }
+  }
+  return map;
+}
+
+// Multi-timeframe (1h/4h/12h/7d) % change for the top-N symbols by 24h quote
+// volume. Windows are fetched sequentially to stay well inside the weight budget.
+export async function collectMultiTimeframe(market, tickers, { fetchImpl = fetch, topN = DEFAULT_MULTI_TF_TOP_N, pacer = null } = {}) {
+  const bounded = Math.min(Math.max(Math.trunc(Number(topN) || DEFAULT_MULTI_TF_TOP_N), 1), MAX_MULTI_TF_TOP_N);
+  const symbols = rankByQuoteVolume(tickers).slice(0, bounded).map((t) => t.symbol);
+  const byWindow = {};
+  for (const window of MULTI_TF_WINDOWS) byWindow[window.key] = await fetchRollingWindow(market, symbols, window.windowSize, fetchImpl, pacer);
+  const result = new Map();
+  for (const symbol of symbols) { const entry = {}; for (const window of MULTI_TF_WINDOWS) { const value = byWindow[window.key].get(symbol); if (value !== undefined) entry[window.key] = value; } if (Object.keys(entry).length) result.set(symbol, entry); }
+  return { symbols: result, requested: symbols.length, covered: result.size, windows: MULTI_TF_WINDOWS.map((window) => window.windowSize) };
 }
 
 export async function collectBinanceMarketContext(options = {}) {
   const fetchImpl = options.fetchImpl || fetch;
   const topN = boundedTopN(options.microstructureTopN);
+  const concurrency = boundedConcurrency(options.microstructureConcurrency);
+  // One pacer per venue: spot and futures are separate services with separate
+  // per-IP weight allowances, so spending on one must not throttle the other.
+  const makePacer = (market) => (options.weightBudgetPerMin === 0 ? null : createWeightPacer(options.weightBudgetPerMin ?? venueWeightBudget(market)));
+  // ONE pacer per venue for the whole cycle. The microstructure reads and the
+  // multi-timeframe reads draw on the same per-minute allowance, so they must
+  // share a budget — two independent pacers each believe they have the full one.
+  const spotPacer = makePacer('spot');
+  // How the measurement budget is allocated across the liquid pool. Optional: unset
+  // values take the module defaults, so existing callers keep working unchanged.
+  const budgetShape = { microstructurePoolSize: options.microstructurePoolSize, microstructureMajorSlots: options.microstructureMajorSlots };
   let spot;
-  try { spot = await collectVenue('spot', { fetchImpl, microstructureTopN: topN }); }
+  try { spot = await collectVenue('spot', { fetchImpl, microstructureTopN: topN, ...budgetShape, concurrency, pacer: spotPacer }); }
   catch (error) { return { ok: false, reason: failureCode(error), dataStatus: 'unavailable' }; }
   let futures = { tickers: [], microstructures: [], status: 'unsupported', failureCode: null };
   if (options.includeFutures === true) {
-    try { const collected = await collectVenue('futures', { fetchImpl, microstructureTopN: topN }); futures = { ...collected, status: 'complete', failureCode: null }; }
+    // Futures carries its own, much smaller topN: its per-minute allowance is a
+    // fraction of spot's, so the same symbol count that spot absorbs comfortably
+    // gets the futures venue rate-limited outright.
+    const futuresTopN = Number.isFinite(Number(options.futuresMicrostructureTopN)) && Number(options.futuresMicrostructureTopN) > 0 ? boundedTopN(options.futuresMicrostructureTopN) : topN;
+    try { const collected = await collectVenue('futures', { fetchImpl, microstructureTopN: futuresTopN, ...budgetShape, concurrency, pacer: makePacer('futures') }); futures = { ...collected, status: 'complete', failureCode: null }; }
     catch (error) { futures = { tickers: [], microstructures: [], status: 'unavailable', failureCode: failureCode(error) }; }
   }
   const microstructures = [...spot.microstructures, ...futures.microstructures];
   const allMicrostructureComplete = microstructures.every((row) => row.dataStatus === 'complete');
+  // Bounded multi-timeframe enrichment (spot only). Symbols outside the top-N
+  // keep no 1h/4h/12h/7d fields → the reader surfaces them as UNKNOWN.
+  let multiTf = { symbols: new Map(), requested: 0, covered: 0 };
+  if (options.includeMultiTimeframe === true) {
+    try { multiTf = await collectMultiTimeframe('spot', spot.tickers, { fetchImpl, topN: options.multiTimeframeTopN, pacer: spotPacer }); }
+    catch (error) { multiTf = { symbols: new Map(), requested: 0, covered: 0, failureCode: failureCode(error) }; }
+    for (const row of spot.tickers) { const entry = multiTf.symbols.get(row.symbol); if (entry) Object.assign(row, entry); }
+  }
   return {
     ok: true, observedAt: new Date(), collectedAt: new Date(), dataStatus: futures.status === 'complete' && allMicrostructureComplete ? 'complete' : 'partial',
     rows: [...spot.tickers, ...futures.tickers], microstructure: microstructures,
-    diagnostics: { spotTickerCount: spot.tickers.length, futuresTickerCount: futures.tickers.length, microstructureCount: microstructures.length, futuresStatus: futures.status, futuresFailureCode: futures.failureCode, microstructureTopN: topN },
+    diagnostics: { spotTickerCount: spot.tickers.length, futuresTickerCount: futures.tickers.length, microstructureCount: microstructures.length, futuresStatus: futures.status, futuresFailureCode: futures.failureCode, microstructureTopN: topN, multiTimeframeRequested: multiTf.requested, multiTimeframeCovered: multiTf.covered, multiTimeframeFailureCode: multiTf.failureCode ?? null, pacingWaitedMs: (spotPacer?.diagnostics?.waitedMs || 0) + (futures.pacing?.waitedMs || 0), rateLimitedSymbols: microstructures.filter((row) => row.failureCode === 'UPSTREAM_RATE_LIMITED').length },
   };
 }
