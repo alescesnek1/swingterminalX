@@ -63,7 +63,7 @@ waited on, and `retryBudgetExhausted` says so per window.
 | `MARKET_CONTEXT_RETENTION_ENABLED` | `false` | Master switch for the hourly retention sweep. |
 | `MARKET_CONTEXT_RETENTION_MARKET_HOURS` | `48` | How long to keep heavy market rows (min 6h floor). |
 | `MARKET_CONTEXT_RETENTION_RADAR_HOURS` | `168` | How long to keep RADAR results (for 24h/7d funnel); never shorter than the market window. |
-| `RADAR_CANONICAL_CONTEXT_READ` *(frontend)* | `false` | Frontend cutover switch: read Scanner/RADAR from `/api/context` instead of the legacy `/api/markets` + Fleet path. Legacy path stays as fallback, and the switch to it is now stated on screen (it carries no server rolling microstructure, so Strict Absorb reads "DATA OFF" there). |
+| `RADAR_CANONICAL_CONTEXT_READ` *(frontend)* | `false` | **BROWSER-side switch — a Netlify env var CANNOT enable it.** Set it per browser with `localStorage.setItem('radarCanonicalContextRead','true')` then reload, or `window.RADAR_CANONICAL_CONTEXT_READ = true`. While it is off the terminal serves the legacy `/api/markets` feed, **which has no 4h and no 12h change at all and only partial 1h** — so those scanner columns are blank however well the collector is configured. 24h is unaffected, which is exactly what makes the state confusing. The RADAR panel now says so explicitly instead of falling back silently. Frontend cutover switch: read Scanner/RADAR from `/api/context` instead of the legacy `/api/markets` + Fleet path. Legacy path stays as fallback, and the switch to it is now stated on screen (it carries no server rolling microstructure, so Strict Absorb reads "DATA OFF" there). |
 
 ## Read routes over the canonical DB
 

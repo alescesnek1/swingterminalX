@@ -170,7 +170,7 @@ test('every versioned asset carries the same single bumped cache-bust token', ()
   const tokens = [...indexHtml.matchAll(/\?v=([0-9a-z]+)/g)].map((m) => m[1]);
   assert.ok(tokens.length >= 11, 'all versioned assets are still tokenised');
   assert.equal(new Set(tokens).size, 1, 'exactly one token across index.html');
-  assert.equal(tokens[0], '6j5', 'token was bumped for this JS change');
+  assert.equal(tokens[0], '6j6', 'token was bumped for this JS change');
 });
 
 // The measurement budget targets the deepest drawdowns, and DISLOCATION is 20% of
@@ -191,4 +191,29 @@ test('the RADAR matrix states microstructure coverage for shown rows and all can
   // Counts are escaped, never interpolated raw.
   assert.match(terminalJs, /esc\(String\(_shownMeasured\)\)/);
   assert.match(terminalJs, /esc\(String\(_totalMeasured\)\)/);
+});
+
+// The canonical read is a BROWSER flag; a server env var cannot enable it. With it off
+// the terminal served the legacy feed silently, and the legacy feed has NO 4h and NO
+// 12h change at all -- so those scanner columns were blank with nothing on screen
+// saying why, or even that a switch existed.
+test('a disabled canonical read is announced, and names the browser flag', () => {
+  assert.match(terminalJs, /the canonical read is DISABLED in this browser/);
+  assert.match(terminalJs, /radarCanonicalContextRead/);
+  assert.match(terminalJs, /a server env var cannot enable it/);
+});
+
+test('the legacy notice states which timeframe columns the fallback costs', () => {
+  assert.match(terminalJs, /no 4h and no 12h change/);
+  assert.match(terminalJs, /24h is unaffected/);
+});
+
+test('the legacy notice renders whether the flag is off, failed, or pending', () => {
+  // Every legacy render must go through the notice. The disabled case was hidden by an
+  // `else` branch that rendered the legacy radar with no notice at all.
+  assert.match(terminalJs, /_radarLegacySourceNoticeHtml\(reason, _esc\) \+ _renderTradingRadar\(fleetRadar, _esc\)/);
+  // The un-annotated legacy render must exist ONLY as the try/catch shape guard.
+  const bare = [...terminalJs.matchAll(/mainHtml = _renderTradingRadar\(fleetRadar, _esc\)/g)];
+  assert.equal(bare.length, 1, 'exactly one un-annotated legacy render remains (the shape-error guard)');
+  assert.match(terminalJs.slice(bare[0].index - 220, bare[0].index), /catch \(e\)/, 'and it sits inside the catch');
 });

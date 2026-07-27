@@ -10288,7 +10288,10 @@ function _radarLegacySourceNoticeHtml(reason, esc) {
   return '<div class="radar-source-notice" style="border-radius:8px; padding:8px 11px; margin-bottom:10px; background:rgba(255,170,0,0.08); border:1px solid rgba(255,170,0,0.4); font-size:12px; color:#f6f7fb;">'
     + '<b style="color:#ffaa00;">Showing the legacy browser-computed RADAR</b> — canonical read unavailable (' + esc(String(reason || 'unknown')) + '). '
     + 'This source carries <b>no server rolling microstructure</b>, so Strict Absorb reads "DATA OFF" for every row here. '
-    + 'That is a missing data source, <b>not</b> a rejected absorption, and it is not the canonical server verdict.'
+    + 'That is a missing data source, <b>not</b> a rejected absorption, and it is not the canonical server verdict. '
+    // The same fallback also empties scanner columns, which is where it actually gets
+    // noticed: the legacy feed has no 4h or 12h change at ALL, and only partial 1h.
+    + 'The legacy feed also has <b>no 4h and no 12h change</b>, and only partial 1h — so those scanner columns stay blank while on it. 24h is unaffected.'
     + '</div>';
 }
 
@@ -10314,7 +10317,7 @@ function renderTradingRadarPanel() {
     // regardless of what the canonical verdict says. Doing that silently is what
     // made the panel look like it was contradicting itself every cycle, so the
     // active source and the reason are now stated instead of implied.
-    if (_canonicalContextEnabled()) {
+    {
       // A bare "PENDING" sent the owner looking in the wrong place, so name the stage
       // that is actually missing. These codes come from the server read.
       const PENDING_REASONS = {
@@ -10323,15 +10326,20 @@ function renderTradingRadarPanel() {
         RADAR_RESULT_EMPTY: 'the RADAR publisher ran but produced no candidates',
         RADAR_STATE_EMPTY: 'the atomized RADAR state table is empty and no run snapshot exists yet',
       };
-      const reason = !window.__canonicalContext ? 'not loaded yet'
+      // The canonical read is a BROWSER flag, not a server setting. With it off the
+      // terminal silently served the legacy feed, which has no 4h/12h change at all —
+      // so those scanner columns were blank and nothing on screen said why, or that a
+      // switch existed. Saying "disabled" is the whole point: server env vars cannot
+      // turn this on.
+      const reason = !_canonicalContextEnabled()
+        ? 'the canonical read is DISABLED in this browser — set localStorage radarCanonicalContextRead = "true" and reload (a server env var cannot enable it)'
+        : !window.__canonicalContext ? 'not loaded yet'
         : window.__canonicalContext.failed ? `/api/context failed — ${window.__canonicalContext.failureReason || 'error'}`
         : !canonicalRadar ? 'no canonical RADAR in the response'
         : PENDING_REASONS[canonicalRadar.pendingReason]
           || `canonical RADAR status ${String(canonicalRadar.status || 'unknown').toUpperCase()}`;
       console.warn('[CANONICAL] radar panel is showing the legacy browser feed:', reason);
       mainHtml = _radarLegacySourceNoticeHtml(reason, _esc) + _renderTradingRadar(fleetRadar, _esc);
-    } else {
-      mainHtml = _renderTradingRadar(fleetRadar, _esc);
     }
   }
   // Provider Status / Absorb Diagnostics belong INSIDE the existing RADAR panel's
