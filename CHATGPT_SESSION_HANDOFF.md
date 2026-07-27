@@ -13,6 +13,271 @@
 > `/reply` or `/admin_summary` support system** here. If you find yourself
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
+> _Venue keying fixed — spot and futures are no longer interchangeable (2026-07-27,
+> local-only, uncommitted):_ **Closes the long-standing "known gap, deliberately NOT
+> fixed".** Spot and futures are different books, different flow, different depth, but
+> the rolling snapshot and the candle snapshot were both keyed by SYMBOL alone. Two
+> consequences: (a) at write time one venue's measurement silently replaced the
+> other's, and (b) at read time a candidate could be handed the OTHER venue's data —
+> a **wrong** execution/reclaim reading, not a missing one. The store had been working
+> around (a) with `DISTINCT ON (symbol)`, whose own comment admitted the cause.
+>
+> Both snapshots now accept venue-qualified keys (`"spot:BTCUSDT"`) alongside bare
+> ones, via new exports `rollingKeyFor`/`parseRollingKey`
+> (`rolling-microstructure-snapshot.mjs`) and `klinesKeyFor`
+> (`klines-snapshot.mjs`). Bare keys stay fully supported — the futures producer and
+> the legacy static snapshots emit them, and dropping those would silently lose the
+> feeds. `normalizeRow` now preserves `market`, which is what lets a lookup refuse.
+>
+> Lookups are venue-scoped and **fail closed**: `getFreshRollingMicrostructureForSymbol`
+> and `getFreshClosedKlinesForSymbol` take `opts.market`, and when the requested venue
+> was not measured they return **null → UNKNOWN** rather than substituting the other
+> venue. A bare-keyed row is usable only if it does not claim a different venue. With
+> no venue requested and two venues present, the result is null rather than a guess.
+> `withRollingMicrostructureSnapshot` and `withComputedStructuralReclaim` pass the
+> candidate's own `market.market`.
+>
+> `getRadarInputBundle` drops `DISTINCT ON (symbol)` — spot and futures are now
+> distinct measurements and neither has to be discarded, so `topN` bounds
+> MEASUREMENTS rather than symbols (which is what the collector's per-venue budgets
+> already produced). `buildKlinesSnapshot` keys by venue too. Coverage diagnostics
+> now report each venue under its own key, so a dropped venue can no longer hide:
+> `DISTINCT_SYMBOLS` 2 / `COLLAPSED_DUPLICATES` 0 where it used to be 1 / 1.
+>
+> Tests: new `tests/radar-venue-keying.test.mjs` (9 cases, including the exact bug —
+> a spot request against a futures-only snapshot returns null). Four existing tests
+> updated to the intentionally-changed keys/behaviour, one renamed from "reported as a
+> collapse" to "kept as separate measurements". Full suite green (1881 pass / 0 fail /
+> 26 skipped). No push, no deploy.
+>
+> _Cockpit wired to the canonical DB (2026-07-27, local-only, uncommitted):_ The
+> Cockpit previously read **no database at all** — its only endpoints were the
+> personal-watch ones, so it worked off whatever copy of the RADAR candidate the
+> scanner happened to hold in the browser. New authenticated, GET-only, read-only
+> route **`/api/cockpit-radar-state`** (`netlify/functions/cockpit-radar-state.mjs`)
+> answers exactly one question — the server's current RADAR verdict for ONE coin —
+> straight off the `(market, symbol)` primary key, instead of making the Cockpit pull
+> the whole 2000-ticker `/api/context` payload.
+>
+> Boundaries: `OPTIONS` 204 before auth or DB; non-GET 405; unverified/failed/
+> unimportable auth 401 before the store loads; malformed symbol **400** (validated
+> `^[A-Z0-9]{2,32}$` at the boundary *and* in the store); an unsupported `market`
+> value is dropped rather than trusted; DB failure 503. A coin the server has not
+> scored is a distinguishable **404 `NOT_SCORED`** with `found:false` and no `state`
+> key — never an empty verdict. Response is an explicit column projection (scores,
+> reclaim, absorb, full trade plan) plus `computedAt`/`ageMs`/`freshness`
+> (FRESH ≤ 2 collector cycles, else STALE, `UNKNOWN` on an unusable timestamp) — the
+> stored `payload` blob is deliberately NOT echoed.
+>
+> Frontend: new "Server RADAR verdict" block in the Cockpit RADAR focus card
+> (`_cpRadarStateSlotHtml` / `_cpRadarStateInnerHtml` / `_refreshCockpitRadarState`),
+> 30s cache, 6s abort timeout, one in-flight read per coin. **"Not scored" and "read
+> failed" render as different facts** — the former says it is a coverage gap and
+> explicitly *not* a rejected setup, the latter says it is a failed read and
+> explicitly *not* a "no setup" result. An uncomputed score renders `UNKNOWN`, never
+> `0`. Staleness is stated, not left to inference. Display-only: it triggers no
+> import, no form fill, no trade action. Cache-bust **`?v=6j2` → `?v=6j3`**.
+>
+> Tests: `tests/cockpit-radar-state.test.mjs` (11 cases) +
+> `tests/frontend.cockpit-radar-state.test.mjs` (6 source guards); full suite green
+> (1872 pass / 0 fail / 26 skipped). No push, no deploy.
+>
+> _Atomized per-symbol RADAR state replaces the run-keyed read (2026-07-27,
+> local-only, uncommitted):_ **Fixes the "Strict Absorb OK, then DATA OFF a minute
+> later" oscillation.** `radar_run_snapshots` is keyed
+> `run_id PRIMARY KEY REFERENCES market_collection_runs`, and the canonical read
+> resolved "newest published market run → that run's RADAR result". The collector
+> marks a run published at the END of collection
+> (`_market-context-store.mjs` `completeCollectionRun`) and only THEN scores it
+> (`market-context-collect-background.mjs:38-43`), so between those two moments the
+> newest run existed with no RADAR row and the read returned `status: 'PENDING'`.
+> The terminal renders canonical only on `READY` and otherwise **silently** fell back
+> to the legacy browser-computed Fleet radar, which has no server rolling
+> microstructure — hence "DATA OFF" on every row. Both readings were true, about
+> different runs.
+>
+> **New migration `20260727100000_add_radar_candidate_state`** — atomized, indexed,
+> one row per coin: `PRIMARY KEY (market, symbol)`, upserted in place, carrying its
+> own `computed_at` + `observed_at`. `run_id` is provenance only
+> (`ON DELETE SET NULL`), never a dependency, so retention pruning a run can neither
+> delete nor orphan current RADAR state. All 12 spec scores, reclaim/absorb status,
+> and the full trade plan (entry zone, stop, hard invalidation, TP1–3, position size)
+> are real columns, not JSONB; the whole evaluator output is still kept in `payload`
+> so nothing is lost. Six indexes: `computed_at DESC`, `symbol`, `status`,
+> `(setup_score DESC, execution_score DESC)`, a **partial** index
+> `WHERE entry_ready` for the alert path's hot query, and
+> `(strict_absorb_confirmed, absorb_status)`.
+>
+> New store exports: `upsertRadarCandidateStates` (batched multi-row upsert),
+> `getRadarCandidateStates` (universe, best setup first), `getRadarCandidateState`
+> (**single coin — the read the Cockpit needs**, symbol validated `^[A-Z0-9]{2,32}$`
+> before it reaches the DB, spot preferred when a symbol trades on both venues).
+> `getAtomizedMarketContext` and `getPublishedRadar` now read via a new
+> `readCanonicalRadar`: candidates + freshness from the atomized state, aggregate
+> diagnostics (pipeline / funnel / provider status / regime) still from the newest run
+> snapshot, which may belong to an earlier run — reported as `diagnosticsRunId`
+> rather than hidden, and no longer able to force the whole read to PENDING. The
+> publisher writes BOTH (run-keyed history + atomized state) and **fails loudly** if
+> the state write fails, because the read path serves that table.
+>
+> Fail-closed guarantees, each test-covered: a status the V1 machine never produced
+> is stored as `'UNKNOWN'` (never coerced into a neighbouring state, never dropped —
+> that would lose the coin); missing scores stay `NULL` → UNKNOWN, never `0`; an
+> unparseable `POSITION_SIZE_GUIDANCE` stores `NULL` **not** `0`, because `0%` is
+> itself a real verdict (`RISK_OFF_BLOCKED`); an empty candidate set writes nothing
+> rather than clearing the table; a DB failure returns `DB_UNAVAILABLE` and never
+> throws into the publisher.
+>
+> **Frontend (display-only):** the canonical→Fleet switch is no longer silent — a new
+> `_radarLegacySourceNoticeHtml` banner names the active source and the reason, and
+> states that "DATA OFF" there is a **missing data source, not a rejected
+> absorption**; the switch is also `console.warn`ed. A failed `/api/context` now
+> replaces `window.__canonicalContext` with an explicit `failed` marker instead of
+> leaving the previous cycle's object rendering as current. Cache-bust
+> **`?v=6j1` → `?v=6j2`** (all 11 assets).
+>
+> Tests: 9 new store cases + 3 new frontend source guards; full suite green
+> (1855 pass / 0 fail / 26 skipped). No scoring, gate, threshold, ENTRY_READY,
+> Telegram, or trading change. `radar_run_snapshots`/`radar_run_candidates` are
+> deliberately untouched — they remain the per-run funnel history.
+> **A push auto-applies this migration to production.** No push, no deploy.
+>
+> _Microstructure budget ranked by dislocation, not liquidity (2026-07-27,
+> local-only, uncommitted):_ **Root cause of "RADAR never produces ENTRY_READY".**
+> The measurement budget was allocated as `rankByQuoteVolume(tickers).slice(0, topN)`
+> — purely by liquidity. Order-book support + flow confirmation are 25% + 25% of
+> `EXECUTION_SCORE`, so a coin with no measurement cannot reach the 65 gate. That
+> spent every slot on the largest majors, which are precisely the coins that rarely
+> produce the setup RADAR looks for (2–3× ATR dislocation + long flush), while the
+> mid-caps that actually flushed sat at rank #100–500 and were **never measured** —
+> so the entry branch was structurally dead for exactly the population the strategy
+> targets. The RADAR was not mis-scoring; it was scoring a population that cannot
+> contain the setup.
+>
+> New pure `rankMicrostructureBudget(tickers, { topN, poolSize, majorSlots })` in
+> `_binance-market-context-source.mjs` splits the budget inside the liquid pool:
+> `majorSlots` (default 20) reserved for top-liquidity so BTC/ETH context never
+> drops, every remaining slot to the deepest 24h **drawdowns**. Only negative moves
+> earn a dislocation slot (a pump is not this setup); a missing/unusable
+> `priceChangePercent` counts as zero dislocation, so it stays eligible via the
+> liquidity slots but never displaces a measured real drop. `poolSize` (default 400)
+> bounds tradeability — a pair the universe filter would reject never consumes a
+> slot. Deterministic (depth, then symbol), no duplicates, no new external fetch:
+> `priceChangePercent` is already in the 24h ticker payload, so this costs **zero
+> extra requests**. `rankByQuoteVolume` is unchanged and still ranks multi-timeframe.
+> Every cycle now logs `[MARKET_CONTEXT] microstructure_budget`
+> (measured / poolCandidates / withDrawdown / deepestDropPct) — the difference
+> between "RADAR found no setup" and "RADAR could not have found one".
+> New env: `MARKET_CONTEXT_MICROSTRUCTURE_POOL_SIZE`,
+> `MARKET_CONTEXT_MICROSTRUCTURE_MAJOR_SLOTS` (both optional, defaults above).
+> **Owner action for rollout: set `MARKET_CONTEXT_MICROSTRUCTURE_TOP_N=200`** (was
+> effectively 5). Tests: 7 new cases in `tests/binance-market-context-source.test.mjs`;
+> full suite green (1840 pass / 0 fail / 26 skipped). No gate, threshold, scoring,
+> ENTRY_READY, Telegram, or trading change. No push, no deploy.
+>
+> **Corrected earlier claim:** a global provider-level `trusted` veto was suspected
+> of discarding every symbol's microstructure. It does **not** fire in the publisher
+> path — `buildCollectorRollingSnapshot` always supplies `trusted: true`
+> (`collector-absorb-bridge.mjs:137`) and the publisher's staleness is
+> self-referential, so `trusted` resolves true. Per-symbol `strictReady` is the real
+> gate and works (live: `STRICT_READY 47/50`).
+>
+> **Architecture status against the owner's stated target** (one atomized indexed DB;
+> scanner ingests into it and reads indicators from it; RADAR computes/watches
+> factors incl. reclaim + absorb from it; Cockpit reads it to work a selected coin;
+> the bot later reads it too):
+> - **Ingest + storage: DONE.** `20260724190000_replace_context_snapshots_with_atomic_market_records`
+>   created 6 atomized tables with 11 indexes (`market_instruments`,
+>   `market_ticker_observations`, `market_candles_1m`, `market_order_book_levels`,
+>   `market_agg_trades`, `market_microstructure_measurements` + `absorb` JSONB).
+> - **RADAR layer: DONE** as of the entry above (atomized per-symbol state).
+> - **Scanner read: PARTIAL.** It reads the DB only when
+>   `RADAR_CANONICAL_CONTEXT_READ` is on; otherwise `/api/markets`, which is live
+>   Binance/CoinGecko, **not** the DB. The fallback is now visible, not silent.
+> - **Cockpit read: DONE** — `/api/cockpit-radar-state` + the "Server RADAR verdict"
+>   block read the atomized `(market, symbol)` row for the selected coin.
+> - **Bot read: NOT WIRED** (`bot.mjs` does not import the market context store).
+>   Deliberately deferred by the owner.
+>
+> **Still open:** (1) The publisher's rolling-snapshot freshness is self-referential
+> (`updatedAtMs === nowMs === rollingNowMs` in `_radar-context-publisher.mjs:132-141`
+> against the `stale` test in `rolling-microstructure-snapshot.mjs:118`), so the
+> snapshot-level staleness check cannot fail by construction; per-row
+> `validateTrustedRollingRow` is the real gate and does work.
+>
+> _GROUND-TRUTH COMMIT STATE (2026-07-27, refreshed):_ Active branch is
+> **`integrate/canonical-context`**. The RADAR plumbing rebuild above is committed
+> as five commits on top of `91de7ab`: `ada8448` (budget by dislocation),
+> `182df98` (venue keying), `3b681ce` (atomized RADAR state + migration),
+> `87826fc` (Cockpit DB read + visible source fallback), plus this docs commit.
+> Still-uncommitted working-tree edits, unrelated to that work: `.gitignore`
+> (ignore `artifacts/backtests/`), `docs/kucoin-architecture.md` (+§14 KuCoin
+> public-candle backtest MVP), `.claude/settings.local.json`. The deployed branch
+> **`origin/main` is `cf426d3`** ("Keep spot collection when futures is
+> unavailable") — the whole canonical-context line (~30 commits) is **NOT merged
+> to `main`** yet. Uncommitted working-tree edits only: `.gitignore` (ignore
+> `artifacts/backtests/`), `docs/kucoin-architecture.md` (+§14 KuCoin
+> public-candle backtest MVP), `.claude/settings.local.json`. **Supersedes every
+> older "Current local state" line below that still claims `origin/main =
+> d4baac1` / `0 4` / `handoff correction` — those are stale.**
+>
+> _Terminal restore + collector staleness + tracked-coin notifications
+> (2026-07-27, branch `integrate/canonical-context`, pushed):_
+>
+> **Four canonical-path handoff defects fixed (`893e957`)** — all in what the
+> publisher hands the terminal, not in the data. (1) **Safety blank** on nearly
+> every coin: the scanner reads `row.safetyStatus` but canonical rows are raw
+> atoms with none; `context.mjs` now annotates each ticker via the pure I/O-free
+> classifier (SAFE, basis CEX_LISTING), leaving rows unannotated on classifier
+> failure rather than failing the read. (2) **1h/4h/12h/7d missing beyond the
+> first 300 coins**: the multi-timeframe budget was bounded at 300 while the
+> terminal lists ~1000; ceiling raised and those requests now share the SAME
+> per-venue pacer as the microstructure reads (two independent pacers would each
+> assume the whole allowance). (3) **"No reclaim data" everywhere**: the reclaim
+> evaluator looks up source levels under scanner field names `high_24h`/`low_24h`
+> but the publisher emitted only `highPrice`/`lowPrice`
+> (RECLAIM_DATA_SOURCE_MISSING → SOURCE_DATA_PRESENT once aligned). (4) **Strict
+> absorb "DATA OFF" everywhere**: the RADAR staleness check `updatedAtMs > now +
+> 60s` used `now` = run START while the data completed ~94s later, so the
+> snapshot marked itself stale.
+>
+> **Two more collector-staleness root causes (same class, one level down):**
+> `fa3ab14` — absorption was computed against the run's single `observedAt`
+> (stamped only after every symbol is read), so a symbol fetched at the start of
+> a paced multi-minute cycle had all its trades fall outside the window, empties
+> the sample, and `computeRollingAbsorption` returned nothing (live: STRICT_READY
+> → 0, every absorption field missing). Each microstructure row now carries
+> `fetchedAtMs` and is measured against ITS own read time; the count of symbols
+> whose read time differs materially from cycle end is reported. `1b369d9` —
+> `validateTrustedRollingRow` tolerates 60s skew but the paced ~94s cycle made
+> end-of-cycle measurements newer than the run's `observed_at`, rejecting every
+> symbol as `measurement-stale`; the rolling snapshot is now validated against
+> the NEWEST measurement (the moment its data was actually complete). Neither
+> surfaced while a cycle took ~20s.
+>
+> **Tracked-coin awareness notifications (`91de7ab`)** — new `BIG_MOVE` /
+> `TAKE_PROFIT` / `STOP_LOSS` Telegram path for watched coins, deliberately a
+> SEPARATE scheduled run from `personal-alerts.mjs` so it can never weaken the
+> entry gate (that path stays the confirmed-`ENTRY_READY`-only sender). New
+> files: `_personal-watch-notifier.mjs`, `_personal-watch-triggers.mjs`,
+> `personal-watch-triggers-scheduled.mjs`. **Off unless
+> `PERSONAL_WATCH_TRIGGERS_ENABLED` is exactly `'true'`.** A watch record holds
+> only `{ symbol, addedAt }` — no stored entry price — so TP/SL levels are read
+> from the canonical RADAR candidate and the message says *"level published by
+> RADAR"*, never *"your position hit take profit"*. Fail-closed throughout: no
+> price / no published level → no trigger; BIG_MOVE skips an absent window rather
+> than reading 0%; TP reports the highest level reached (never one message per
+> level, never resent); a failed send is not recorded as delivered. Scheduled
+> **natively by Netlify** (not an external workflow). Covered by
+> `tests/personal-watch-notifier.test.mjs` + `tests/personal-watch-triggers.test.mjs`.
+>
+> **Docs (no runtime):** `5bf1f3b` adds `docs/trade-execution-architecture.md`
+> (proposal grounded in the existing local key-holding worker / worker protocol /
+> execution intents / sizing table — nothing built or wired, every gate
+> fail-closed). Uncommitted `docs/kucoin-architecture.md` §14 records the
+> local-only KuCoin public-candle backtest MVP (Spot + fixedNotional only,
+> Futures deferred, artifacts Git-ignored).
+>
 > _Universe scale-out + alert path (2026-07-26 evening, branch
 > `integrate/canonical-context`):_ Goal restated by the owner: an atomized DB
 > with indexes, RADAR evaluating the WHOLE universe, and any coin meeting the
@@ -355,10 +620,12 @@ Defaults:
   unchanged, Supabase holds no product data.
 - **Local repo path (owner machine):**
   `C:\Users\Ales\Desktop\Bots\terminal crypto\terminal-X`
-- **Current local state:** `origin/main...HEAD = 0 4` at HEAD `handoff correction`.
-  The three unpushed runtime commits are `c26652a`, `3d75047`, and `d6e047e`;
-  `handoff correction` is the handoff-only correction. **Do not assume any local commit
-  is live.**
+- **Current local state (2026-07-27):** active branch
+  **`integrate/canonical-context`**, HEAD **`91de7ab`**, **pushed** (origin in
+  sync). Deployed **`origin/main` = `cf426d3`**; the canonical-context line is
+  **NOT merged to `main`**. Uncommitted working edits: `.gitignore`,
+  `docs/kucoin-architecture.md`, `.claude/settings.local.json`. **Do not assume
+  any branch commit is live** — only what is on `origin/main` is deployed.
 - **Read-first docs** (see §4).
 
 ## 4. Mandatory repo read order for new coding-agent sessions
@@ -942,10 +1209,13 @@ _(Grounded in git + docs; do not over-invent.)_
 
 - Keep this handoff **and** `AGENTS.md` / `docs/` synchronized after behavior
   changes (§16).
-- **Current local state:** `origin/main...HEAD = 0 4` at `handoff correction`; the
-  runtime safety review passed; the handoff-only correction is complete. Next step is
-  owner push approval — a push auto-applies the pending price-history migration
-  to production.
+- **Current local state:** branch `integrate/canonical-context` (HEAD `91de7ab`,
+  pushed) carries the whole canonical-context line; **`origin/main` = `cf426d3`**
+  is deployed and the branch is **not merged**. Next step is owner review + merge
+  approval — a merge/push to `main` auto-applies all still-pending migrations
+  (price-history + the `20260724…`/`20260726…` market-context/absorb set) to
+  production. Keep `RADAR_ALERTS_CANONICAL_SOURCE`, `RADAR_TELEGRAM_ENABLED`, and
+  `PERSONAL_WATCH_TRIGGERS_ENABLED` unset until a separate enablement approval.
 - **Next DB phase:** the scheduled collector/pruner (branch
   `feat/price-history-scheduler`) is implemented and tested but **not
   enabled** — follow `docs/price-history-scheduler.md`'s flag-by-flag

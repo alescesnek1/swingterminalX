@@ -15,14 +15,23 @@ cutover (a separate, later step).
 |------|---------|---------|
 | `MARKET_CONTEXT_COLLECT_ENABLED` | `false` | Master switch for the 3-minute collector (writes atomic market records to Postgres). |
 | `MARKET_CONTEXT_FUTURES_ENABLED` | `false` | **Keep false.** Binance futures egress from Netlify is unverified; spot only for now. |
-| `MARKET_CONTEXT_MICROSTRUCTURE_TOP_N` | `5` | How many top-volume symbols get deep microstructure (depth/trades/klines). Max 8. Calibrate only after shadow soak. |
+| `MARKET_CONTEXT_MICROSTRUCTURE_TOP_N` | `5` | How many symbols get deep microstructure (depth/trades/klines). Max 600; ~9 request weight each. **This is the ceiling on how many coins can ever become `ENTRY_READY`** — order-book support + flow are 50% of `EXECUTION_SCORE`, and an unmeasured coin cannot reach the 65 gate. Current rollout target: `200`. |
+| `MARKET_CONTEXT_MICROSTRUCTURE_POOL_SIZE` | `400` | Size of the liquid pool the budget may draw from (ranked by USD-stable 24h quote volume). Bounds tradeability: a pair outside this pool never consumes a measurement slot, because the universe filter would reject it anyway. |
+| `MARKET_CONTEXT_MICROSTRUCTURE_MAJOR_SLOTS` | `20` | Slots reserved for the top-liquidity coins, so BTC/ETH/major context is always measured. Every remaining slot goes to the deepest 24h drawdowns inside the pool — the coins that can actually carry a dislocation+flush setup. A pump earns no slot. |
 | `MARKET_CONTEXT_MULTI_TF_ENABLED` | `false` | Collect 1h/4h/12h/7d % change (Binance rolling-window ticker) for the top-N symbols. Off = scanner shows only 24h; 1h/4h/12h/7d are UNKNOWN. |
 | `MARKET_CONTEXT_MULTI_TF_TOP_N` | `300` | How many top-volume symbols get multi-timeframe change. Max 500. Bounded by the Binance rate-limit budget; the long tail stays UNKNOWN. |
-| `MARKET_CONTEXT_RADAR_ENABLED` | `false` | Master switch for the server RADAR publisher (computes + persists RADAR per published run). |
+| `MARKET_CONTEXT_RADAR_ENABLED` | `false` | Master switch for the server RADAR publisher. Writes both the per-run history (`radar_run_snapshots`/`radar_run_candidates`) and the atomized current state (`radar_candidate_state`, one upserted row per `(market, symbol)`), which is what `/api/context` and the alert path read. |
 | `MARKET_CONTEXT_RETENTION_ENABLED` | `false` | Master switch for the hourly retention sweep. |
 | `MARKET_CONTEXT_RETENTION_MARKET_HOURS` | `48` | How long to keep heavy market rows (min 6h floor). |
 | `MARKET_CONTEXT_RETENTION_RADAR_HOURS` | `168` | How long to keep RADAR results (for 24h/7d funnel); never shorter than the market window. |
-| `RADAR_CANONICAL_CONTEXT_READ` *(frontend)* | `false` | Frontend cutover switch: read Scanner/RADAR from `/api/context` instead of the legacy `/api/markets` + Fleet path. Legacy path stays as fallback. |
+| `RADAR_CANONICAL_CONTEXT_READ` *(frontend)* | `false` | Frontend cutover switch: read Scanner/RADAR from `/api/context` instead of the legacy `/api/markets` + Fleet path. Legacy path stays as fallback, and the switch to it is now stated on screen (it carries no server rolling microstructure, so Strict Absorb reads "DATA OFF" there). |
+
+## Read routes over the canonical DB
+
+| Route | Auth | Scope | Notes |
+|-------|------|-------|-------|
+| `/api/context` | verified Supabase JWT | Whole universe | Tickers + microstructure + the full RADAR candidate set. RADAR comes from the atomized `radar_candidate_state`, so a freshly published-but-unscored run no longer reads PENDING. |
+| `/api/cockpit-radar-state?symbol=X[&market=spot\|futures]` | verified Supabase JWT | **One coin** | GET-only, read-only. Serves the Cockpit off the `(market, symbol)` primary key. `404 NOT_SCORED` when the server has not scored that coin (a coverage gap, distinct from an error); `400 INVALID_SYMBOL`; `503 DB_UNAVAILABLE`. Reports `computedAt`/`ageMs`/`freshness` so a stale verdict can never render as current. |
 
 ## One-time prerequisite
 
