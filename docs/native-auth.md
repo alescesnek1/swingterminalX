@@ -3,9 +3,31 @@
 Moving login off Supabase and into the Netlify/Neon database, so the owner can
 add and manage users directly.
 
-**Status: backend complete and tested, disabled by default. The browser still
-signs in through Supabase — the terminal UI switch is the remaining piece.**
-Nothing in this document is active until the env flags below are set.
+**Status: complete and tested end to end (backend + browser), disabled by
+default and NOT yet deployed.** Nothing here is active until
+`NATIVE_AUTH_ENABLED` is set and the branch is deployed.
+
+Already done, so it is not on the owner's list:
+
+- `AUTH_JWT_SECRET` is **set in Netlify for all contexts** (64 chars). Verified by
+  length only; the value was never printed.
+- `BOT_ADMIN_EMAILS` was already set in the production context
+  (`ales.cesnek@thevld.com, vld@thevld.com`), which is what the admin endpoint
+  authorizes against.
+- `NATIVE_AUTH_ENABLED` is deliberately **left unset**.
+
+⚠️ **Read this before deploying.** Netlify applies migrations in
+`netlify/database/migrations/` automatically on deploy, and only ONE of the ten
+is currently applied in production (`20260720081238_init-observability-tables`).
+**The next deploy therefore applies nine migrations at once**, including
+`20260724190000_replace_context_snapshots_with_atomic_market_records`, which runs
+six `DROP TABLE IF EXISTS` statements.
+
+That is safe *in this specific case*: every table it drops is created by
+`20260724150000_add_market_context_revision_store`, which is also pending, so on
+production those tables do not exist yet and the drops are no-ops. But it is a
+pre-existing condition of this repo, not something native auth introduced, and it
+deserves a deliberate look rather than being discovered mid-deploy.
 
 ---
 
@@ -137,57 +159,83 @@ and is not, the defense is account lockout plus the platform's own protections.
 
 ## Rollout order
 
-Each step is separately reversible. **Do not skip step 4** — it is what prevents
-locking yourself out.
+Steps 1 and 2 are already done (see Status above). What remains:
 
-1. **Apply the migration.**
-   ```bash
-   npm run db:migrate:apply
-   ```
-   Creates the two tables. Changes no behaviour: nothing reads them yet.
+1. ~~Set `AUTH_JWT_SECRET`.~~ **Done** — all contexts, 64 chars.
 
-2. **Set `AUTH_JWT_SECRET` in Netlify** (≥ 32 chars, same value for functions and
-   edge). Leave `NATIVE_AUTH_ENABLED` unset. Still no behaviour change.
+2. ~~Create the tables.~~ **Nothing to run.** Netlify applies migrations on
+   deploy, so `app_users` and `app_user_audit` appear as part of step 3. (Read
+   the migration warning in Status first.)
 
-3. **Create the accounts while still signed in through Supabase.** This is what
-   avoids the chicken-and-egg problem: `/api/admin-users` authorizes off
-   `BOT_ADMIN_EMAILS`, which is auth-source-agnostic, so your existing Supabase
-   session can create the first native accounts. No bootstrap secret exists,
-   deliberately.
+3. **Deploy the branch.** This is the one step that cannot be delegated —
+   `AGENTS.md` requires explicit owner approval for any deploy, and a push to the
+   deploy branch *is* a deploy. Nothing changes for users: with
+   `NATIVE_AUTH_ENABLED` unset, the login form still authenticates through
+   Supabase exactly as before, and `/api/auth-login` answers
+   `503 NATIVE_AUTH_DISABLED`.
 
-   Create your own account **first**, and copy the generated password
-   immediately — it is shown exactly once and is never stored in plaintext,
-   logged, or written to the audit table.
+4. **Create the accounts, still signed in through Supabase.** The 👤 UŽIVATELÉ
+   button appears in the header for admin emails. Create your own account
+   **first** and copy the generated password immediately — it is shown exactly
+   once and is never stored in plaintext, logged, or written to the audit table.
 
-4. **Verify a native login works BEFORE enabling anything.** With
-   `NATIVE_AUTH_ENABLED` still unset, `/api/auth-login` returns
-   `503 NATIVE_AUTH_DISABLED` — that is the expected answer and confirms the
-   endpoint is deployed and gated. Confirm the account exists in the admin list.
+   This works before the flag is on because `/api/admin-users` authorizes off
+   `BOT_ADMIN_EMAILS`, which is auth-source-agnostic. That is what avoids the
+   chicken-and-egg problem, with no bootstrap secret.
 
-5. **Set `NATIVE_AUTH_ENABLED=true`.** Both token kinds are now accepted, so your
-   Supabase session keeps working. Sign in with the native credentials in a
-   private window and confirm the terminal loads.
+5. **Set `NATIVE_AUTH_ENABLED=true` and redeploy.** Both token kinds are now
+   accepted, so your Supabase session keeps working. Sign in with the native
+   credentials in a private window; the terminal should force a password change
+   on first use, then load normally.
 
-6. **Only then** consider removing the Supabase path. Until that step both
-   sources work, and reverting is `NATIVE_AUTH_ENABLED=false` plus a redeploy.
+6. **Only then** consider removing the Supabase path. Until that point both
+   sources work.
 
-To roll back at any point: unset `NATIVE_AUTH_ENABLED`. Native tokens are
-immediately refused again and Supabase is untouched.
+To roll back at any point: unset `NATIVE_AUTH_ENABLED` and redeploy. Native
+tokens are refused again and Supabase is untouched.
 
 ---
 
+## The browser side
+
+`apps/edge/public/js/auth-client.js` is the façade (`window.AuthClient`), loaded
+before `terminal.js`. Everything that needs a token goes through
+`AuthClient.getAccessToken()`, so `_getAuthHeaders()` in `terminal.js` is
+identical for both identity sources.
+
+**It is self-configuring, deliberately.** There is no flag in the browser:
+`signIn()` posts to `/api/auth-login` and, if that answers
+`503 NATIVE_AUTH_DISABLED`, falls back to Supabase transparently. So the same
+build works on both sides of the cutover and reverting needs no frontend change.
+A config flag in the browser would be a second source of truth that could
+disagree with the server.
+
+Token handling:
+
+- Stored in `localStorage`, matching what the Supabase SDK already does here — so
+  this is not a new exposure. The mitigation that actually matters is the short
+  lifetime plus database-checked refresh, not the storage choice.
+- Refreshed at 75% of the token's life. A **503** keeps the current token and
+  retries; a **401** signs the user out and clears storage. That asymmetry is the
+  point: a database blip must not log a healthy user out, but a genuinely revoked
+  session must not linger.
+- A restored session is confirmed against the server before the app opens, which
+  is what catches an account disabled while the tab was closed.
+
+`apps/edge/public/js/admin-users-panel.js` is the 👤 UŽIVATELÉ panel and the
+forced-password-change dialog. It is visible only when `window.__isAdmin`, which
+is a UI convenience, **not** the security boundary — unhiding it in devtools
+reveals nothing, because every request still has to pass the server-side check.
+
 ## Still to do
 
-- **The browser UI.** `terminal.js` still signs in via
-  `supabaseCl.auth.signInWithPassword` and builds its `Authorization` header from
-  `sb.auth.getSession()`. Switching it needs: a login form that posts to
-  `/api/auth-login`, token storage, a background call to `/api/auth-refresh`
-  before expiry, a forced password change when `mustChangePassword` is true, and
-  the admin users panel.
-- **A "change my own password" endpoint.** Today only an admin can reset a
-  password, so `mustChangePassword` cannot yet be satisfied by the user.
 - **Tier for native users.** `getTier()` resolves a native non-admin to `free`,
   exactly as it does a Supabase user with no tier metadata. `app_users` has no
-  tier column — a product decision, not an oversight.
-- Removing the hardcoded Supabase anon key fallback in `terminal.js`
-  (`_FALLBACK_SUPABASE`) once the browser no longer needs Supabase at all.
+  tier column — a product decision, not an oversight. Admin emails are `pro` via
+  the hardcoded allowlist in `lib/tier.js`, so the owner is unaffected.
+- **Removing Supabase entirely.** Once native auth is proven in production:
+  delete the CDN `<script>` for `supabase-js`, the `_FALLBACK_SUPABASE` hardcoded
+  anon key in `terminal.js`, and the Supabase branch in both verifiers. Not done
+  yet on purpose — keeping both paths is what makes the cutover reversible.
+- **Per-IP rate limiting** on `/api/auth-login`, if it ever becomes public-facing.
+  Today the defense is per-account lockout (see above).

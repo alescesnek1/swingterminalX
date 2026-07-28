@@ -601,14 +601,27 @@ const LiveFeed = {
 };
 window.LiveFeed = LiveFeed;
 
-// Helper: get Supabase access token for news AI scoring
+// Helper: get the access token for news AI scoring.
+// Goes through AuthClient so it works with either identity source (native
+// account or Supabase) — see js/auth-client.js and docs/native-auth.md.
 async function _getAccessTokenForFeed() {
   try {
+    if (window.AuthClient) return await window.AuthClient.getAccessToken();
+    // Fallback for the (unexpected) case where auth-client.js failed to load.
     const sb = window.__supabase;
     if (!sb) return null;
     const { data: { session } } = await sb.auth.getSession();
     return session?.access_token || null;
-  } catch { return null; }
+  } catch (err) {
+    // A missing token is a legitimate state (signed out); a THROWN error is not,
+    // so it must be visible rather than collapsing into the same null.
+    console.warn('[AUTH] could not resolve an access token for the news feed:', err && err.message);
+    window.ErrorLog?.record({
+      level: 'warn', kind: 'auth', title: 'Token unavailable for news scoring',
+      reason: (err && err.message) || 'unknown', endpoint: '/api/auth',
+    });
+    return null;
+  }
 }
 
 // ========== CONFIG & STATE ==========
@@ -1741,15 +1754,29 @@ function _binanceDetailLinksHtml(d) {
   return html;
 }
 
-// V5: forward Supabase access token so /api/markets can resolve tier.
+// Forward the access token so the backend can resolve identity + tier.
+// Goes through AuthClient, so the SAME header works whether the user signed in
+// with a native account or through Supabase (js/auth-client.js).
+//
+// Returning `{}` means "no token" — every caller already treats a missing
+// Authorization header as "signed out" and shows that state, so an empty object
+// here is a real, handled result rather than a swallowed failure. A thrown error
+// is different and is logged.
 async function _getAuthHeaders() {
   try {
-    const sb = window.__supabase;
-    if (!sb) return {};
-    const { data: { session } } = await sb.auth.getSession();
-    if (!session?.access_token) return {};
-    return { 'Authorization': `Bearer ${session.access_token}` };
-  } catch { return {}; }
+    const token = window.AuthClient
+      ? await window.AuthClient.getAccessToken()
+      : (await window.__supabase?.auth.getSession())?.data?.session?.access_token || null;
+    if (!token) return {};
+    return { 'Authorization': `Bearer ${token}` };
+  } catch (err) {
+    console.warn('[AUTH] could not build auth headers:', err && err.message);
+    window.ErrorLog?.record({
+      level: 'warn', kind: 'auth', title: 'Could not build the Authorization header',
+      reason: (err && err.message) || 'unknown', endpoint: '/api/auth',
+    });
+    return {};
+  }
 }
 
 // Canonical Context Store read cutover (task 3). Additive + reversible: OFF by
@@ -11798,14 +11825,29 @@ window._wireSupabaseListeners = function _wireSupabaseListeners() {
 
       btn.disabled = true; btn.textContent = 'Ověřuji...'; err.classList.remove('visible');
 
+      // AuthClient tries the native account endpoint first and falls back to
+      // Supabase when the server has not been switched over yet, so this one
+      // handler covers both sides of the cutover (js/auth-client.js).
       try {
-        const { error } = await supabaseCl.auth.signInWithPassword({ email, password });
-        if (error) throw error;
+        const result = await window.AuthClient.signIn(email, password);
+        if (!result.ok) {
+          err.textContent = result.message || 'Přihlášení se nepovedlo.';
+          err.classList.add('visible');
+          window.Toast?.error('Login failed', `${result.message || 'Auth error'} (${result.reason || 'unknown'})`, {
+            endpoint: '/api/auth-login', code: result.reason,
+          });
+        } else if (result.mustChangePassword) {
+          // The account was created or reset by an admin, so the password is one
+          // the admin knows. Force a change before the terminal is usable.
+          _promptForcedPasswordChange();
+        }
       } catch (error) {
-        console.error('🔍 Supabase Login Error Detail:', error);
-        err.textContent = error.message || 'Chyba sítě nebo neplatný požadavek (více v konzoli).';
+        // AuthClient.signIn() is written not to throw, so reaching here means an
+        // unexpected fault — it must be visible, not a silent dead form.
+        console.error('[AUTH] sign-in threw unexpectedly:', error);
+        err.textContent = error?.message || 'Chyba sítě nebo neplatný požadavek (více v konzoli).';
         err.classList.add('visible');
-        window.Toast?.error('Login failed', error.message || 'Network or auth error', { endpoint: 'supabase.auth.signInWithPassword' });
+        window.Toast?.error('Login failed', error?.message || 'Unexpected auth error', { endpoint: '/api/auth-login' });
       } finally {
         btn.disabled = false; btn.textContent = 'PŘIHLÁSIT SE';
       }
@@ -11814,41 +11856,124 @@ window._wireSupabaseListeners = function _wireSupabaseListeners() {
 
   document.getElementById('logout-btn')?.addEventListener('click', async () => {
     if (confirm('Opravdu se chcete odhlásit?')) {
-      await supabaseCl.auth.signOut();
+      await window.AuthClient.signOut();
     }
   });
 
   supabaseCl.auth.onAuthStateChange((event, session) => {
+    // Keep AuthClient's view of the active mode accurate, so `_getAuthHeaders()`
+    // knows whether to read a native token or a Supabase one.
+    window.AuthClient?.noteSupabaseSession(Boolean(session));
     if (session) {
-      // V5: cache the user's tier on the global state so client-side
-      // gating (top coin cap, DEX visibility) can read it synchronously.
-      // Admin emails are mirrored client-side for UI labeling — but
-      // the actual tier enforcement happens server-side in lib/tier.js.
-      const email = String(session.user?.email || '').trim().toLowerCase();
-      const adminEmails = ['ales.cesnek@thevld.com', 'vld@thevld.com'];
-      const isAdmin = adminEmails.includes(email);
-      window.__userTier = isAdmin || session.user?.user_metadata?.tier === 'pro' ? 'pro' : 'free';
-      window.__isAdmin = isAdmin;
-      document.getElementById('auth-gate').hidden = true;
-      document.getElementById('terminal-app').style.display = 'block';
-      const emBtn = document.getElementById('user-email');
-      if (emBtn) {
-        const label = isAdmin ? 'ADMIN' : window.__userTier.toUpperCase();
-        emBtn.textContent = (session.user?.email || '—') + ' · ' + label;
-      }
-      initTerminalApp();
-    } else {
-      // V6.9 Sprint 2: nuke every observer + the 120s scanner refresh
-      // timer + LiveFeed's two intervals. Previously the app kept
-      // hammering /api/markets after signout (ghost network spam).
-      try { _terminalTeardown(); } catch (err) { console.warn('[AUTH] teardown failed:', err.message); }
-      window.__userTier = 'free';
-      window.__isAdmin = false;
-      document.getElementById('auth-gate').hidden = false;
-      document.getElementById('terminal-app').style.display = 'none';
+      _applyAuthenticatedState({
+        email: session.user?.email,
+        tierHint: session.user?.user_metadata?.tier,
+      });
+    } else if (window.AuthClient?.mode() !== 'native') {
+      // Only tear down if there is no NATIVE session holding the app open —
+      // otherwise a Supabase sign-out (or its initial null event) would blank a
+      // perfectly good native session.
+      _applySignedOutState();
     }
   });
 };
+
+// ── Shared auth-state application (both identity sources) ──
+// Extracted from the Supabase-only handler so a native session drives exactly
+// the same UI transitions. Called by onAuthStateChange above and by
+// AuthClient.onChange below.
+function _applyAuthenticatedState({ email, tierHint }) {
+  // Cache the user's tier on global state so client-side gating (top coin cap,
+  // DEX visibility) can read it synchronously. Admin emails are mirrored
+  // client-side for UI LABELLING only — the real enforcement is server-side in
+  // lib/tier.js, and the real admin authority is the BOT_ADMIN_EMAILS env
+  // allowlist checked in netlify/functions/_auth.mjs.
+  const normalized = String(email || '').trim().toLowerCase();
+  const adminEmails = ['ales.cesnek@thevld.com', 'vld@thevld.com'];
+  const isAdminUser = adminEmails.includes(normalized);
+  window.__userTier = isAdminUser || tierHint === 'pro' ? 'pro' : 'free';
+  window.__isAdmin = isAdminUser;
+
+  document.getElementById('auth-gate').hidden = true;
+  document.getElementById('terminal-app').style.display = 'block';
+
+  const emBtn = document.getElementById('user-email');
+  if (emBtn) {
+    const label = isAdminUser ? 'ADMIN' : window.__userTier.toUpperCase();
+    emBtn.textContent = (email || '—') + ' · ' + label;
+  }
+  _syncAdminUsersButton();
+  initTerminalApp();
+}
+
+function _applySignedOutState() {
+  // V6.9 Sprint 2: nuke every observer + the scanner refresh timer + LiveFeed's
+  // two intervals. Previously the app kept hammering /api/markets after signout.
+  try {
+    _terminalTeardown();
+  } catch (err) {
+    console.warn('[AUTH] teardown failed:', err.message);
+  }
+  window.__userTier = 'free';
+  window.__isAdmin = false;
+  document.getElementById('auth-gate').hidden = false;
+  document.getElementById('terminal-app').style.display = 'none';
+  _syncAdminUsersButton();
+}
+
+// Thin delegates to js/admin-users-panel.js. Kept as named functions here
+// because the auth-state code above calls them, and they must not throw if that
+// module failed to load.
+function _syncAdminUsersButton() {
+  try {
+    window.AdminUsersPanel?.syncButton();
+  } catch (err) {
+    console.warn('[AUTH] could not sync the admin users button:', err && err.message);
+  }
+}
+
+function _promptForcedPasswordChange() {
+  if (!window.AdminUsersPanel) {
+    // The obligation is real even if the panel is missing, so say so rather than
+    // letting the user sit on an admin-known password without knowing.
+    window.Toast?.warn('Změň si heslo', 'Tvoje heslo nastavil administrátor. Panel pro změnu se nepodařilo načíst — obnov stránku.');
+    return;
+  }
+  window.AdminUsersPanel.promptForcedPasswordChange();
+}
+
+document.getElementById('admin-users-btn')?.addEventListener('click', () => {
+  window.AdminUsersPanel?.open();
+});
+
+// Native sessions: AuthClient owns the token lifecycle (restore, refresh,
+// forced sign-out) and reports every transition here.
+window.AuthClient?.onChange((session, mode) => {
+  if (mode !== 'native') return; // Supabase transitions arrive via onAuthStateChange
+  if (session) {
+    _applyAuthenticatedState({ email: session.email, tierHint: null });
+    if (session.mustChangePassword) _promptForcedPasswordChange();
+  } else {
+    _applySignedOutState();
+  }
+});
+
+// Restore a stored native session on load. This runs independently of the
+// Supabase bootstrap: if a valid native token is in storage the app opens
+// straight away, and if the server has since disabled the account the refresh
+// inside init() fails and the gate stays up.
+(async function _restoreNativeSession() {
+  if (!window.AuthClient) return;
+  try {
+    await window.AuthClient.init();
+  } catch (err) {
+    console.warn('[AUTH] native session restore failed:', err && err.message);
+    window.ErrorLog?.record({
+      level: 'warn', kind: 'auth', title: 'Native session restore failed',
+      reason: (err && err.message) || 'unknown', endpoint: '/api/auth-refresh',
+    });
+  }
+})();
 
 // ── Module 4: Market Briefing trigger ──
 // We pick the top 3 coins by computed score from the *current* DATA

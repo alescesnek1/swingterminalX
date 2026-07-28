@@ -260,6 +260,8 @@ export default [
     files: [
       'apps/edge/public/js/error-log.js',
       'apps/edge/public/js/toast.js',
+      'apps/edge/public/js/auth-client.js',
+      'apps/edge/public/js/admin-users-panel.js',
       'apps/edge/public/js/terminal.js',
     ],
     languageOptions: {

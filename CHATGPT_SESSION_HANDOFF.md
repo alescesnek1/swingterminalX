@@ -877,11 +877,29 @@ email allowlist (§9), not a billing tier.
   - **Revocation:** verification is stateless (no DB read on the hot path), so
     disable/reset takes effect at the user's next **refresh** (≤ 1 token TTL,
     default 60 min). For immediate global revocation, rotate `AUTH_JWT_SECRET`.
-  - **The browser still signs in through Supabase** — `terminal.js` is unchanged.
-    Remaining: the login form + token storage + refresh loop + admin panel, a
-    "change my own password" endpoint (so `mustChangePassword` can be satisfied),
-    and a tier decision for native users (`getTier()` currently resolves a native
-    non-admin to `free`).
+  - **Browser side DONE too:** `js/auth-client.js` (`window.AuthClient`) is the
+    façade every token read goes through, and it is **self-configuring** — it
+    posts to `/api/auth-login` and falls back to Supabase on
+    `503 NATIVE_AUTH_DISABLED`, so one build works on both sides of the cutover.
+    Refresh at 75% of TTL; a 503 keeps the token and retries, a 401 signs out and
+    clears storage. `js/admin-users-panel.js` is the 👤 UŽIVATELÉ header button
+    (admin-only in the UI; the real gate is server-side) plus the forced
+    password-change dialog. `/api/auth-change-password` requires the CURRENT
+    password even with a valid token, and returns a replacement token because the
+    change bumps `token_version`.
+  - **Setup already done:** `AUTH_JWT_SECRET` is set in Netlify for all contexts
+    (64 chars); `BOT_ADMIN_EMAILS` was already set in production.
+    `NATIVE_AUTH_ENABLED` is deliberately unset. **Not deployed.**
+  - ⚠️ **Pre-existing, unrelated to auth:** only 1 of 10 DB migrations is applied
+    in production, and Netlify applies them on deploy — so the next deploy runs
+    **nine** migrations, one of which (`20260724190000_replace_context_snapshots…`)
+    issues six `DROP TABLE IF EXISTS`. Safe here only because the tables it drops
+    are created by another pending migration in the same batch and hold no
+    production data. Worth a deliberate look before deploying.
+  - Remaining: a tier decision for native users (`getTier()` resolves a native
+    non-admin to `free`); removing Supabase entirely (CDN script,
+    `_FALLBACK_SUPABASE` hardcoded anon key, both verifier branches) once native
+    auth is proven in production.
 - **Personal watch — Phase 1 backend (live, merged to `main`):**
   `netlify/functions/cockpit-personal-watch-settings.mjs` +
   `_personal-watch-store.mjs` expose `/api/cockpit-personal-watch-settings`
