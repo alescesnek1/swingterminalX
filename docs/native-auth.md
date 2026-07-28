@@ -3,31 +3,60 @@
 Moving login off Supabase and into the Netlify/Neon database, so the owner can
 add and manage users directly.
 
-**Status: complete and tested end to end (backend + browser), disabled by
-default and NOT yet deployed.** Nothing here is active until
-`NATIVE_AUTH_ENABLED` is set and the branch is deployed.
+**Status: LIVE in production as of 2026-07-28.** Both identity sources are
+accepted: existing Supabase sessions keep working, and native accounts work as
+soon as they exist.
 
-Already done, so it is not on the owner's list:
-
-- `AUTH_JWT_SECRET` is **set in Netlify for all contexts** (64 chars). Verified by
-  length only; the value was never printed.
-- `BOT_ADMIN_EMAILS` was already set in the production context
-  (`ales.cesnek@thevld.com, vld@thevld.com`), which is what the admin endpoint
+- Deployed on `main` (merge `e08fd63`), site `swingterminalx`.
+- `AUTH_JWT_SECRET` set for all contexts (64 chars; verified by length only, the
+  value was never printed).
+- `NATIVE_AUTH_ENABLED=true`, all contexts.
+- All 10 DB migrations applied, 0 pending — including `20260727160000_add_app_users`.
+- `BOT_ADMIN_EMAILS` was already set in production
+  (`ales.cesnek@thevld.com, vld@thevld.com`); that is what the admin endpoint
   authorizes against.
-- `NATIVE_AUTH_ENABLED` is deliberately **left unset**.
 
-⚠️ **Read this before deploying.** Netlify applies migrations in
-`netlify/database/migrations/` automatically on deploy, and only ONE of the ten
-is currently applied in production (`20260720081238_init-observability-tables`).
-**The next deploy therefore applies nine migrations at once**, including
+Verified from production after the deploy:
+
+| Probe | Result | What it proves |
+| --- | --- | --- |
+| `POST /api/auth-login`, unknown account | `401 INVALID_CREDENTIALS` | `app_users` exists and was queried (a missing table would be `503 DB_UNAVAILABLE`) |
+| `GET /api/admin-users`, no token | `401` | the admin gate is on |
+| `index.html` | serves `?v=6k2` + `auth-client.js`, `admin-users-panel.js` | the browser switch shipped |
+
+**To roll back:** `npx netlify env:unset NATIVE_AUTH_ENABLED` and redeploy. Native
+tokens are refused again and Supabase is untouched.
+
+### Migrations are NOT applied by a deploy — verified the hard way
+
+The Netlify CLI's own help text claims migration files "are automatically applied
+when deploying to Netlify". **That did not happen.** After a successful
+production deploy of this work, `netlify database status` still reported nine
+pending migrations. They were applied by running the command explicitly:
+
+```bash
+npx netlify database migrations apply
+```
+
+That command's help text says it targets "the local database", which is also
+misleading: with the site linked it applied to the same ledger that already
+showed `20260720081238_init-observability-tables` as applied — i.e. the real
+production database. Confirmed afterwards end to end, from production: a login
+attempt for a non-existent account returned `401 INVALID_CREDENTIALS` rather than
+`503 DB_UNAVAILABLE`, which is only possible if `app_users` exists and was
+queried.
+
+**So: after adding a migration, run `npx netlify database migrations apply`
+yourself and check `netlify database status` shows 0 pending. Do not assume the
+deploy did it.**
+
+That batch included
 `20260724190000_replace_context_snapshots_with_atomic_market_records`, which runs
-six `DROP TABLE IF EXISTS` statements.
-
-That is safe *in this specific case*: every table it drops is created by
-`20260724150000_add_market_context_revision_store`, which is also pending, so on
-production those tables do not exist yet and the drops are no-ops. But it is a
-pre-existing condition of this repo, not something native auth introduced, and it
-deserves a deliberate look rather than being discovered mid-deploy.
+six `DROP TABLE IF EXISTS` statements. It was safe here because every table it
+drops is created by `20260724150000_add_market_context_revision_store`, which was
+pending in the same batch, so those tables did not exist yet and the drops were
+no-ops. That was a pre-existing condition of this repo, not something native auth
+introduced.
 
 ---
 
@@ -157,42 +186,60 @@ and is not, the defense is account lockout plus the platform's own protections.
 
 ---
 
-## Rollout order
+## Day-to-day operation
 
-Steps 1 and 2 are already done (see Status above). What remains:
+### Signing in
 
-1. ~~Set `AUTH_JWT_SECRET`.~~ **Done** — all contexts, 64 chars.
+The login form is unchanged. It tries the native account first and falls back to
+Supabase automatically, so:
 
-2. ~~Create the tables.~~ **Nothing to run.** Netlify applies migrations on
-   deploy, so `app_users` and `app_user_audit` appear as part of step 3. (Read
-   the migration warning in Status first.)
+- **Your existing Supabase credentials keep working**, exactly as before.
+- **A native account works too**, once it exists.
 
-3. **Deploy the branch.** This is the one step that cannot be delegated —
-   `AGENTS.md` requires explicit owner approval for any deploy, and a push to the
-   deploy branch *is* a deploy. Nothing changes for users: with
-   `NATIVE_AUTH_ENABLED` unset, the login form still authenticates through
-   Supabase exactly as before, and `/api/auth-login` answers
-   `503 NATIVE_AUTH_DISABLED`.
+Nothing to choose, and no separate login page.
 
-4. **Create the accounts, still signed in through Supabase.** The 👤 UŽIVATELÉ
-   button appears in the header for admin emails. Create your own account
-   **first** and copy the generated password immediately — it is shown exactly
-   once and is never stored in plaintext, logged, or written to the audit table.
+### Adding a user
 
-   This works before the flag is on because `/api/admin-users` authorizes off
-   `BOT_ADMIN_EMAILS`, which is auth-source-agnostic. That is what avoids the
-   chicken-and-egg problem, with no bootstrap secret.
+1. Sign in (either way) with an email that is in `BOT_ADMIN_EMAILS`.
+2. Click **👤 UŽIVATELÉ** in the header — it only appears for admins.
+3. Enter their email, leave the role as `user`, press **Vytvořit účet**.
+4. A password appears **once**. Copy it with the button and send it to the person.
+   It is not stored in readable form, not logged, and not in the audit table — if
+   it is lost, do a password reset instead.
+5. They sign in with that email + password and are **forced to choose their own
+   password** before the terminal opens, so the admin-known password stops being
+   valid.
 
-5. **Set `NATIVE_AUTH_ENABLED=true` and redeploy.** Both token kinds are now
-   accepted, so your Supabase session keeps working. Sign in with the native
-   credentials in a private window; the terminal should force a password change
-   on first use, then load normally.
+### Resetting a forgotten password
 
-6. **Only then** consider removing the Supabase path. Until that point both
-   sources work.
+Same panel → **Reset hesla** on the row. A new one-time password appears, and
+their other sessions stop working at the next token refresh (≤ 1 hour).
 
-To roll back at any point: unset `NATIVE_AUTH_ENABLED` and redeploy. Native
-tokens are refused again and Supabase is untouched.
+### Removing access
+
+**Zakázat** on the row. They cannot sign in again, and any live session dies at
+its next refresh (≤ 1 hour). To cut every session off **immediately**, rotate the
+signing secret instead:
+
+```bash
+npx netlify env:set AUTH_JWT_SECRET "$(node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))")"
+```
+
+Then redeploy. That signs everyone out, including you.
+
+### A lockout is not shown on the login screen
+
+8 failed attempts locks the account for 15 minutes, and the login endpoint
+deliberately does **not** say so — telling the caller "this account is locked"
+confirms the address exists. The panel shows the real state (`LOCKED`, plus the
+failed-attempt count), and `app_user_audit` records every
+`login_ok` / `login_failed` / `login_locked`.
+
+### Roles
+
+The `admin` option in the panel is a **label only**. Real admin rights come
+exclusively from `BOT_ADMIN_EMAILS` in Netlify — to make someone an admin, add
+their email there and redeploy.
 
 ---
 

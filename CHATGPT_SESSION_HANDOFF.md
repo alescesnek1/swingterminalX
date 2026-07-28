@@ -887,15 +887,20 @@ email allowlist (§9), not a billing tier.
     password-change dialog. `/api/auth-change-password` requires the CURRENT
     password even with a valid token, and returns a replacement token because the
     change bumps `token_version`.
-  - **Setup already done:** `AUTH_JWT_SECRET` is set in Netlify for all contexts
-    (64 chars); `BOT_ADMIN_EMAILS` was already set in production.
-    `NATIVE_AUTH_ENABLED` is deliberately unset. **Not deployed.**
-  - ⚠️ **Pre-existing, unrelated to auth:** only 1 of 10 DB migrations is applied
-    in production, and Netlify applies them on deploy — so the next deploy runs
-    **nine** migrations, one of which (`20260724190000_replace_context_snapshots…`)
-    issues six `DROP TABLE IF EXISTS`. Safe here only because the tables it drops
-    are created by another pending migration in the same batch and hold no
-    production data. Worth a deliberate look before deploying.
+  - **LIVE IN PRODUCTION since 2026-07-28** (merged to `main` as `e08fd63`).
+    `AUTH_JWT_SECRET` set (all contexts, 64 chars), `NATIVE_AUTH_ENABLED=true`,
+    all 10 migrations applied (0 pending). Both sources are accepted, so existing
+    Supabase logins keep working. Rollback = unset `NATIVE_AUTH_ENABLED` +
+    redeploy. Verified from production: unknown-account login →
+    `401 INVALID_CREDENTIALS` (proves `app_users` exists and was queried),
+    unauthenticated `/api/admin-users` → `401`.
+  - ⚠️ **`netlify database migrations apply` MUST be run by hand.** Netlify does
+    NOT apply migrations on deploy despite its CLI saying so — after a successful
+    deploy, 9 were still pending. The command's own "applies to the local
+    database" text is also wrong: linked, it applied to production. Always verify
+    `netlify database status` shows 0 pending, then probe a real endpoint.
+    (Also: `netlify env:list` shows the *dev* context — use
+    `env:get NAME --context production`.)
   - Remaining: a tier decision for native users (`getTier()` resolves a native
     non-admin to `free`); removing Supabase entirely (CDN script,
     `_FALLBACK_SUPABASE` hardcoded anon key, both verifier branches) once native
