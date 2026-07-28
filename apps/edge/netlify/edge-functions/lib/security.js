@@ -12,6 +12,7 @@
 // ─────────────────────────────────────────────────────────────
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js';
+import { looksLikeNativeToken, nativeAuthEnabled, verifyNativeAccessToken } from './native-jwt.js';
 
 // ─────────────────────────────────────────────────────────────
 // Origin allowlist
@@ -181,6 +182,50 @@ export async function verifyAuth(request) {
   const token = authHeader.slice(7).trim();
   if (!token || token.split('.').length !== 3) {
     return { ok: false, status: 401, reason: 'Malformed JWT' };
+  }
+
+  // ── Native (own-database) tokens ──
+  // Only reachable when NATIVE_AUTH_ENABLED === 'true'; otherwise this whole
+  // block is skipped and the Supabase path below behaves exactly as before.
+  //
+  // Verified LOCALLY with one HMAC — no call to Supabase. That is the point:
+  // the Supabase path below makes a network request to a third party on every
+  // single authenticated request, which is both latency and an availability
+  // dependency for reads that have nothing to do with Supabase.
+  //
+  // Dispatching on the unverified issuer claim is safe: verifyNativeAccessToken
+  // re-checks signature, algorithm, issuer, audience, and expiry itself, so a
+  // forged issuer only changes which verifier rejects the token.
+  if (nativeAuthEnabled() && looksLikeNativeToken(token)) {
+    const native = await verifyNativeAccessToken(token);
+    if (!native.ok) {
+      // 503 for a server-side verification fault (missing/short secret, Web
+      // Crypto failure), 401 for anything about the token itself. Reporting a
+      // broken deploy as 401 would look like every user's token going bad at
+      // once and send the owner hunting the wrong problem.
+      const serverFault = native.reason === 'AUTH_JWT_SECRET_MISSING'
+        || native.reason === 'AUTH_JWT_SECRET_TOO_SHORT'
+        || native.reason === 'TOKEN_VERIFY_UNAVAILABLE';
+      if (serverFault) console.error('[SECURITY] native token verification unavailable', { reason: native.reason });
+      return { ok: false, status: serverFault ? 503 : 401, reason: native.reason };
+    }
+    // Shaped like the Supabase branch's `user` so every caller
+    // (auth.user.id / auth.user.email, getTier(auth.user)) keeps working
+    // unchanged. `app_metadata.tier` is absent for native accounts, so
+    // lib/tier.js resolves them by email/default exactly as it does for a
+    // Supabase user with no tier metadata.
+    return {
+      ok: true,
+      status: 200,
+      authMode: 'native',
+      user: {
+        id: native.userId,
+        email: native.email,
+        role: 'authenticated',
+        app_metadata: {},
+        user_metadata: {},
+      },
+    };
   }
 
   // V5 (D-5): cryptographic verification FIRST. The old order returned

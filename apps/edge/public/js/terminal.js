@@ -601,14 +601,27 @@ const LiveFeed = {
 };
 window.LiveFeed = LiveFeed;
 
-// Helper: get Supabase access token for news AI scoring
+// Helper: get the access token for news AI scoring.
+// Goes through AuthClient so it works with either identity source (native
+// account or Supabase) — see js/auth-client.js and docs/native-auth.md.
 async function _getAccessTokenForFeed() {
   try {
+    if (window.AuthClient) return await window.AuthClient.getAccessToken();
+    // Fallback for the (unexpected) case where auth-client.js failed to load.
     const sb = window.__supabase;
     if (!sb) return null;
     const { data: { session } } = await sb.auth.getSession();
     return session?.access_token || null;
-  } catch { return null; }
+  } catch (err) {
+    // A missing token is a legitimate state (signed out); a THROWN error is not,
+    // so it must be visible rather than collapsing into the same null.
+    console.warn('[AUTH] could not resolve an access token for the news feed:', err && err.message);
+    window.ErrorLog?.record({
+      level: 'warn', kind: 'auth', title: 'Token unavailable for news scoring',
+      reason: (err && err.message) || 'unknown', endpoint: '/api/auth',
+    });
+    return null;
+  }
 }
 
 // ========== CONFIG & STATE ==========
@@ -1741,15 +1754,29 @@ function _binanceDetailLinksHtml(d) {
   return html;
 }
 
-// V5: forward Supabase access token so /api/markets can resolve tier.
+// Forward the access token so the backend can resolve identity + tier.
+// Goes through AuthClient, so the SAME header works whether the user signed in
+// with a native account or through Supabase (js/auth-client.js).
+//
+// Returning `{}` means "no token" — every caller already treats a missing
+// Authorization header as "signed out" and shows that state, so an empty object
+// here is a real, handled result rather than a swallowed failure. A thrown error
+// is different and is logged.
 async function _getAuthHeaders() {
   try {
-    const sb = window.__supabase;
-    if (!sb) return {};
-    const { data: { session } } = await sb.auth.getSession();
-    if (!session?.access_token) return {};
-    return { 'Authorization': `Bearer ${session.access_token}` };
-  } catch { return {}; }
+    const token = window.AuthClient
+      ? await window.AuthClient.getAccessToken()
+      : (await window.__supabase?.auth.getSession())?.data?.session?.access_token || null;
+    if (!token) return {};
+    return { 'Authorization': `Bearer ${token}` };
+  } catch (err) {
+    console.warn('[AUTH] could not build auth headers:', err && err.message);
+    window.ErrorLog?.record({
+      level: 'warn', kind: 'auth', title: 'Could not build the Authorization header',
+      reason: (err && err.message) || 'unknown', endpoint: '/api/auth',
+    });
+    return {};
+  }
 }
 
 // Canonical Context Store read cutover (task 3). Additive + reversible: OFF by
@@ -1828,6 +1855,62 @@ function _dedupeCanonicalByBase(rows) {
   return Array.from(byBase.values());
 }
 
+// The canonical feed is Binance ticker data and carries NO market cap — the
+// `market_ticker_observations` table has no such column, so /api/context can
+// never supply one. Every canonical row therefore arrived with market_cap and
+// market_cap_rank absent, which (a) blanked market cap everywhere in the UI and
+// (b) silently collapsed every market-cap ordering into "whatever order the rows
+// arrived in" while the UI still claimed to be sorted by rank.
+//
+// Enrich from the legacy CoinGecko-backed /api/markets. Coins outside CG's
+// covered universe legitimately have no market cap; they stay absent (never 0)
+// so the UI can render them as UNKNOWN and sort them last. The outcome is
+// recorded on window.__marketCapEnrichment so the UI can state WHY market cap is
+// missing instead of showing a blank that reads like real data.
+async function _enrichCanonicalWithMarketCap(rows, authHeaders) {
+  const total = rows.length;
+  try {
+    const r = await fetch('/api/markets', { headers: { 'Accept': 'application/json', ...authHeaders } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const cg = await r.json();
+    if (!Array.isArray(cg)) throw new Error('unexpected /api/markets payload shape');
+
+    const byBase = new Map();
+    for (const c of cg) {
+      const base = String(c.symbol || '').split(':')[0].toUpperCase();
+      if (!base) continue;
+      const mc = Number(c.market_cap);
+      // market_cap: 0 is how /api/markets marks a Binance-only listing with no
+      // CoinGecko entry — that is "unknown", not "worth nothing".
+      if (!Number.isFinite(mc) || mc <= 0) continue;
+      const prev = byBase.get(base);
+      if (!prev || mc > prev.market_cap) {
+        byBase.set(base, { market_cap: mc, market_cap_rank: Number(c.market_cap_rank) || null });
+      }
+    }
+
+    let matched = 0;
+    for (const row of rows) {
+      const hit = byBase.get(String(row.symbol || '').toUpperCase());
+      if (!hit) continue;
+      row.market_cap = hit.market_cap;
+      if (hit.market_cap_rank) row.market_cap_rank = hit.market_cap_rank;
+      matched++;
+    }
+
+    window.__marketCapEnrichment = { ok: true, matched, total, reason: null, at: Date.now() };
+    if (!matched && total) {
+      console.warn('[CANONICAL] market-cap enrichment matched 0 of ' + total + ' canonical rows — symbols may not line up with /api/markets');
+    }
+  } catch (e) {
+    const reason = (e && e.message) || 'error';
+    window.__marketCapEnrichment = { ok: false, matched: 0, total, reason, at: Date.now() };
+    console.warn('[CANONICAL] market-cap enrichment from /api/markets failed:', reason);
+    window.Toast?.error?.('Market cap unavailable', `/api/markets enrichment failed — ${reason}. Market-cap ordering falls back to 24h volume.`, { endpoint: '/api/markets' });
+  }
+  return rows;
+}
+
 async function _fetchCanonicalMarkets(authHeaders) {
   const r = await fetch('/api/context', { headers: { 'Accept': 'application/json', ...authHeaders } });
   if (!r.ok) { const body = await r.text().catch(() => ''); throw new Error('HTTP ' + r.status + ' — ' + body.slice(0, 120)); }
@@ -1835,6 +1918,7 @@ async function _fetchCanonicalMarkets(authHeaders) {
   if (!j || j.ok === false) throw new Error('context error: ' + ((j && j.reason) || 'unknown'));
   const tickers = (j.market && Array.isArray(j.market.tickers)) ? j.market.tickers : [];
   const rows = _dedupeCanonicalByBase(tickers.map(_mapCanonicalTicker).filter((row) => row.symbol));
+  await _enrichCanonicalWithMarketCap(rows, authHeaders);
   // Expose the canonical RADAR + provider status for the RADAR/Absorb panels.
   window.__canonicalContext = { radar: j.radar || null, market: { observedAt: j.market?.observedAt || null, freshness: j.market?.freshness || null }, run: j.run || null, receivedAt: Date.now() };
   window.__marketsFreshness = { ok: true, servedFrom: 'canonical', stale: j.market?.freshness === 'STALE', generatedAt: j.market?.observedAt ? Date.parse(j.market.observedAt) : null };
@@ -2639,8 +2723,12 @@ async function loadOrderbook(d, binance, opts) {
     return;
   }
   const market = (d?.binance_market === 'futures' || d?.exchange === 'ALPHA') ? 'futures' : 'spot';
-  const pair = (market === 'futures' ? (d?.futures_pair || d?.pair) : (d?.spot_pair || d?.pair) || '')
-    .replace('/', '');
+  // The `|| ''` used to sit inside the ternary's else-branch, so it only ever
+  // guarded the SPOT path: a futures coin with neither futures_pair nor pair
+  // reached `.replace()` on undefined and threw a TypeError here, before the
+  // `if (!pair)` message below could explain anything to the user.
+  const pairRaw = market === 'futures' ? (d?.futures_pair || d?.pair) : (d?.spot_pair || d?.pair);
+  const pair = String(pairRaw || '').replace('/', '');
   if (!pair) {
     slot.innerHTML = '<div style="color:var(--txt3)">Binance pár pro tento coin se nepodařilo určit.</div>';
     if (status) status.textContent = '–';
@@ -2994,7 +3082,7 @@ function _hmWire(wrap) {
     // above so they are safe by construction.
     tip.innerHTML = `<div class="hm-tip__sym">${_esc(String(d.symbol||'').toUpperCase())}</div>
       <div class="hm-tip__row"><span>24h</span><b style="color:${c === null ? 'var(--txt3)' : c >= 0 ? 'var(--grn)' : 'var(--red)'}">${c === null ? 'no data' : (c>=0?'+':'')+c.toFixed(2)+'%'}</b></div>
-      <div class="hm-tip__row"><span>Market Cap</span><b>${_esc(_hmFmtCap(mc))}</b></div>
+      <div class="hm-tip__row"><span>Market Cap</span><b${mc > 0 ? '' : ' style="color:var(--amb)"'}>${mc > 0 ? _esc(_hmFmtCap(mc)) : 'no data'}</b></div>
       <div class="hm-tip__row"><span>24h Vol</span><b>${_esc(_hmFmtCap(vol))}</b></div>
       <div class="hm-tip__hint">click → detail</div>`;
     tip.style.display = 'block';
@@ -3053,20 +3141,34 @@ function renderHeatmap() {
     return;
   }
 
-  const pool = all
+  const matched = all
     .filter(d => Number(d.total_volume) > 0)
     .filter(d => {
       if (!searchTerm) return true;
       const s = String(d.symbol||'').toLowerCase();
       const n = String(d.name||'').toLowerCase();
       return s.includes(searchTerm) || n.includes(searchTerm);
-    })
-    .sort((a, b) => {
-      const ra = Number(a.market_cap_rank) || Number.MAX_SAFE_INTEGER;
-      const rb = Number(b.market_cap_rank) || Number.MAX_SAFE_INTEGER;
-      if (ra !== rb) return ra - rb;
-      return (Number(b.market_cap) || 0) - (Number(a.market_cap) || 0);
-    })
+    });
+
+  // Never claim an ordering the data cannot support. The canonical feed carries
+  // no market cap of its own, so when enrichment is missing or failed EVERY coin
+  // would tie on rank and the "sorted by market cap" grid would really be
+  // "sorted by whatever order the rows arrived in". Count the coverage first and
+  // order by what is actually known.
+  const withMc = matched.filter(d => Number(d.market_cap) > 0).length;
+  const orderedByMc = withMc > 0;
+  const pool = matched
+    .sort(orderedByMc
+      ? (a, b) => {
+          // Coins with no market cap sort last rather than to the top.
+          const ra = Number(a.market_cap_rank) > 0 ? Number(a.market_cap_rank)
+            : Number(a.market_cap) > 0 ? Number.MAX_SAFE_INTEGER - 1 : Number.MAX_SAFE_INTEGER;
+          const rb = Number(b.market_cap_rank) > 0 ? Number(b.market_cap_rank)
+            : Number(b.market_cap) > 0 ? Number.MAX_SAFE_INTEGER - 1 : Number.MAX_SAFE_INTEGER;
+          if (ra !== rb) return ra - rb;
+          return (Number(b.market_cap) || 0) - (Number(a.market_cap) || 0);
+        }
+      : (a, b) => (Number(b.total_volume) || 0) - (Number(a.total_volume) || 0))
     .slice(0, limit);
 
   _hm.pool = pool;
@@ -3092,7 +3194,25 @@ function renderHeatmap() {
     </div>`;
   }).join('');
 
-  if (hmCount) hmCount.textContent = pool.length + ' coins · MC rank #1→#' + pool.length + ' · color = 24h change';
+  // The header states the ordering that was ACTUALLY applied, plus why market
+  // cap is unavailable when it is — a silent fallback here reads as "sorted by
+  // market cap" and is the exact bug this replaced.
+  if (hmCount) {
+    const missing = pool.filter(d => !(Number(d.market_cap) > 0)).length;
+    let label;
+    if (orderedByMc) {
+      label = pool.length + ' coins · by market cap #1→#' + pool.length;
+      if (missing) label += ' · ' + missing + ' without market cap, sorted last';
+    } else {
+      const enr = window.__marketCapEnrichment;
+      const why = !enr ? 'feed carries none'
+        : enr.ok === false ? '/api/markets failed: ' + (enr.reason || 'error')
+        : 'no coin matched /api/markets';
+      label = pool.length + ' coins · by 24h volume — NO market cap (' + why + ')';
+    }
+    hmCount.textContent = label + ' · color = 24h change';
+    hmCount.style.color = orderedByMc ? 'var(--txt3)' : 'var(--amb)';
+  }
 }
 
 function renderAlerts() {
@@ -3503,9 +3623,9 @@ window.showHeatmapDetail = function(d) {
     <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-bottom:16px; color:var(--txt2);">
       <div>Price<br><b style="color:var(--txt);">${_esc(fmt(d.current_price))}</b></div>
       <div>24h Chg<br><b style="color:${c === null ? 'var(--txt3)' : c >= 0 ? 'var(--grn)' : 'var(--red)'}">${c === null ? 'no data' : (c>=0?'+':'')+c.toFixed(2)+'%'}</b></div>
-      <div>Rank<br><b style="color:var(--txt);">${_esc(String(rank))}</b></div>
+      <div>Rank<br><b style="color:${Number(d.market_cap_rank) > 0 ? 'var(--txt)' : 'var(--amb)'};">${Number(d.market_cap_rank) > 0 ? _esc(String(rank)) : 'no data'}</b></div>
       <div>24h Vol<br><b style="color:var(--txt);">${_esc(_hmFmtCap(vol))}</b></div>
-      <div style="grid-column: span 2;">Market Cap<br><b style="color:var(--txt);">${_esc(_hmFmtCap(mc))}</b></div>
+      <div style="grid-column: span 2;">Market Cap<br><b style="color:${mc > 0 ? 'var(--txt)' : 'var(--amb)'};">${mc > 0 ? _esc(_hmFmtCap(mc)) : 'no data' + (window.__marketCapEnrichment && window.__marketCapEnrichment.ok === false ? ' — /api/markets failed' : '')}</b></div>
     </div>
     <button onclick="document.getElementById('hm-detail').style.display='none'; pickCoin('${_esc(String(d.id||'').toLowerCase())}'); const t=document.querySelector('#tabs .tab'); if(t) sv('scanner', t);" style="width:100%; padding:10px; background:var(--s3); color:var(--acc); border:1px solid var(--acc); border-radius:var(--rad); cursor:pointer; font-weight:700; font-family:inherit;">
       GO TO SCANNER
@@ -11705,14 +11825,29 @@ window._wireSupabaseListeners = function _wireSupabaseListeners() {
 
       btn.disabled = true; btn.textContent = 'Ověřuji...'; err.classList.remove('visible');
 
+      // AuthClient tries the native account endpoint first and falls back to
+      // Supabase when the server has not been switched over yet, so this one
+      // handler covers both sides of the cutover (js/auth-client.js).
       try {
-        const { error } = await supabaseCl.auth.signInWithPassword({ email, password });
-        if (error) throw error;
+        const result = await window.AuthClient.signIn(email, password);
+        if (!result.ok) {
+          err.textContent = result.message || 'Přihlášení se nepovedlo.';
+          err.classList.add('visible');
+          window.Toast?.error('Login failed', `${result.message || 'Auth error'} (${result.reason || 'unknown'})`, {
+            endpoint: '/api/auth-login', code: result.reason,
+          });
+        } else if (result.mustChangePassword) {
+          // The account was created or reset by an admin, so the password is one
+          // the admin knows. Force a change before the terminal is usable.
+          _promptForcedPasswordChange();
+        }
       } catch (error) {
-        console.error('🔍 Supabase Login Error Detail:', error);
-        err.textContent = error.message || 'Chyba sítě nebo neplatný požadavek (více v konzoli).';
+        // AuthClient.signIn() is written not to throw, so reaching here means an
+        // unexpected fault — it must be visible, not a silent dead form.
+        console.error('[AUTH] sign-in threw unexpectedly:', error);
+        err.textContent = error?.message || 'Chyba sítě nebo neplatný požadavek (více v konzoli).';
         err.classList.add('visible');
-        window.Toast?.error('Login failed', error.message || 'Network or auth error', { endpoint: 'supabase.auth.signInWithPassword' });
+        window.Toast?.error('Login failed', error?.message || 'Unexpected auth error', { endpoint: '/api/auth-login' });
       } finally {
         btn.disabled = false; btn.textContent = 'PŘIHLÁSIT SE';
       }
@@ -11721,41 +11856,124 @@ window._wireSupabaseListeners = function _wireSupabaseListeners() {
 
   document.getElementById('logout-btn')?.addEventListener('click', async () => {
     if (confirm('Opravdu se chcete odhlásit?')) {
-      await supabaseCl.auth.signOut();
+      await window.AuthClient.signOut();
     }
   });
 
   supabaseCl.auth.onAuthStateChange((event, session) => {
+    // Keep AuthClient's view of the active mode accurate, so `_getAuthHeaders()`
+    // knows whether to read a native token or a Supabase one.
+    window.AuthClient?.noteSupabaseSession(Boolean(session));
     if (session) {
-      // V5: cache the user's tier on the global state so client-side
-      // gating (top coin cap, DEX visibility) can read it synchronously.
-      // Admin emails are mirrored client-side for UI labeling — but
-      // the actual tier enforcement happens server-side in lib/tier.js.
-      const email = String(session.user?.email || '').trim().toLowerCase();
-      const adminEmails = ['ales.cesnek@thevld.com', 'vld@thevld.com'];
-      const isAdmin = adminEmails.includes(email);
-      window.__userTier = isAdmin || session.user?.user_metadata?.tier === 'pro' ? 'pro' : 'free';
-      window.__isAdmin = isAdmin;
-      document.getElementById('auth-gate').hidden = true;
-      document.getElementById('terminal-app').style.display = 'block';
-      const emBtn = document.getElementById('user-email');
-      if (emBtn) {
-        const label = isAdmin ? 'ADMIN' : window.__userTier.toUpperCase();
-        emBtn.textContent = (session.user?.email || '—') + ' · ' + label;
-      }
-      initTerminalApp();
-    } else {
-      // V6.9 Sprint 2: nuke every observer + the 120s scanner refresh
-      // timer + LiveFeed's two intervals. Previously the app kept
-      // hammering /api/markets after signout (ghost network spam).
-      try { _terminalTeardown(); } catch (err) { console.warn('[AUTH] teardown failed:', err.message); }
-      window.__userTier = 'free';
-      window.__isAdmin = false;
-      document.getElementById('auth-gate').hidden = false;
-      document.getElementById('terminal-app').style.display = 'none';
+      _applyAuthenticatedState({
+        email: session.user?.email,
+        tierHint: session.user?.user_metadata?.tier,
+      });
+    } else if (window.AuthClient?.mode() !== 'native') {
+      // Only tear down if there is no NATIVE session holding the app open —
+      // otherwise a Supabase sign-out (or its initial null event) would blank a
+      // perfectly good native session.
+      _applySignedOutState();
     }
   });
 };
+
+// ── Shared auth-state application (both identity sources) ──
+// Extracted from the Supabase-only handler so a native session drives exactly
+// the same UI transitions. Called by onAuthStateChange above and by
+// AuthClient.onChange below.
+function _applyAuthenticatedState({ email, tierHint }) {
+  // Cache the user's tier on global state so client-side gating (top coin cap,
+  // DEX visibility) can read it synchronously. Admin emails are mirrored
+  // client-side for UI LABELLING only — the real enforcement is server-side in
+  // lib/tier.js, and the real admin authority is the BOT_ADMIN_EMAILS env
+  // allowlist checked in netlify/functions/_auth.mjs.
+  const normalized = String(email || '').trim().toLowerCase();
+  const adminEmails = ['ales.cesnek@thevld.com', 'vld@thevld.com'];
+  const isAdminUser = adminEmails.includes(normalized);
+  window.__userTier = isAdminUser || tierHint === 'pro' ? 'pro' : 'free';
+  window.__isAdmin = isAdminUser;
+
+  document.getElementById('auth-gate').hidden = true;
+  document.getElementById('terminal-app').style.display = 'block';
+
+  const emBtn = document.getElementById('user-email');
+  if (emBtn) {
+    const label = isAdminUser ? 'ADMIN' : window.__userTier.toUpperCase();
+    emBtn.textContent = (email || '—') + ' · ' + label;
+  }
+  _syncAdminUsersButton();
+  initTerminalApp();
+}
+
+function _applySignedOutState() {
+  // V6.9 Sprint 2: nuke every observer + the scanner refresh timer + LiveFeed's
+  // two intervals. Previously the app kept hammering /api/markets after signout.
+  try {
+    _terminalTeardown();
+  } catch (err) {
+    console.warn('[AUTH] teardown failed:', err.message);
+  }
+  window.__userTier = 'free';
+  window.__isAdmin = false;
+  document.getElementById('auth-gate').hidden = false;
+  document.getElementById('terminal-app').style.display = 'none';
+  _syncAdminUsersButton();
+}
+
+// Thin delegates to js/admin-users-panel.js. Kept as named functions here
+// because the auth-state code above calls them, and they must not throw if that
+// module failed to load.
+function _syncAdminUsersButton() {
+  try {
+    window.AdminUsersPanel?.syncButton();
+  } catch (err) {
+    console.warn('[AUTH] could not sync the admin users button:', err && err.message);
+  }
+}
+
+function _promptForcedPasswordChange() {
+  if (!window.AdminUsersPanel) {
+    // The obligation is real even if the panel is missing, so say so rather than
+    // letting the user sit on an admin-known password without knowing.
+    window.Toast?.warn('Změň si heslo', 'Tvoje heslo nastavil administrátor. Panel pro změnu se nepodařilo načíst — obnov stránku.');
+    return;
+  }
+  window.AdminUsersPanel.promptForcedPasswordChange();
+}
+
+document.getElementById('admin-users-btn')?.addEventListener('click', () => {
+  window.AdminUsersPanel?.open();
+});
+
+// Native sessions: AuthClient owns the token lifecycle (restore, refresh,
+// forced sign-out) and reports every transition here.
+window.AuthClient?.onChange((session, mode) => {
+  if (mode !== 'native') return; // Supabase transitions arrive via onAuthStateChange
+  if (session) {
+    _applyAuthenticatedState({ email: session.email, tierHint: null });
+    if (session.mustChangePassword) _promptForcedPasswordChange();
+  } else {
+    _applySignedOutState();
+  }
+});
+
+// Restore a stored native session on load. This runs independently of the
+// Supabase bootstrap: if a valid native token is in storage the app opens
+// straight away, and if the server has since disabled the account the refresh
+// inside init() fails and the gate stays up.
+(async function _restoreNativeSession() {
+  if (!window.AuthClient) return;
+  try {
+    await window.AuthClient.init();
+  } catch (err) {
+    console.warn('[AUTH] native session restore failed:', err && err.message);
+    window.ErrorLog?.record({
+      level: 'warn', kind: 'auth', title: 'Native session restore failed',
+      reason: (err && err.message) || 'unknown', endpoint: '/api/auth-refresh',
+    });
+  }
+})();
 
 // ── Module 4: Market Briefing trigger ──
 // We pick the top 3 coins by computed score from the *current* DATA

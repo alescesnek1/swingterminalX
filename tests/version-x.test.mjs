@@ -29,6 +29,22 @@ test('heatmap cells render an escaped symbol plus a numeric percent, volume in t
   assert.match(js, /known \? fp\(c, 1\) : '—'/);
 });
 
+test('heatmap never claims a market-cap ordering it cannot support', () => {
+  const js = fs.readFileSync(new URL('../apps/edge/public/js/terminal.js', import.meta.url), 'utf8');
+  // Coverage decides the ordering: with zero market caps every coin ties on rank
+  // and the grid would really be "in arrival order" while claiming rank order.
+  assert.match(js, /const withMc = matched\.filter\(d => Number\(d\.market_cap\) > 0\)\.length/);
+  assert.match(js, /const orderedByMc = withMc > 0/);
+  // Fallback ordering is by 24h volume, and the header says so in amber.
+  assert.match(js, /: \(a, b\) => \(Number\(b\.total_volume\) \|\| 0\) - \(Number\(a\.total_volume\) \|\| 0\)\)/);
+  assert.match(js, /by 24h volume — NO market cap \(/);
+  assert.match(js, /'\/api\/markets failed: ' \+ \(enr\.reason \|\| 'error'\)/);
+  // Partial coverage is stated too, and those coins sort last rather than first.
+  assert.match(js, /without market cap, sorted last/);
+  // A missing market cap reads as "no data", never as a formatted value.
+  assert.match(js, /mc > 0 \? _esc\(_hmFmtCap\(mc\)\) : 'no data'/);
+});
+
 test('heatmap suppresses the hover tooltip on touch, where nothing would dismiss it', () => {
   const js = fs.readFileSync(new URL('../apps/edge/public/js/terminal.js', import.meta.url), 'utf8');
   assert.match(js, /matchMedia\('\(hover: none\)'\)\.matches/);

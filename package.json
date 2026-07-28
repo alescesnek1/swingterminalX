@@ -5,6 +5,11 @@
   "private": true,
   "scripts": {
     "test": "node --test \"tests/**/*.test.mjs\"",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "lint:debt": "node scripts/lint-debt.mjs",
+    "lint:prune": "eslint . --prune-suppressions",
+    "lint:baseline": "eslint . --suppress-all",
     "test:worker-subprocess": "node --test tests/run-worker-subprocess.mjs",
     "radar:microstructure": "node scripts/radar/radar-microstructure-producer.mjs",
     "e2e": "node tests/e2e-close.mjs",
@@ -16,5 +21,9 @@
   "dependencies": {
     "@netlify/blobs": "^10.7.9",
     "@netlify/database": "^1.1.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.8.0"
   }
 }

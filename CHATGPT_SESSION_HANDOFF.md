@@ -13,7 +13,37 @@
 > `/reply` or `/admin_summary` support system** here. If you find yourself
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
-> _HEATMAP redesigned to the v4 tile grid (2026-07-27, local-only, uncommitted):_
+> _Market cap was missing app-wide under the canonical read — now enriched from
+> /api/markets (2026-07-27, local, committed, NOT yet on main):_ Reported as "market cap
+> missing in the heatmap, on all of them". Root cause is **not** the heatmap: the
+> canonical feed is Binance ticker data and `market_ticker_observations` has **no
+> market-cap column at all**, so `/api/context` can never supply one and
+> `_mapCanonicalTicker` emitted rows without `market_cap` / `market_cap_rank`. With
+> `window.RADAR_CANONICAL_CONTEXT_READ = true` (index.html) that blanked market cap
+> **everywhere** — heatmap, bubbles, and every market-cap sort — and silently collapsed
+> those sorts into arrival order (the canonical query orders by `quote_volume DESC`).
+> The heatmap made it worse by *labelling* that order "MC rank #1→#N".
+>
+> New `_enrichCanonicalWithMarketCap(rows, authHeaders)` runs inside
+> `_fetchCanonicalMarkets`: one extra GET to the legacy CoinGecko-backed
+> `/api/markets`, matched by base symbol, copying `market_cap` + `market_cap_rank`.
+> `market_cap: 0` (how `/api/markets` marks a Binance-only listing with no CG entry) is
+> treated as UNKNOWN and **not** copied — absent, never 0. Outcome is recorded on
+> `window.__marketCapEnrichment` `{ok, matched, total, reason}`; a failure logs, raises a
+> Toast, and leaves rows absent.
+>
+> The heatmap now derives its ordering from actual coverage: any market cap → sort by
+> rank with the capless coins **last** and the header saying how many; zero coverage →
+> sort by 24h volume with an **amber** header naming the reason ("feed carries none" /
+> "/api/markets failed: HTTP 503"). Missing market cap renders as "no data" in the tile
+> tooltip and the detail panel, not as a formatted value. Owner chose enrichment over a
+> DB/collector change and chose to keep market cap in the tooltip/detail rather than
+> adding a third line to the tiles. The durable fix — carrying market cap in the
+> canonical context itself — is still open. Cache-bust `6j7` → `6j8`. Tests: two
+> behaviour tests for the enricher (0-is-unknown, failure recorded) plus an
+> ordering-honesty test; suite green (1914 pass / 0 fail / 26 skipped).
+>
+> _HEATMAP redesigned to the v4 tile grid (2026-07-27, on `main`, deployed):_
 > The canvas treemap renderer is gone. The HEATMAP tab now renders the **terminal-v4
 > design**: a uniform CSS-grid of tiles (symbol above, 24h % below), colour = 24h
 > change on v4's four-band palette, ordered by market-cap rank #1 → #N, row-major.
@@ -696,6 +726,15 @@ Doc map:
 - `docs/radar-microstructure.md` — provider-backed static microstructure (the
   fail-closed `MARKET_DATA_PROVIDER=none` default, the "451" story).
 - `docs/radar-rolling-microstructure-design.md` — **design only, not implemented.**
+- `docs/error-observability.md` — the client error log (`errors()` in devtools),
+  the machine-enforced error-observability ESLint rules, and the
+  `eslint-suppressions.json` debt baseline. Read before touching any failure
+  path or adding a `<script>` to `index.html`.
+- `docs/native-auth.md` — own-database accounts (`app_users`), scrypt passwords,
+  the terminal's own access tokens, the admin user-management endpoint, the
+  revocation tradeoff, and the step-by-step rollout order. **Read before
+  touching anything auth-related.** Backend done + default-off; the browser
+  still signs in through Supabase.
 
 ## 5. Git / deploy guardrails
 
@@ -812,7 +851,55 @@ email allowlist (§9), not a billing tier.
   another user's session) and org-wide visibility **require `verified === true`** —
   never available in decode-only mode.
 - **`AUTH_DECODE_ONLY=true` is dev-only and NOT production-safe** — must be
-  false/unset in production (any unverifiable token → 401).
+  false/unset in production (any unverifiable token → 401). It also cannot reach
+  account management: `/api/admin-users` requires `verified === true`.
+- **Native (own-database) auth — backend DONE, DEFAULT OFF (local, unpushed).**
+  A second, additive identity source alongside Supabase, so the owner can manage
+  the handful of real users from the terminal. Full detail + rollout order in
+  `docs/native-auth.md`; the essentials:
+  - Accounts live in `app_users` (Netlify/Neon), passwords are **scrypt** via
+    Node's built-in `crypto` (no new dependency). **Supabase's bcrypt hashes are
+    NOT migrated** — the owner sets fresh passwords through the admin page.
+  - Gated behind `NATIVE_AUTH_ENABLED === 'true'` **and** a ≥32-char
+    `AUTH_JWT_SECRET`. With the flag off, a native token is refused and every
+    existing path behaves exactly as before. Both sources are accepted while the
+    flag is on, so the cutover cannot lock the owner out and reverts via one env
+    var.
+  - **`app_users.role` grants NOTHING.** Admin is still `BOT_ADMIN_EMAILS` only.
+    A `role` claim in a user-held token is ignored. There is deliberately **no
+    bootstrap secret** — the first native accounts are created via
+    `/api/admin-users` using the owner's existing Supabase admin session.
+  - Endpoints: `/api/auth-login`, `/api/auth-refresh`, `/api/admin-users`.
+    Login is **non-enumerable** (unknown email / wrong password / disabled /
+    locked → byte-identical 401, same scrypt cost). Lockout is 8 attempts →
+    15 min, and is *not* disclosed to the client — read it on the admin page or
+    in `app_user_audit`. A DB outage is a 503, never "invalid credentials".
+  - **Revocation:** verification is stateless (no DB read on the hot path), so
+    disable/reset takes effect at the user's next **refresh** (≤ 1 token TTL,
+    default 60 min). For immediate global revocation, rotate `AUTH_JWT_SECRET`.
+  - **Browser side DONE too:** `js/auth-client.js` (`window.AuthClient`) is the
+    façade every token read goes through, and it is **self-configuring** — it
+    posts to `/api/auth-login` and falls back to Supabase on
+    `503 NATIVE_AUTH_DISABLED`, so one build works on both sides of the cutover.
+    Refresh at 75% of TTL; a 503 keeps the token and retries, a 401 signs out and
+    clears storage. `js/admin-users-panel.js` is the 👤 UŽIVATELÉ header button
+    (admin-only in the UI; the real gate is server-side) plus the forced
+    password-change dialog. `/api/auth-change-password` requires the CURRENT
+    password even with a valid token, and returns a replacement token because the
+    change bumps `token_version`.
+  - **Setup already done:** `AUTH_JWT_SECRET` is set in Netlify for all contexts
+    (64 chars); `BOT_ADMIN_EMAILS` was already set in production.
+    `NATIVE_AUTH_ENABLED` is deliberately unset. **Not deployed.**
+  - ⚠️ **Pre-existing, unrelated to auth:** only 1 of 10 DB migrations is applied
+    in production, and Netlify applies them on deploy — so the next deploy runs
+    **nine** migrations, one of which (`20260724190000_replace_context_snapshots…`)
+    issues six `DROP TABLE IF EXISTS`. Safe here only because the tables it drops
+    are created by another pending migration in the same batch and hold no
+    production data. Worth a deliberate look before deploying.
+  - Remaining: a tier decision for native users (`getTier()` resolves a native
+    non-admin to `free`); removing Supabase entirely (CDN script,
+    `_FALLBACK_SUPABASE` hardcoded anon key, both verifier branches) once native
+    auth is proven in production.
 - **Personal watch — Phase 1 backend (live, merged to `main`):**
   `netlify/functions/cockpit-personal-watch-settings.mjs` +
   `_personal-watch-store.mjs` expose `/api/cockpit-personal-watch-settings`
@@ -1170,6 +1257,69 @@ email allowlist (§9), not a billing tier.
 ## 11. Known completed work / recent milestones
 
 From current git history (most recent first, condensed — see `git log` for full):
+- **Native auth backend, phase 2 (LOCAL, UNPUSHED, branch
+  `feat/native-auth-foundation`: `98c958d` → `47c09b8` → `19eaf15`)** — auth
+  moved off Supabase into the Netlify/Neon DB, **complete on the backend and
+  disabled by default**; the browser still signs in through Supabase, so the
+  terminal UI switch is the remaining piece. New: `app_users` +
+  `app_user_audit` migration, `_password.mjs` (scrypt via node:crypto, no new
+  dependency, self-describing hash so cost can be raised later),
+  `_native-jwt.mjs` + a second Deno-edge verifier kept byte-compatible by a
+  cross-runtime test, `_user-store.mjs`, and three endpoints
+  (`/api/auth-login`, `/api/auth-refresh`, `/api/admin-users`).
+  **Passwords are NOT migrated** — Supabase's are bcrypt and Node has no native
+  bcrypt, so the owner sets fresh ones via the admin page.
+  Gated behind `NATIVE_AUTH_ENABLED === 'true'` + a ≥32-char `AUTH_JWT_SECRET`;
+  with the flag off a native token is refused and Supabase is untouched
+  (asserted, not assumed). Both sources work while the flag is on, so the
+  cutover is reversible by one env var.
+  **Authorization did not change:** `app_users.role` grants nothing — admin
+  stays `BOT_ADMIN_EMAILS` only, and `/api/admin-users` additionally requires
+  `identity.verified === true`. That also solves the first-account problem with
+  no bootstrap secret: the owner creates native accounts using their existing
+  Supabase admin session.
+  Verification is stateless (no DB read on the hot path); revocation is
+  therefore disable/reset → effective at the next refresh (≤ 1 TTL), or rotate
+  `AUTH_JWT_SECRET` for immediate global revocation. Login is deliberately
+  non-enumerable: unknown email / wrong password / disabled / locked all return
+  a byte-identical 401. See §9 and `docs/native-auth.md` for the rollout order.
+- **Error observability + static analysis, phase 1 (LOCAL, UNPUSHED, branch
+  `feat/error-observability-lint`)** — three things:
+  1. **A production bug found and fixed.** `normalizeOpenPositionsSummary()`
+     in `netlify/functions/bot.mjs` read `body.mode` from a module-scope
+     helper where the request `body` is not in scope, so **every
+     `worker-heartbeat` that actually carried an open position threw
+     `ReferenceError: body is not defined` and answered 500** (reproduced
+     directly). The worker logs that HTTP failure and continues, so the
+     control plane silently lost track of open positions. Every pre-existing
+     heartbeat test passed `openPositions: []`, which is why it was never
+     caught. Fixed by passing `reportedMode` in explicitly, fail-closed (only
+     an explicit `'live_spot'` counts as live). The record's `testnet` flag
+     was also hardcoded `true`; that is worse than the crash, because the
+     worker hydrates backend records and then branches on `pos.testnet` when
+     closing — a live position labelled testnet gets a **simulated** paper
+     close, reporting the position closed while real money stays exposed. It
+     now tracks `mode`. Regression coverage:
+     `tests/bot.open-position-report.test.mjs`. Also removed two duplicate
+     object keys in `bot.mjs` (`candidate`, `stopRequested` — both identical
+     expressions, so no behaviour change) and a real `TypeError` risk in
+     `terminal.js` where `|| ''` only guarded the spot branch of a ternary.
+  2. **Central client error log** — `apps/edge/public/js/error-log.js`, loaded
+     first in `index.html`. A `window.fetch` interceptor records every non-OK
+     response and network failure; `toast.js` forwards all ~67 existing
+     `Toast.error/warn` call sites. Owner types **`errors()`** in devtools for
+     a table of every failure with its reason. URLs are redacted (tokens),
+     response bodies are never read, repeats fold into a counter.
+  3. **Static analysis** — ESLint 10 + `tools/eslint/repo-contract-plugin.mjs`,
+     which turns the non-negotiable rules into build errors
+     (`no-silent-catch`, `no-indistinguishable-catch-return`,
+     `no-sensitive-log`). `npm run lint` is now a required gate alongside
+     `npm test`; `.github/workflows/static-analysis.yml` runs both.
+     241 pre-existing violations are held in `eslint-suppressions.json` so
+     the gate applies to new code; `npm run lint:debt` reports the remainder
+     (154 silent catches, 126 of them in `terminal.js`). **No secret-logging
+     violations exist in the repo** — that rule found zero real hits.
+     Full detail: `docs/error-observability.md`.
 - **Price-history RADAR chain (LOCAL, UNPUSHED — `c26652a` → `3d75047` → `d6e047e`)** — advisory frontend readiness overlay; bounded top-five backend context; then a max +3 setup-only score support. Unknown/degraded context is zero; Flow/OI/Funding, safety, failed reclaim, strict rolling absorption, all existing gates, and baseline Telegram eligibility remain required/unchanged. Runtime safety review passed; no fetch, scheduler, credential, private endpoint, orderbook input, trading path, or alert sender was added.
 - **Scheduled price-history collection (LOCAL, UNPUSHED, branch
   `feat/price-history-scheduler`)** — production-risk review completed

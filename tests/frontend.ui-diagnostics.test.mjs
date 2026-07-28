@@ -19,7 +19,11 @@ function sliceBetween(src, start, end) {
 }
 
 function loadTerminalLinkHelpers() {
-  const block = sliceBetween(terminalJs, 'function _compactBinancePair', '// V5: forward Supabase');
+  // End marker is the DECLARATION that follows the link helpers, not the comment
+  // above it: a comment is prose and gets rewritten (it did — when auth moved to
+  // AuthClient), which broke this slice for a reason unrelated to the code under
+  // test. A function signature is a far more stable anchor.
+  const block = sliceBetween(terminalJs, 'function _compactBinancePair', 'async function _getAuthHeaders');
   const BINANCE_USDC_PAIRS = new Set(['BTCUSDC']);
   const BINANCE_USDT_PAIRS = new Set(['BTCUSDT']);
   // The detail-button helper depends on _esc / _safeUrl, which live far

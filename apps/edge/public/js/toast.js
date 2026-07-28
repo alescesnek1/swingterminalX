@@ -62,9 +62,43 @@
 
   function push(level, title, detail, opts) {
     opts = opts || {};
+
+    // Forward every failure to the central error log so it gains a queryable
+    // history WITH its reason (see js/error-log.js and `errors()` in devtools).
+    // `opts.skipLog` is set by the global handlers below, which would otherwise
+    // record the same event ErrorLog already captured itself.
+    let logged = false;
+    if ((level === 'error' || level === 'warn') && !opts.skipLog && window.ErrorLog) {
+      try {
+        window.ErrorLog.record({
+          level,
+          kind: 'app',
+          title: title,
+          reason: detail,
+          endpoint: opts.endpoint,
+          code: opts.code,
+          source: 'toast',
+        });
+        logged = true;
+      } catch (err) {
+        // ErrorLog must never be able to suppress a toast — fall through to the
+        // plain console heartbeat below instead.
+        console.warn('[TOAST] ErrorLog.record failed', { name: err && err.name });
+      }
+    }
+
     // V5 hotfix: explicit console heartbeat so toast misses are
     // observable in devtools even when the visual toast itself fails.
-    try { console.log('[TOAST] ' + level + ' · ' + String(title || '').slice(0, 80)); } catch { /* */ }
+    // Skipped when ErrorLog already emitted a richer line for this failure.
+    if (!logged) {
+      try {
+        console.log('[TOAST] ' + level + ' · ' + String(title || '').slice(0, 80));
+      } catch (err) {
+        // A console that throws is not worth failing the toast over, but the
+        // attempt must not vanish without trace either.
+        void err;
+      }
+    }
     const c = ensureContainer();
     const id = 'toast_' + (++_seq);
     const el = document.createElement('div');
@@ -121,18 +155,20 @@
   // ── Global error capture ──
   // Surface every uncaught error + unhandled rejection. We keep the
   // existing console.error path intact so devtools logs are unchanged.
+  // `skipLog: true` because js/error-log.js listens for these same two events
+  // and records them; without it each one would land in the log twice.
   window.addEventListener('error', (e) => {
     if (e?.message && /ResizeObserver loop/i.test(e.message)) return; // known noisy
     Toast.error(
       'Unhandled error',
       e?.message || 'unknown',
-      { endpoint: e?.filename ? `${e.filename}:${e.lineno || '?'}` : undefined },
+      { endpoint: e?.filename ? `${e.filename}:${e.lineno || '?'}` : undefined, skipLog: true },
     );
   });
   window.addEventListener('unhandledrejection', (e) => {
     const r = e?.reason;
     const msg = (r && (r.message || r.error)) || String(r || 'unknown');
-    Toast.error('Unhandled promise rejection', msg);
+    Toast.error('Unhandled promise rejection', msg, { skipLog: true });
   });
 
   window.Toast = Toast;
