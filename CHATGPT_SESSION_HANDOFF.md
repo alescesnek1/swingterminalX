@@ -13,6 +13,51 @@
 > `/reply` or `/admin_summary` support system** here. If you find yourself
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
+> _Morning briefing was reporting STALE numbers as today's — fixed (2026-08-01,
+> local, uncommitted, NOT deployed):_ Owner reported "the numbers don't add up".
+> Verified: they were wrong. The 08:00 Telegram briefing of 2026-08-01 said
+> `BTC +0.6% · ETH +0.5% · Regime SUPPORTIVE (score 70) · breadth 53% green`
+> plus a five-coin watchlist (ZAMA/ZHIPU/META/MUU/…). BTC's real 24h change at
+> that moment was **-1.79%** and ETH **-1.69%** (Binance hourly closes,
+> 2026-08-01 06:00Z vs 2026-07-31 06:00Z). **Root cause:** the briefing described
+> the legacy Fleet blob — `fleet.autoMarketSnapshot` (posted by the LOCAL worker)
+> and `fleet.tradingRadar` (recomputed only when a snapshot lands or a browser
+> tab hits `bot.mjs`). Production blob at send time: `autoMarketSnapshot = null`,
+> `tradingRadar.updatedAt = 2026-07-30T13:40:01Z`, `source =
+> 'no_public_snapshot'`, `marketRegime.btc.change24hPct = 0.58` — i.e. a **1 d
+> 16 h old frozen regime block**, printed verbatim as today's tape. The local
+> worker had stopped on 2026-07-28 (`logs/local-binance-worker.log`, last line
+> `[SNAPSHOT][WARN] … exchangeInfo failed: HTTP 451`). Nothing in the message
+> stated an age, so the staleness was invisible; `gatherBriefingData` even
+> computed `snapshotAgeIso` and never rendered it.
+>
+> **Fix (additive, no gate touched):** the briefing now reads the **canonical
+> context store** — the same DB the RADAR alert path reads behind
+> `RADAR_ALERTS_CANONICAL_SOURCE` (`getAtomizedMarketContext`, injected as
+> `loadMarketContext` from `netlify/functions/morning-briefing.mjs`) — and the
+> Fleet blob is only a **labelled** fallback. Freshness is checked on two
+> independent axes (market observation, RADAR verdict) against
+> `MORNING_BRIEFING_MAX_DATA_AGE_MIN` (default **15 min**); an axis past the
+> bound or missing is **withheld and named**, never rendered: pulse prints
+> `BTC UNKNOWN … Regime UNKNOWN` with the reason, the watchlist prints
+> `Withheld — …`, RADAR prints `Candidates tracked: UNKNOWN … not an all-clear`,
+> and every message carries a new **section 0 "Data provenance"** (source +
+> age + observation timestamp) plus a `⚠ PARTIAL BRIEFING` banner. BTC/ETH now
+> come from the canonical ticker row itself and breadth is recounted from those
+> rows, so the pulse can never mix ages. Canonical spot+futures duplicates
+> collapse to one row per symbol (spot first). `mapCanonicalCandidate` may only
+> ever **downgrade** actionability — `ENTRY_READY` comes from the canonical
+> `entry_ready` column, never from a payload claim. The Gemini prompt now
+> receives a `data_freshness` block and is forbidden from narrating withheld
+> numbers. `num()` no longer turns `null` into `0`. Diagnostics + a per-run log
+> line report `source / marketUsable / marketAgeMin / reason / radar…`.
+> **Consequence to expect:** if the canonical collector is not publishing, the
+> morning message will be mostly "withheld" — that is the honest state and the
+> log names the broken stage; it no longer invents a tape. Tests: 43 in
+> `tests/briefing.morning.test.mjs` (was 28), incl. a replay of the 2026-08-01
+> blob asserting the stale numbers cannot appear. Suite green (2156 pass / 0
+> fail), `npm run lint` 0 errors.
+>
 > _Market cap was missing app-wide under the canonical read — now enriched from
 > /api/markets (2026-07-27, local, committed, NOT yet on main):_ Reported as "market cap
 > missing in the heatmap, on all of them". Root cause is **not** the heatmap: the
@@ -826,6 +871,11 @@ email allowlist (§9), not a billing tier.
 - **Morning briefing** (`netlify/functions/morning-briefing.mjs`) is a separate,
   informational daily Telegram message (own gate `MORNING_BRIEFING_TELEGRAM_ENABLED`,
   DST-aware hourly cron + once-per-local-day dedup). It is **not** a trade signal.
+  It reads the **canonical context store** (Fleet blob is a labelled fallback) and
+  states its data source + age in section 0 of every message. Anything older than
+  `MORNING_BRIEFING_MAX_DATA_AGE_MIN` (default 15 min) is **withheld with a named
+  reason** — the briefing may never present cached numbers as the current tape
+  (see the 2026-08-01 entry at the top of this file).
 - **Static microstructure overlay** (`docs/radar-microstructure.md`): production
   default `MARKET_DATA_PROVIDER=none` → **zero external calls**, UI shows "provider
   unavailable" (fail-closed). `binance-public` is a **local-only diagnostic**

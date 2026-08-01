@@ -32,6 +32,45 @@ export const MORNING_BRIEFING_CODES = Object.freeze({
   DRY_RUN: 'MORNING_BRIEFING_DRY_RUN',
 });
 
+// ── data sources ────────────────────────────────────────────────────────────
+// The briefing reads market state from the CANONICAL context store (the same
+// database the RADAR alert path reads behind RADAR_ALERTS_CANONICAL_SOURCE), and
+// only falls back to the legacy Fleet blob when canonical is unavailable. The
+// fallback is always LABELLED and always age-checked: the Fleet blob is written
+// by a local worker / an open browser tab, so at 08:00 it is routinely hours or
+// days old. Presenting those cached numbers as "today" is what made this
+// briefing lie (observed 2026-08-01: BTC printed +0.6% from a 2026-07-30 13:40
+// snapshot while BTC was actually -1.8% on the day).
+export const MORNING_BRIEFING_DATA_SOURCES = Object.freeze({
+  CANONICAL: 'canonical_context',
+  FLEET: 'fleet_snapshot',
+  NONE: 'unavailable',
+});
+
+// Reason codes for a withheld section. Every code must be renderable into a
+// sentence the owner can act on — "why is this box empty" must never be a guess.
+export const MORNING_BRIEFING_DATA_REASONS = Object.freeze({
+  NO_DATA: 'NO_MARKET_DATA',
+  NO_MARKET_SNAPSHOT: 'NO_MARKET_SNAPSHOT',
+  MARKET_STALE: 'MARKET_DATA_STALE',
+  MARKET_NO_TIMESTAMP: 'MARKET_DATA_UNDATED',
+  RADAR_PENDING: 'RADAR_NOT_SCORED',
+  RADAR_EMPTY: 'RADAR_NO_CANDIDATES',
+  RADAR_STALE: 'RADAR_CONTEXT_STALE',
+  RADAR_NO_TIMESTAMP: 'RADAR_CONTEXT_UNDATED',
+});
+
+// Freshness bound for anything the briefing states as current. The canonical
+// collector publishes every 3 minutes, so 15 minutes is five cycles — comfortably
+// past scheduler drift, nowhere near "yesterday's tape".
+export const DEFAULT_MAX_DATA_AGE_MS = 15 * 60 * 1000;
+
+export function maxDataAgeMs(env = process.env) {
+  const min = Number(env && env.MORNING_BRIEFING_MAX_DATA_AGE_MIN);
+  if (!Number.isFinite(min) || min <= 0) return DEFAULT_MAX_DATA_AGE_MS;
+  return Math.round(min * 60 * 1000);
+}
+
 export const DISCLAIMER = 'Advisory briefing only. No auto execution. Confirm manually before trading.';
 export const MACRO_UNAVAILABLE = 'Macro/news unavailable — showing market-only briefing';
 
@@ -56,7 +95,13 @@ const FLUSH_STAGES = new Set(['LONG_FLUSH_CONFIRMED', 'STABILIZING', 'STABILIZAT
 const ENTRY_READY_ACTIONABILITY = 'ENTRY_READY';
 
 // ── small helpers ──────────────────────────────────────────────────────────
+// null / undefined / '' must stay null, NOT become 0: Number(null) === 0 would
+// turn "no data" into a real-looking zero (a missing volume rendering as $0, a
+// missing age rendering as "under 1 min"), which is exactly the fallback this
+// repo forbids.
 function num(v) {
+  if (v === null || v === undefined) return null;
+  if (typeof v === 'string' && v.trim() === '') return null;
   const x = Number(v);
   return Number.isFinite(x) ? x : null;
 }
@@ -82,6 +127,34 @@ function fmtPct(v) {
   const n = num(v);
   if (n == null) return 'N/A';
   return `${n > 0 ? '+' : ''}${n.toFixed(1)}%`;
+}
+
+// Human age for a Telegram line: "4 min", "3 h 12 min", "2 d 1 h".
+export function fmtAge(ms) {
+  const n = num(ms);
+  if (n == null || n < 0) return 'unknown age';
+  const min = Math.floor(n / 60000);
+  if (min < 1) return 'under 1 min';
+  if (min < 60) return `${min} min`;
+  const h = Math.floor(min / 60);
+  const remMin = min % 60;
+  if (h < 24) return remMin ? `${h} h ${remMin} min` : `${h} h`;
+  const d = Math.floor(h / 24);
+  const remH = h % 24;
+  return remH ? `${d} d ${remH} h` : `${d} d`;
+}
+
+function ageMsOf(iso, nowMs) {
+  if (!iso) return null;
+  const t = iso instanceof Date ? iso.getTime() : new Date(iso).getTime();
+  return Number.isFinite(t) ? Math.max(0, nowMs - t) : null;
+}
+
+function isoOf(value) {
+  if (!value) return null;
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value.toISOString() : null;
+  const t = new Date(value).getTime();
+  return Number.isFinite(t) ? new Date(t).toISOString() : null;
 }
 
 function fmtUsd(v) {
@@ -128,35 +201,217 @@ export function localHour(now = new Date(), timeZone = 'Europe/Prague') {
   }
 }
 
-// ── data gathering (read-only over fleet state) ─────────────────────────────
-export function gatherBriefingData(fleet = {}, env = process.env) {
+// ── canonical row mapping ───────────────────────────────────────────────────
+// market_ticker_observations row → the market-row shape the rest of this module
+// already reads. NULL stays null so a missing field renders UNKNOWN, never 0.
+export function mapCanonicalTicker(row) {
+  if (!row || !row.symbol) return null;
+  return {
+    symbol: String(row.symbol).toUpperCase(),
+    market: row.market || null,
+    baseAsset: row.base_asset ? String(row.base_asset).toUpperCase() : null,
+    quoteAsset: row.quote_asset ? String(row.quote_asset).toUpperCase() : null,
+    lastPrice: num(row.last_price),
+    priceChangePercent: num(row.price_change_percent),
+    quoteVolume: num(row.quote_volume),
+  };
+}
+
+// The canonical universe carries spot AND futures rows for the same symbol.
+// Counting both would double every symbol in breadth/median/volume, so one row
+// per symbol wins, spot first (that is the venue RADAR scores).
+function dedupeBySymbolSpotFirst(rows) {
+  const bySymbol = new Map();
+  for (const r of rows) {
+    if (!r || !r.symbol) continue;
+    const prev = bySymbol.get(r.symbol);
+    if (!prev || (prev.market !== 'spot' && r.market === 'spot')) bySymbol.set(r.symbol, r);
+  }
+  return Array.from(bySymbol.values());
+}
+
+// radar_candidate_state row → the candidate shape this module reads. The stored
+// payload IS the evaluator's candidate, so it is spread as-is; only the fields the
+// briefing gates on are re-derived from the authoritative columns.
+export function mapCanonicalCandidate(row) {
+  if (!row) return null;
+  const payload = (row.payload && typeof row.payload === 'object' && !Array.isArray(row.payload)) ? row.payload : {};
+  const symbol = payload.symbol || row.symbol;
+  if (!symbol) return null;
+  // ENTRY_READY may only ever come from the canonical `entry_ready` column. A
+  // payload that claims ENTRY_READY while the column says otherwise is downgraded,
+  // never promoted — the briefing must not announce a setup RADAR did not confirm.
+  const entryReady = row.entry_ready === true;
+  const payloadAction = payload.actionability && String(payload.actionability) !== ENTRY_READY_ACTIONABILITY
+    ? String(payload.actionability) : null;
+  return {
+    ...payload,
+    symbol: String(symbol).toUpperCase(),
+    stage: payload.stage || row.status || 'NO_SETUP',
+    actionability: entryReady ? ENTRY_READY_ACTIONABILITY : (payloadAction || 'NEEDS_CONFIRMATION'),
+    safetyStatus: payload.safetyStatus || 'UNKNOWN',
+    distanceToEntryReadyScore: num(payload.distanceToEntryReadyScore ?? row.setup_score),
+  };
+}
+
+// ── data source selection + freshness ───────────────────────────────────────
+// Resolves WHICH state the briefing describes and HOW OLD it is, on two
+// independent axes: the market observation (pulse/sectors/movers) and the RADAR
+// verdict (watchlist/candidates). Either axis may be unusable on its own, and an
+// unusable axis is reported — never silently rendered from stale numbers.
+export function buildMarketContext({ canonical = null, fleet = {}, env = process.env, nowMs = Date.now() } = {}) {
+  const maxAge = maxDataAgeMs(env);
+  const notes = [];
+  let canonicalAxes = null; // set when canonical was read but unusable
+
+  const emptyAxis = (reason) => ({ usable: false, observedAt: null, ageMs: null, reason });
+
+  if (canonical && canonical.ok === true) {
+    const market = (canonical.market && typeof canonical.market === 'object') ? canonical.market : null;
+    const radar = (canonical.radar && typeof canonical.radar === 'object') ? canonical.radar : null;
+    const markets = dedupeBySymbolSpotFirst((Array.isArray(market && market.tickers) ? market.tickers : [])
+      .map(mapCanonicalTicker).filter(Boolean));
+    const marketObservedAt = isoOf(market && market.observedAt);
+    const marketAgeMs = ageMsOf(marketObservedAt, nowMs);
+    let marketReason = null;
+    if (!markets.length) marketReason = MORNING_BRIEFING_DATA_REASONS.NO_MARKET_SNAPSHOT;
+    else if (marketAgeMs == null) marketReason = MORNING_BRIEFING_DATA_REASONS.MARKET_NO_TIMESTAMP;
+    else if (marketAgeMs > maxAge) marketReason = MORNING_BRIEFING_DATA_REASONS.MARKET_STALE;
+
+    const radarStatus = String((radar && radar.status) || 'PENDING').toUpperCase();
+    const candidates = (Array.isArray(radar && radar.candidates) ? radar.candidates : [])
+      .map(mapCanonicalCandidate).filter(Boolean);
+    const candidatesObservedAt = isoOf(radar && (radar.computedAt || radar.diagnosticsComputedAt));
+    const candidatesAgeMs = ageMsOf(candidatesObservedAt, nowMs);
+    let candidatesReason = null;
+    if (radarStatus !== 'READY') candidatesReason = MORNING_BRIEFING_DATA_REASONS.RADAR_PENDING;
+    else if (!candidates.length) candidatesReason = MORNING_BRIEFING_DATA_REASONS.RADAR_EMPTY;
+    else if (candidatesAgeMs == null) candidatesReason = MORNING_BRIEFING_DATA_REASONS.RADAR_NO_TIMESTAMP;
+    else if (candidatesAgeMs > maxAge) candidatesReason = MORNING_BRIEFING_DATA_REASONS.RADAR_STALE;
+
+    // Only take canonical when at least one axis is actually usable; otherwise fall
+    // through to the labelled Fleet fallback rather than reporting an empty
+    // canonical read as the whole truth.
+    if (!marketReason || !candidatesReason) {
+      const radarRegime = (radar && radar.marketRegime && typeof radar.marketRegime === 'object') ? radar.marketRegime : {};
+      return {
+        source: MORNING_BRIEFING_DATA_SOURCES.CANONICAL,
+        sourceNotes: notes,
+        maxAgeMs: maxAge,
+        markets,
+        candidates,
+        entryReady: candidates.filter((c) => String(c.actionability || '') === ENTRY_READY_ACTIONABILITY),
+        regime: radarRegime,
+        universeDiagnostics: (radar && radar.universeDiagnostics && typeof radar.universeDiagnostics === 'object') ? radar.universeDiagnostics : {},
+        market: { usable: !marketReason, observedAt: marketObservedAt, ageMs: marketAgeMs, reason: marketReason },
+        candidatesFreshness: { usable: !candidatesReason, observedAt: candidatesObservedAt, ageMs: candidatesAgeMs, reason: candidatesReason },
+      };
+    }
+    notes.push(`canonical unusable (market ${marketReason}, radar ${candidatesReason})`);
+    // Remember WHY canonical failed. If the Fleet fallback is also unusable, the
+    // canonical reason is the one worth reporting — "collector data is 2 h old"
+    // points at the stage that actually broke, where the legacy blob's
+    // "no snapshot" only restates that the old path is dead.
+    canonicalAxes = {
+      market: { reason: marketReason, observedAt: marketObservedAt, ageMs: marketAgeMs },
+      candidates: { reason: candidatesReason, observedAt: candidatesObservedAt, ageMs: candidatesAgeMs },
+    };
+  } else if (canonical) {
+    notes.push(`canonical read failed: ${String(canonical.reason || 'UNKNOWN').slice(0, 60)}`);
+  } else {
+    notes.push('canonical read not attempted');
+  }
+
+  // ── labelled fallback: the legacy Fleet blob ──
   const radar = (fleet && fleet.tradingRadar && typeof fleet.tradingRadar === 'object') ? fleet.tradingRadar : {};
-  const regime = (radar.marketRegime && typeof radar.marketRegime === 'object') ? radar.marketRegime : {};
-  const lastRegime = (fleet && fleet.lastRegime && typeof fleet.lastRegime === 'object') ? fleet.lastRegime : null;
   const snapshot = (fleet && fleet.autoMarketSnapshot && typeof fleet.autoMarketSnapshot === 'object') ? fleet.autoMarketSnapshot : {};
   const markets = Array.isArray(snapshot.markets) ? snapshot.markets : [];
+  const marketObservedAt = isoOf(snapshot.fetchedAt || snapshot.receivedAt);
+  const marketAgeMs = ageMsOf(marketObservedAt, nowMs);
+  let marketReason = null;
+  if (!markets.length || String(radar.source || '') === 'no_public_snapshot') marketReason = MORNING_BRIEFING_DATA_REASONS.NO_MARKET_SNAPSHOT;
+  else if (marketAgeMs == null) marketReason = MORNING_BRIEFING_DATA_REASONS.MARKET_NO_TIMESTAMP;
+  else if (marketAgeMs > maxAge) marketReason = MORNING_BRIEFING_DATA_REASONS.MARKET_STALE;
+
   const candidates = Array.isArray(radar.candidates) ? radar.candidates : [];
-  const entryReady = Array.isArray(radar.entryReady) ? radar.entryReady : [];
-  const diag = (radar.universeDiagnostics && typeof radar.universeDiagnostics === 'object') ? radar.universeDiagnostics : {};
+  const candidatesObservedAt = isoOf(radar.updatedAt
+    || (fleet && fleet.radarContext && fleet.radarContext.receivedAt)
+    || snapshot.fetchedAt);
+  const candidatesAgeMs = ageMsOf(candidatesObservedAt, nowMs);
+  let candidatesReason = null;
+  if (!candidates.length) candidatesReason = MORNING_BRIEFING_DATA_REASONS.RADAR_EMPTY;
+  else if (candidatesAgeMs == null) candidatesReason = MORNING_BRIEFING_DATA_REASONS.RADAR_NO_TIMESTAMP;
+  else if (candidatesAgeMs > maxAge) candidatesReason = MORNING_BRIEFING_DATA_REASONS.RADAR_STALE;
+
+  // Both sources unusable on an axis → report the canonical (primary) reason.
+  let marketAxis = { usable: !marketReason, observedAt: marketObservedAt, ageMs: marketAgeMs, reason: marketReason };
+  let candidatesAxis = { usable: !candidatesReason, observedAt: candidatesObservedAt, ageMs: candidatesAgeMs, reason: candidatesReason };
+  if (canonicalAxes) {
+    if (marketReason && canonicalAxes.market.reason) marketAxis = { usable: false, ...canonicalAxes.market };
+    if (candidatesReason && canonicalAxes.candidates.reason) candidatesAxis = { usable: false, ...canonicalAxes.candidates };
+  }
+
+  const anythingAtAll = markets.length > 0 || candidates.length > 0;
+  return {
+    source: anythingAtAll ? MORNING_BRIEFING_DATA_SOURCES.FLEET : MORNING_BRIEFING_DATA_SOURCES.NONE,
+    sourceNotes: notes,
+    maxAgeMs: maxAge,
+    markets,
+    candidates,
+    entryReady: Array.isArray(radar.entryReady) ? radar.entryReady : [],
+    regime: (radar.marketRegime && typeof radar.marketRegime === 'object') ? radar.marketRegime : {},
+    universeDiagnostics: (radar.universeDiagnostics && typeof radar.universeDiagnostics === 'object') ? radar.universeDiagnostics : {},
+    market: (anythingAtAll || marketReason) ? marketAxis : emptyAxis(MORNING_BRIEFING_DATA_REASONS.NO_DATA),
+    candidatesFreshness: candidatesAxis,
+  };
+}
+
+// ── data gathering (read-only over the resolved market context) ──────────────
+export function gatherBriefingData(fleet = {}, env = process.env, context = null) {
+  const ctx = (context && typeof context === 'object')
+    ? context
+    : buildMarketContext({ fleet, env });
+  const lastRegime = (fleet && fleet.lastRegime && typeof fleet.lastRegime === 'object') ? fleet.lastRegime : null;
+  const marketFresh = !!(ctx.market && ctx.market.usable);
+  const candidatesFresh = !!(ctx.candidatesFreshness && ctx.candidatesFreshness.usable);
+  const regime = (ctx.regime && typeof ctx.regime === 'object') ? ctx.regime : {};
+  // A stale/absent axis contributes NOTHING. Withholding is the whole point: a
+  // number the owner cannot date is worse than an explicit UNKNOWN.
+  const markets = marketFresh ? (Array.isArray(ctx.markets) ? ctx.markets : []) : [];
+  const candidates = candidatesFresh ? (Array.isArray(ctx.candidates) ? ctx.candidates : []) : [];
+  const entryReady = candidatesFresh && Array.isArray(ctx.entryReady) ? ctx.entryReady : [];
+  const diag = (ctx.universeDiagnostics && typeof ctx.universeDiagnostics === 'object') ? ctx.universeDiagnostics : {};
 
   // ── market pulse ──
-  const btcChange = regime.btc ? num(regime.btc.change24hPct) : null;
-  const ethChange = regime.eth ? num(regime.eth.change24hPct) : null;
-  const regimeStatus = regime.status || (lastRegime && lastRegime.regime) || 'UNKNOWN';
-  const breadthPct = num(regime.breadthPct);
+  // BTC/ETH come from the freshest atom available: the market rows themselves,
+  // falling back to the regime block only when the rows do not carry the pair.
+  const findPair = (base) => markets.find((m) => new RegExp(`^${base}(USDC|USDT)$`).test(String(m.symbol || '').toUpperCase())) || null;
+  const btcRow = marketFresh ? findPair('BTC') : null;
+  const ethRow = marketFresh ? findPair('ETH') : null;
+  const btcChange = btcRow ? rowChange(btcRow) : (marketFresh && regime.btc ? num(regime.btc.change24hPct) : null);
+  const ethChange = ethRow ? rowChange(ethRow) : (marketFresh && regime.eth ? num(regime.eth.change24hPct) : null);
+  const regimeStatus = marketFresh
+    ? (regime.status || (lastRegime && lastRegime.regime) || 'UNKNOWN')
+    : 'UNKNOWN';
   const changes = markets.map(rowChange).filter((v) => v != null);
+  // Breadth is counted from the rows just read (same definition as
+  // evaluateMarketRegime) so the pulse can never mix a fresh row count with a
+  // breadth figure computed on another cycle. The regime block is the fallback.
+  const breadthPct = changes.length
+    ? Number(((changes.filter((v) => v > 0).length / changes.length) * 100).toFixed(1))
+    : (marketFresh ? num(regime.breadthPct) : null);
   const medAbs = changes.length
     ? Number(changes.map((c) => Math.abs(c)).sort((a, b) => a - b)[Math.floor(changes.length / 2)].toFixed(1))
     : null;
   const totalVol = markets.reduce((acc, m) => acc + (num(m.quoteVolume) || 0), 0) || null;
   const marketPulse = {
     btcChange, ethChange, regimeStatus,
-    regimeScore: num(regime.score),
+    regimeScore: marketFresh ? num(regime.score) : null,
     breadthPct,
     medianAbsMove: medAbs,
     totalQuoteVolume: totalVol,
     rowCount: markets.length,
-    regimeReasons: Array.isArray(regime.reasons) ? regime.reasons.slice(0, 2) : [],
+    regimeReasons: marketFresh && Array.isArray(regime.reasons) ? regime.reasons.slice(0, 2) : [],
   };
 
   // ── sectors (best-effort) ──
@@ -262,7 +517,8 @@ export function gatherBriefingData(fleet = {}, env = process.env) {
     .map((c) => baseOf(c.symbol));
   const unknownSafetyCandidates = candidates.filter((c) => String(c.safetyStatus || '').toUpperCase() === 'UNKNOWN');
   const unknownSafety = unknownSafetyCandidates.length;
-  const regimeVeto = ['CRASH', 'RISK_OFF'].includes(String(regimeStatus).toUpperCase()) || regime.blocksMeanReversion === true;
+  const regimeVeto = marketFresh
+    && (['CRASH', 'RISK_OFF'].includes(String(regimeStatus).toUpperCase()) || regime.blocksMeanReversion === true);
   // Surface the listing basis from an UNKNOWN-safety candidate (that's the one
   // the note is about), not just any candidate that happens to carry a basis.
   const safetyBasisNote = unknownSafetyCandidates.find((c) => c.safetyBasis)?.safetyBasis || null;
@@ -286,6 +542,24 @@ export function gatherBriefingData(fleet = {}, env = process.env) {
     },
   };
 
+  // Freshness travels WITH the data, so every renderer (message, AI context,
+  // diagnostics) states the same age from the same source of truth.
+  const freshness = {
+    source: ctx.source || MORNING_BRIEFING_DATA_SOURCES.NONE,
+    sourceNotes: Array.isArray(ctx.sourceNotes) ? ctx.sourceNotes.slice(0, 4) : [],
+    maxAgeMs: num(ctx.maxAgeMs),
+    marketUsable: marketFresh,
+    marketObservedAt: (ctx.market && ctx.market.observedAt) || null,
+    marketAgeMs: num(ctx.market && ctx.market.ageMs),
+    marketReason: (ctx.market && ctx.market.reason) || null,
+    candidatesUsable: candidatesFresh,
+    candidatesObservedAt: (ctx.candidatesFreshness && ctx.candidatesFreshness.observedAt) || null,
+    candidatesAgeMs: num(ctx.candidatesFreshness && ctx.candidatesFreshness.ageMs),
+    candidatesReason: (ctx.candidatesFreshness && ctx.candidatesFreshness.reason) || null,
+    marketRowsAvailable: Array.isArray(ctx.markets) ? ctx.markets.length : 0,
+    candidatesAvailable: Array.isArray(ctx.candidates) ? ctx.candidates.length : 0,
+  };
+
   return {
     marketPulse,
     sectors,
@@ -293,7 +567,8 @@ export function gatherBriefingData(fleet = {}, env = process.env) {
     coinCount,
     radarSummary,
     risks,
-    snapshotAgeIso: snapshot.fetchedAt || snapshot.receivedAt || null,
+    freshness,
+    snapshotAgeIso: freshness.marketObservedAt,
     marketRowsUsed: markets.length,
     radarCandidatesUsed: candidates.length,
     topSymbols: coinGroups.flatMap((g) => g.rows.map((r) => r.display)).slice(0, 12),
@@ -343,24 +618,91 @@ export function parseAiBlocks(text) {
 // ── message builder ─────────────────────────────────────────────────────────
 const TG_MAX = 4096;
 
+const SOURCE_LABELS = Object.freeze({
+  [MORNING_BRIEFING_DATA_SOURCES.CANONICAL]: 'canonical context store (server-side collector)',
+  [MORNING_BRIEFING_DATA_SOURCES.FLEET]: 'legacy fleet snapshot (local worker / browser)',
+  [MORNING_BRIEFING_DATA_SOURCES.NONE]: 'none',
+});
+
+// Turns a reason code into a sentence that names the broken stage. "Empty because
+// X is not running" must never read the same as "empty because the market is quiet".
+export function describeDataReason(reason, ageMs = null, maxAgeMs = null) {
+  const age = ageMs != null ? fmtAge(ageMs) : 'unknown age';
+  const limit = maxAgeMs != null ? fmtAge(maxAgeMs) : null;
+  switch (reason) {
+    case MORNING_BRIEFING_DATA_REASONS.NO_MARKET_SNAPSHOT:
+      return 'no market snapshot available (collector/worker has posted nothing)';
+    case MORNING_BRIEFING_DATA_REASONS.MARKET_STALE:
+      return `market data is ${age} old${limit ? ` (limit ${limit})` : ''}`;
+    case MORNING_BRIEFING_DATA_REASONS.MARKET_NO_TIMESTAMP:
+      return 'market data carries no observation timestamp — cannot be dated';
+    case MORNING_BRIEFING_DATA_REASONS.RADAR_PENDING:
+      return 'RADAR has not scored the latest run yet';
+    case MORNING_BRIEFING_DATA_REASONS.RADAR_EMPTY:
+      return 'RADAR returned no candidates';
+    case MORNING_BRIEFING_DATA_REASONS.RADAR_STALE:
+      return `RADAR context is ${age} old${limit ? ` (limit ${limit})` : ''}`;
+    case MORNING_BRIEFING_DATA_REASONS.RADAR_NO_TIMESTAMP:
+      return 'RADAR context carries no timestamp — cannot be dated';
+    case MORNING_BRIEFING_DATA_REASONS.NO_DATA:
+      return 'no market data from any source';
+    default:
+      return reason ? `unavailable (${String(reason)})` : 'unavailable';
+  }
+}
+
+// Data provenance block. Printed on EVERY briefing, fresh or not: the owner must
+// be able to read the age of what he is looking at without asking.
+function pushDataProvenance(L, f) {
+  const label = SOURCE_LABELS[f.source] || String(f.source || 'unknown');
+  L.push(`<b>0. Data provenance</b>`);
+  L.push(`Source: ${escapeHtml(label)}`);
+  if (f.marketUsable) {
+    L.push(`Market data: ${escapeHtml(fmtAge(f.marketAgeMs))} old · observed ${escapeHtml(f.marketObservedAt)}`);
+  } else {
+    L.push(`⚠ Market data WITHHELD — ${escapeHtml(describeDataReason(f.marketReason, f.marketAgeMs, f.maxAgeMs))}${f.marketObservedAt ? ` · last observed ${escapeHtml(f.marketObservedAt)}` : ''}`);
+  }
+  if (f.candidatesUsable) {
+    L.push(`RADAR context: ${escapeHtml(fmtAge(f.candidatesAgeMs))} old · ${escapeHtml(f.candidatesAvailable)} candidates`);
+  } else {
+    L.push(`⚠ RADAR watchlist WITHHELD — ${escapeHtml(describeDataReason(f.candidatesReason, f.candidatesAgeMs, f.maxAgeMs))}${f.candidatesObservedAt ? ` · last computed ${escapeHtml(f.candidatesObservedAt)}` : ''}`);
+  }
+  L.push('');
+}
+
 export function buildBriefingMessage({ data, dateStr, ai = null, aiUsed = false }) {
   const blocks = ai ? parseAiBlocks(ai.text) : { macro: null, business: null, tone: null };
   const L = []; // lines
   const p = data.marketPulse;
+  const f = data.freshness || { source: MORNING_BRIEFING_DATA_SOURCES.NONE, marketUsable: false, candidatesUsable: false };
 
   L.push(`🌅 <b>Terminal-X Morning Market Briefing — ${escapeHtml(dateStr)}</b>`);
+  if (!f.marketUsable || !f.candidatesUsable) {
+    L.push('⚠ <b>PARTIAL BRIEFING — some sections withheld because the data is not current (see 0).</b>');
+  }
   L.push('');
+
+  pushDataProvenance(L, f);
 
   // 1. Market pulse
   L.push('<b>1. Market pulse</b>');
-  L.push(`BTC ${escapeHtml(fmtPct(p.btcChange))} · ETH ${escapeHtml(fmtPct(p.ethChange))} (24h)`);
-  L.push(`Regime: <b>${escapeHtml(p.regimeStatus)}</b>${p.regimeScore != null ? ` (score ${escapeHtml(p.regimeScore)})` : ''}`);
-  const toneBits = [];
-  if (p.breadthPct != null) toneBits.push(`breadth ${escapeHtml(p.breadthPct)}% green`);
-  if (p.medianAbsMove != null) toneBits.push(`median move ±${escapeHtml(p.medianAbsMove)}%`);
-  if (p.totalQuoteVolume != null) toneBits.push(`vol ${escapeHtml(fmtUsd(p.totalQuoteVolume))}`);
-  if (toneBits.length) L.push(`Volatility/volume: ${toneBits.join(' · ')}`);
-  if (p.regimeReasons.length) L.push(`Note: ${escapeHtml(p.regimeReasons.join('; '))}`);
+  if (!f.marketUsable) {
+    // Never print a cached number here. This is the exact line that reported
+    // BTC +0.6% off a two-day-old snapshot while BTC was -1.8% on the day.
+    L.push('BTC UNKNOWN · ETH UNKNOWN (24h) — no current market observation');
+    L.push('Regime: <b>UNKNOWN</b> (not computable without current market data)');
+    L.push(`Reason: ${escapeHtml(describeDataReason(f.marketReason, f.marketAgeMs, f.maxAgeMs))}`);
+  } else {
+    L.push(`BTC ${escapeHtml(fmtPct(p.btcChange))} · ETH ${escapeHtml(fmtPct(p.ethChange))} (24h)`);
+    L.push(`Regime: <b>${escapeHtml(p.regimeStatus)}</b>${p.regimeScore != null ? ` (score ${escapeHtml(p.regimeScore)})` : ''}`);
+    const toneBits = [];
+    if (p.breadthPct != null) toneBits.push(`breadth ${escapeHtml(p.breadthPct)}% green`);
+    if (p.medianAbsMove != null) toneBits.push(`median move ±${escapeHtml(p.medianAbsMove)}%`);
+    if (p.totalQuoteVolume != null) toneBits.push(`vol ${escapeHtml(fmtUsd(p.totalQuoteVolume))}`);
+    if (toneBits.length) L.push(`Volatility/volume: ${toneBits.join(' · ')}`);
+    if (p.rowCount) L.push(`Universe: ${escapeHtml(p.rowCount)} pairs · as of ${escapeHtml(f.marketObservedAt)} (${escapeHtml(fmtAge(f.marketAgeMs))} old)`);
+    if (p.regimeReasons.length) L.push(`Note: ${escapeHtml(p.regimeReasons.join('; '))}`);
+  }
   L.push('');
 
   // 2. Macro / world
@@ -379,8 +721,10 @@ export function buildBriefingMessage({ data, dateStr, ai = null, aiUsed = false 
     for (const s of data.sectors) {
       L.push(`• ${escapeHtml(s.name)}: ${escapeHtml(fmtPct(s.avgChange))} avg (${escapeHtml(s.count)} ${s.count === 1 ? 'coin' : 'coins'})`);
     }
+  } else if (!f.marketUsable) {
+    L.push(`Withheld — ${escapeHtml(describeDataReason(f.marketReason, f.marketAgeMs, f.maxAgeMs))}.`);
   } else {
-    L.push('Sector data unavailable from current snapshot.');
+    L.push('No sector mapped in the current market snapshot (data present, no sector match).');
   }
   L.push('');
 
@@ -396,6 +740,13 @@ export function buildBriefingMessage({ data, dateStr, ai = null, aiUsed = false 
         L.push(line);
       }
     }
+  } else if (!f.candidatesUsable || !f.marketUsable) {
+    // A watchlist is a list of setups to act on TODAY. An old one is not a
+    // degraded version of that — it is a different, wrong answer.
+    const bits = [];
+    if (!f.candidatesUsable) bits.push(describeDataReason(f.candidatesReason, f.candidatesAgeMs, f.maxAgeMs));
+    if (!f.marketUsable) bits.push(describeDataReason(f.marketReason, f.marketAgeMs, f.maxAgeMs));
+    L.push(`Withheld — ${escapeHtml(bits.join('; '))}. No setups are being suggested today.`);
   } else {
     L.push('No standout coins in the current snapshot.');
   }
@@ -404,17 +755,22 @@ export function buildBriefingMessage({ data, dateStr, ai = null, aiUsed = false 
   // 6. RADAR opportunities
   L.push('<b>6. RADAR opportunities</b>');
   const rs = data.radarSummary;
-  L.push(`Candidates tracked: ${escapeHtml(rs.candidateCount)} · ENTRY_READY: ${escapeHtml(rs.entryReadyCount)}`);
-  if (rs.topClosest.length) {
-    L.push('Closest to entry:');
-    for (const t of rs.topClosest) {
-      const label = t.isEntryReady ? 'ENTRY_READY ✅' : `near (${t.distance != null ? escapeHtml(t.distance) + '%' : 'n/a'})`;
-      L.push(`• <b>${escapeHtml(t.display)}</b> — ${label} · ${escapeHtml(t.stage)}`);
+  if (!f.candidatesUsable) {
+    L.push(`Candidates tracked: UNKNOWN · ENTRY_READY: UNKNOWN — ${escapeHtml(describeDataReason(f.candidatesReason, f.candidatesAgeMs, f.maxAgeMs))}.`);
+    L.push('Treat this as NO RADAR read today, not as an all-clear.');
+  } else {
+    L.push(`Candidates tracked: ${escapeHtml(rs.candidateCount)} · ENTRY_READY: ${escapeHtml(rs.entryReadyCount)} · computed ${escapeHtml(fmtAge(f.candidatesAgeMs))} ago`);
+    if (rs.topClosest.length) {
+      L.push('Closest to entry:');
+      for (const t of rs.topClosest) {
+        const label = t.isEntryReady ? 'ENTRY_READY ✅' : `near (${t.distance != null ? escapeHtml(t.distance) + '%' : 'n/a'})`;
+        L.push(`• <b>${escapeHtml(t.display)}</b> — ${label} · ${escapeHtml(t.stage)}`);
+      }
     }
-  }
-  if (rs.entryReadyCount === 0) {
-    L.push('No confirmed ENTRY_READY today — all candidates are watchlist only.');
-    if (rs.anyBlocked) L.push('Blocked by missing microstructure / safety / regime (see risks below).');
+    if (rs.entryReadyCount === 0) {
+      L.push('No confirmed ENTRY_READY today — all candidates are watchlist only.');
+      if (rs.anyBlocked) L.push('Blocked by missing microstructure / safety / regime (see risks below).');
+    }
   }
   L.push('');
 
@@ -422,6 +778,17 @@ export function buildBriefingMessage({ data, dateStr, ai = null, aiUsed = false 
   L.push('<b>7. Risks / blockers</b>');
   const r = data.risks;
   let anyRisk = false;
+  // Data breakage is the first-class risk: it is the one that makes every other
+  // line in this message unreliable, so it is listed before market risks.
+  if (!f.marketUsable) {
+    L.push(`• DATA: market pulse withheld — ${escapeHtml(describeDataReason(f.marketReason, f.marketAgeMs, f.maxAgeMs))}`);
+    anyRisk = true;
+  }
+  if (!f.candidatesUsable) {
+    L.push(`• DATA: RADAR watchlist withheld — ${escapeHtml(describeDataReason(f.candidatesReason, f.candidatesAgeMs, f.maxAgeMs))}`);
+    anyRisk = true;
+  }
+  for (const note of (f.sourceNotes || [])) { L.push(`• DATA: ${escapeHtml(note)}`); anyRisk = true; }
   if (r.missingMicrostructure.length) { L.push(`• Missing microstructure: ${escapeHtml(r.missingMicrostructure.join(', '))}`); anyRisk = true; }
   if (r.unknownSafetyCount > 0) { L.push(`• ${escapeHtml(r.unknownSafetyCount)} candidate(s) with UNKNOWN safety${r.safetyBasisNote ? ` (basis: ${escapeHtml(r.safetyBasisNote)})` : ''}`); anyRisk = true; }
   if (r.regimeVeto) { L.push(`• Macro/regime veto: ${escapeHtml(r.regimeStatus)} — mean-reversion entries discouraged`); anyRisk = true; }
@@ -452,6 +819,7 @@ export async function runMorningBriefing(opts = {}) {
     mutateFleet,
     sendMessage,        // async (token, chatId, text) => { ok, error? }
     summarize = null,   // async (context) => { ok, text?, meta, providerErrors }
+    loadMarketContext = null, // async () => { ok, market:{observedAt,tickers}, radar } — canonical read
   } = opts;
 
   const timezone = env.MORNING_BRIEFING_TIMEZONE || 'Europe/Prague';
@@ -474,6 +842,13 @@ export async function runMorningBriefing(opts = {}) {
     aiFallbackUsed: false,
     marketRowsUsed: 0,
     radarCandidatesUsed: 0,
+    dataSource: null,
+    marketDataUsable: false,
+    marketDataAgeMs: null,
+    marketDataReason: null,
+    radarDataUsable: false,
+    radarDataAgeMs: null,
+    radarDataReason: null,
     topSymbols: [],
     lastSentDate: null,
     providerErrors: [],
@@ -525,11 +900,33 @@ export async function runMorningBriefing(opts = {}) {
     return diag;
   }
 
+  // ── canonical market context (server-side collector) ──
+  // Read first, Fleet second. A read failure is recorded and labelled, never
+  // silently replaced by cached fleet numbers.
+  let canonical = null;
+  if (typeof loadMarketContext === 'function') {
+    try {
+      canonical = (await loadMarketContext()) || { ok: false, reason: 'EMPTY_READ' };
+    } catch (err) {
+      canonical = { ok: false, reason: 'READ_THREW' };
+      diag.providerErrors.push(`market context read failed: ${String(err && err.message || err).slice(0, 120)}`);
+    }
+  }
+
   // ── build the briefing ──
-  const data = gatherBriefingData(fleet, env);
+  const context = buildMarketContext({ canonical, fleet, env, nowMs: now.getTime() });
+  const data = gatherBriefingData(fleet, env, context);
   diag.marketRowsUsed = data.marketRowsUsed;
   diag.radarCandidatesUsed = data.radarCandidatesUsed;
   diag.topSymbols = data.topSymbols;
+  diag.dataSource = data.freshness.source;
+  diag.marketDataUsable = data.freshness.marketUsable;
+  diag.marketDataAgeMs = data.freshness.marketAgeMs;
+  diag.marketDataReason = data.freshness.marketReason;
+  diag.radarDataUsable = data.freshness.candidatesUsable;
+  diag.radarDataAgeMs = data.freshness.candidatesAgeMs;
+  diag.radarDataReason = data.freshness.candidatesReason;
+  for (const note of data.freshness.sourceNotes) diag.providerErrors.push(String(note).slice(0, 160));
 
   // ── AI summary (degrade-safe) ──
   let ai = null;
@@ -606,23 +1003,36 @@ export async function runMorningBriefing(opts = {}) {
 }
 
 // Compact, AI-safe context (no internal identifiers, no raw fleet dump).
-function buildAiContext(data) {
+export function buildAiContext(data) {
+  const f = data.freshness || { marketUsable: false, candidatesUsable: false };
+  // The summarizer is told the provenance too. Handing it withheld numbers with
+  // no age would let the narration reintroduce exactly the stale figures the
+  // message layer just refused to print.
   return {
-    market_pulse: {
+    data_freshness: {
+      source: f.source || 'unavailable',
+      market_data_usable: !!f.marketUsable,
+      market_data_age_minutes: f.marketAgeMs == null ? null : Math.round(f.marketAgeMs / 60000),
+      market_data_withheld_reason: f.marketUsable ? null : (f.marketReason || 'UNKNOWN'),
+      radar_data_usable: !!f.candidatesUsable,
+      radar_data_age_minutes: f.candidatesAgeMs == null ? null : Math.round(f.candidatesAgeMs / 60000),
+      radar_data_withheld_reason: f.candidatesUsable ? null : (f.candidatesReason || 'UNKNOWN'),
+    },
+    market_pulse: f.marketUsable ? {
       btc_change_24h: data.marketPulse.btcChange,
       eth_change_24h: data.marketPulse.ethChange,
       regime: data.marketPulse.regimeStatus,
       regime_score: data.marketPulse.regimeScore,
       breadth_pct_green: data.marketPulse.breadthPct,
       median_abs_move_pct: data.marketPulse.medianAbsMove,
-    },
-    sectors: data.sectors,
-    top_symbols: data.topSymbols,
-    radar: {
+    } : null,
+    sectors: f.marketUsable ? data.sectors : [],
+    top_symbols: f.candidatesUsable ? data.topSymbols : [],
+    radar: f.candidatesUsable ? {
       candidate_count: data.radarSummary.candidateCount,
       entry_ready_count: data.radarSummary.entryReadyCount,
       closest: data.radarSummary.topClosest.map((t) => ({ symbol: t.display, distance: t.distance, stage: t.stage, entry_ready: t.isEntryReady })),
-    },
-    regime_veto: data.risks.regimeVeto,
+    } : null,
+    regime_veto: f.marketUsable ? data.risks.regimeVeto : null,
   };
 }
