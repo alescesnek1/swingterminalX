@@ -55,6 +55,44 @@ function summarize(context) {
   return summarizeBriefing(context, { env: process.env, fetchImpl: globalThis.fetch });
 }
 
+// Canonical market context read — the SAME source of truth the RADAR alert path
+// reads (see cron-alerts.mjs / RADAR_ALERTS_CANONICAL_SOURCE), produced by the
+// server-side collector every ~3 minutes.
+//
+// WHY: the briefing used to describe `fleet.autoMarketSnapshot` /
+// `fleet.tradingRadar`, which are written by a LOCAL worker and an open browser
+// tab. At 08:00 neither is normally running, so the briefing rendered whatever
+// was frozen in the blob — on 2026-08-01 it reported BTC +0.6% from a
+// 2026-07-30 13:40 state while BTC was actually -1.8% on the day. Reading the
+// collector's own database makes the numbers current; the freshness stamp that
+// travels with it makes any remaining gap visible instead of silent.
+//
+// READ-ONLY: no write, no gate, no order path. Never throws — a failure returns
+// { ok:false, reason } and the briefing degrades to a labelled fallback.
+async function loadMarketContext() {
+  let store; let database;
+  try {
+    store = await import('./_market-context-store.mjs');
+    database = (await import('./_db.mjs')).getDb().pool;
+  } catch (err) {
+    console.warn('[morning-briefing] canonical_context_unavailable', { reason: 'DB_INIT_FAILED', name: err?.name || 'Error' });
+    return { ok: false, reason: 'DB_UNAVAILABLE' };
+  }
+  try {
+    // microLimit is deliberately minimal: the briefing needs tickers + RADAR
+    // verdicts, never the raw microstructure measurement rows.
+    const context = await store.getAtomizedMarketContext(database, { tickerLimit: 1000, microLimit: 1 });
+    if (!context || context.ok !== true) {
+      console.warn('[morning-briefing] canonical_context_read_failed', { reason: context?.reason || 'UNKNOWN' });
+      return { ok: false, reason: context?.reason || 'DB_UNAVAILABLE' };
+    }
+    return context;
+  } catch (err) {
+    console.warn('[morning-briefing] canonical_context_read_threw', { name: err?.name || 'Error' });
+    return { ok: false, reason: 'DB_UNAVAILABLE' };
+  }
+}
+
 // Public diagnostics — strips the message preview unless explicitly requested,
 // and never includes secrets.
 function publicDiag(diag, { includePreview = false } = {}) {
@@ -100,9 +138,15 @@ export default async (req) => {
     mutateFleet,
     sendMessage: sendTelegram,
     summarize,
+    loadMarketContext,
   });
 
   console.log(`[morning-briefing] code=${diag.code} sent=${diag.sent} aiUsed=${diag.aiUsed} aiFallback=${diag.aiFallbackUsed} rows=${diag.marketRowsUsed} radar=${diag.radarCandidatesUsed} len=${diag.messageLength} skip=${diag.skippedReason || '-'}`);
+  // Data provenance is logged on every run, not only on failure: a briefing that
+  // went out on withheld data must be findable in the function logs afterwards.
+  const ageMin = (ms) => (ms == null ? 'n/a' : Math.round(ms / 60000));
+  const logDataState = (diag.marketDataUsable && diag.radarDataUsable) ? console.log : console.warn;
+  logDataState(`[morning-briefing] data source=${diag.dataSource} marketUsable=${diag.marketDataUsable} marketAgeMin=${ageMin(diag.marketDataAgeMs)} marketReason=${diag.marketDataReason || '-'} radarUsable=${diag.radarDataUsable} radarAgeMin=${ageMin(diag.radarDataAgeMs)} radarReason=${diag.radarDataReason || '-'}`);
 
   // Manual invocation returns JSON (preview included for dry runs).
   if (isManual) {

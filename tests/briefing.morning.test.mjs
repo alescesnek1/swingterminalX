@@ -6,12 +6,21 @@ import {
   runMorningBriefing,
   buildBriefingMessage,
   gatherBriefingData,
+  buildMarketContext,
+  buildAiContext,
+  mapCanonicalTicker,
+  mapCanonicalCandidate,
+  maxDataAgeMs,
+  fmtAge,
   parseAiBlocks,
   isMorningBriefingHardDisabled,
   localDayString,
   localHour,
   escapeHtml,
   MORNING_BRIEFING_CODES,
+  MORNING_BRIEFING_DATA_SOURCES,
+  MORNING_BRIEFING_DATA_REASONS,
+  DEFAULT_MAX_DATA_AGE_MS,
   DISCLAIMER,
   MACRO_UNAVAILABLE,
 } from '../scripts/briefing/morning-briefing.mjs';
@@ -51,6 +60,59 @@ function fakeFleet() {
       ],
     },
     lastRegime: { regime: 'RISK_OFF' },
+  };
+}
+
+// The fixtures carry FIXED timestamps, so every freshness assertion must state
+// its reference time — a test that used the wall clock would go stale on its own.
+function dataFor(fleet = fakeFleet(), now = NOW, canonical = null, env = {}) {
+  const context = buildMarketContext({ canonical, fleet, env, nowMs: now.getTime() });
+  return gatherBriefingData(fleet, env, context);
+}
+
+// Shape returned by getAtomizedMarketContext() (netlify/functions/_market-context-store.mjs):
+// raw DB rows, snake_case, numbers as strings.
+function fakeCanonical({
+  observedAt = '2026-06-17T05:58:00Z',
+  computedAt = '2026-06-17T05:58:30Z',
+  status = 'READY',
+  tickers = null,
+  candidates = null,
+} = {}) {
+  return {
+    ok: true,
+    market: {
+      observedAt,
+      freshness: 'FRESH',
+      tickers: tickers || [
+        { market: 'spot', symbol: 'BTCUSDT', base_asset: 'BTC', quote_asset: 'USDT', last_price: '63080.64', price_change_percent: '-1.79', quote_volume: '9000000000' },
+        // Same symbol on the other venue — must NOT be counted twice.
+        { market: 'futures', symbol: 'BTCUSDT', base_asset: 'BTC', quote_asset: 'USDT', last_price: '63090.10', price_change_percent: '-1.81', quote_volume: '12000000000' },
+        { market: 'spot', symbol: 'ETHUSDT', base_asset: 'ETH', quote_asset: 'USDT', last_price: '2600', price_change_percent: '-1.69', quote_volume: '5000000000' },
+        { market: 'spot', symbol: 'SOLUSDT', base_asset: 'SOL', quote_asset: 'USDT', last_price: '140', price_change_percent: '4.20', quote_volume: '800000000' },
+      ],
+      dataQuality: {},
+    },
+    radar: {
+      status,
+      computedAt,
+      readSource: 'atomized_state',
+      marketRegime: { status: 'MIXED', score: 58, breadthPct: 33.3, reasons: ['BTC weak'] },
+      universeDiagnostics: { safetyUnknown: 1, safetyDanger: 0 },
+      candidates: candidates || [
+        {
+          market: 'spot', symbol: 'SOLUSDT', status: 'STABILIZING', entry_ready: false, setup_score: 71,
+          computed_at: computedAt,
+          payload: { symbol: 'SOLUSDT', stage: 'STABILIZING', safetyStatus: 'SAFE', distanceToEntryReadyScore: 71, reasons: ['base forming after flush'], riskFlags: [], executionDataMissing: [] },
+        },
+        {
+          market: 'spot', symbol: 'FOOUSDT', status: 'WATCH', entry_ready: false, setup_score: 44,
+          computed_at: computedAt,
+          // Payload claims ENTRY_READY while the canonical column says false.
+          payload: { symbol: 'FOOUSDT', stage: 'WATCH', actionability: 'ENTRY_READY', safetyStatus: 'UNKNOWN', distanceToEntryReadyScore: 44, reasons: ['scanner context (score 9)'], executionDataMissing: ['orderbook'] },
+        },
+      ],
+    },
   };
 }
 
@@ -233,14 +295,14 @@ test('AI failure sends degraded market-only briefing', async () => {
 
 // ── message content ─────────────────────────────────────────────────────--
 test('message always includes the disclaimer', async () => {
-  const data = gatherBriefingData(fakeFleet());
+  const data = dataFor();
   const msg = buildBriefingMessage({ data, dateStr: TODAY, ai: null, aiUsed: false });
   assert.ok(msg.includes(DISCLAIMER));
   assert.ok(msg.includes('Terminal-X Morning Market Briefing — 2026-06-17'));
 });
 
 test('message includes a coins-to-watch section with symbols', async () => {
-  const data = gatherBriefingData(fakeFleet());
+  const data = dataFor();
   const msg = buildBriefingMessage({ data, dateStr: TODAY, ai: null, aiUsed: false });
   assert.ok(msg.includes('Coins to watch today'));
   assert.ok(/\b(FET|WIF|SOL|BAR|FOO)\b/.test(msg), 'at least one watch symbol present');
@@ -248,7 +310,7 @@ test('message includes a coins-to-watch section with symbols', async () => {
 });
 
 test('message includes RADAR blockers when there is no ENTRY_READY', async () => {
-  const data = gatherBriefingData(fakeFleet());
+  const data = dataFor();
   assert.equal(data.radarSummary.entryReadyCount, 0);
   const msg = buildBriefingMessage({ data, dateStr: TODAY, ai: null, aiUsed: false });
   assert.ok(msg.includes('No confirmed ENTRY_READY'));
@@ -256,7 +318,7 @@ test('message includes RADAR blockers when there is no ENTRY_READY', async () =>
 });
 
 test('briefing never labels a non-ENTRY_READY candidate as entry', async () => {
-  const data = gatherBriefingData(fakeFleet());
+  const data = dataFor();
   const msg = buildBriefingMessage({ data, dateStr: TODAY, ai: null, aiUsed: false });
   // No candidate in the fixture is ENTRY_READY, so the ✅ entry-ready marker
   // must not appear.
@@ -267,7 +329,7 @@ test('briefing never labels a non-ENTRY_READY candidate as entry', async () => {
 test('Telegram HTML escaping works', () => {
   assert.equal(escapeHtml('<b>a & b>'), '&lt;b&gt;a &amp; b&gt;');
   // A candidate reason carrying angle brackets must be escaped in the message.
-  const data = gatherBriefingData(fakeFleet());
+  const data = dataFor();
   const msg = buildBriefingMessage({ data, dateStr: TODAY, ai: null, aiUsed: false });
   assert.ok(!msg.includes('<sharp>'), 'raw angle-bracket text not present');
   assert.ok(msg.includes('&lt;sharp&gt;'), 'escaped form present');
@@ -337,4 +399,211 @@ test('RADAR ENTRY_READY Telegram gate is unchanged (still requires its own flag)
   assert.equal(isTelegramHardDisabled({ ...ENABLED_ENV }), true);
   // RADAR gate still opens only on its own flag.
   assert.equal(isTelegramHardDisabled({ RADAR_TELEGRAM_ENABLED: 'true' }), false);
+});
+
+// ── data provenance / freshness (regression: 2026-08-01 stale briefing) ────
+// On 2026-08-01 the 08:00 briefing reported "BTC +0.6% · ETH +0.5% · Regime
+// SUPPORTIVE (score 70) · breadth 53% green" and a five-coin watchlist. Those
+// numbers came from fleet.tradingRadar.marketRegime frozen at 2026-07-30T13:40Z
+// (autoMarketSnapshot was null — the local worker had stopped on 2026-07-28);
+// BTC's real 24h change at send time was -1.79%. Nothing in the message said how
+// old the data was. These tests pin the behaviour that makes that impossible.
+
+test('canonical context is preferred over the fleet blob', () => {
+  const data = dataFor(fakeFleet(), NOW, fakeCanonical());
+  assert.equal(data.freshness.source, MORNING_BRIEFING_DATA_SOURCES.CANONICAL);
+  assert.equal(data.freshness.marketUsable, true);
+  assert.equal(data.freshness.candidatesUsable, true);
+  // BTC comes from the canonical ticker (-1.79), not the fleet regime (-2.1).
+  assert.equal(data.marketPulse.btcChange, -1.79);
+  assert.equal(data.marketPulse.ethChange, -1.69);
+});
+
+test('canonical spot+futures duplicates are counted once', () => {
+  const data = dataFor(fakeFleet(), NOW, fakeCanonical());
+  // 4 canonical rows, one of which is the futures duplicate of BTCUSDT.
+  assert.equal(data.marketRowsUsed, 3);
+  // Breadth is computed from those rows: 1 of 3 green.
+  assert.equal(data.marketPulse.breadthPct, 33.3);
+});
+
+test('a frozen fleet state is NEVER rendered as current market numbers', () => {
+  // Exactly the production state of 2026-08-01: no market snapshot at all, and a
+  // regime block frozen two days earlier claiming BTC +0.58% / SUPPORTIVE.
+  const fleet = {
+    autoMarketSnapshot: null,
+    radarContext: { receivedAt: '2026-07-30T13:40:01.685Z', scannerCandidates: [] },
+    tradingRadar: {
+      updatedAt: '2026-07-30T13:40:01.685Z',
+      source: 'no_public_snapshot',
+      marketRegime: {
+        status: 'SUPPORTIVE', score: 70, breadthPct: 53,
+        btc: { symbol: 'BTCUSDT', change24hPct: 0.58 },
+        eth: { symbol: 'ETHUSDT', change24hPct: 0.5 },
+        reasons: ['BTC not in active breakdown', 'breadth supportive enough'],
+      },
+      candidates: [
+        { symbol: 'ZAMAUSDT', stage: 'STABILIZING', actionability: 'NEEDS_CONFIRMATION', distanceToEntryReadyScore: 70, safetyStatus: 'UNKNOWN', reasons: ['scanner context (score 7)'], diagnostics: { change24hPct: -10.87 } },
+      ],
+      entryReady: [],
+      universeDiagnostics: {},
+    },
+  };
+  const now = new Date('2026-08-01T06:02:22Z');
+  const data = dataFor(fleet, now);
+  assert.equal(data.freshness.marketUsable, false);
+  assert.equal(data.freshness.marketReason, MORNING_BRIEFING_DATA_REASONS.NO_MARKET_SNAPSHOT);
+  assert.equal(data.freshness.candidatesUsable, false);
+  assert.equal(data.freshness.candidatesReason, MORNING_BRIEFING_DATA_REASONS.RADAR_STALE);
+  // The withheld pulse must be UNKNOWN, not the frozen figures.
+  assert.equal(data.marketPulse.btcChange, null);
+  assert.equal(data.marketPulse.ethChange, null);
+  assert.equal(data.marketPulse.breadthPct, null);
+  assert.equal(data.marketPulse.regimeStatus, 'UNKNOWN');
+  assert.equal(data.marketPulse.regimeScore, null);
+  assert.equal(data.coinCount, 0, 'no watchlist from stale scanner context');
+  assert.equal(data.radarSummary.candidateCount, 0);
+
+  const msg = buildBriefingMessage({ data, dateStr: '2026-08-01', ai: null, aiUsed: false });
+  assert.ok(!msg.includes('+0.6%'), 'stale BTC number must not appear');
+  assert.ok(!msg.includes('+0.5%'), 'stale ETH number must not appear');
+  assert.ok(!msg.includes('SUPPORTIVE'), 'stale regime must not appear');
+  assert.ok(!msg.includes('53%'), 'stale breadth must not appear');
+  assert.ok(!msg.includes('ZAMA'), 'stale watchlist symbol must not appear');
+  assert.ok(msg.includes('BTC UNKNOWN'), 'pulse reported as UNKNOWN');
+  assert.ok(msg.includes('PARTIAL BRIEFING'), 'partial-data banner present');
+  assert.ok(msg.includes('Data provenance'), 'provenance section present');
+  assert.ok(msg.includes('1 d 16 h'), 'RADAR context age stated');
+  assert.ok(/DATA: market pulse withheld/.test(msg), 'withheld market data listed as a risk');
+  assert.ok(/DATA: RADAR watchlist withheld/.test(msg), 'withheld watchlist listed as a risk');
+});
+
+test('every briefing states its data source and age', () => {
+  const data = dataFor(fakeFleet(), NOW, fakeCanonical());
+  const msg = buildBriefingMessage({ data, dateStr: TODAY, ai: null, aiUsed: false });
+  assert.ok(msg.includes('Data provenance'));
+  assert.ok(msg.includes('canonical context store'));
+  assert.ok(/Market data: \d+ min old · observed 2026-06-17T05:58:00.000Z/.test(msg), 'market age + timestamp present');
+  assert.ok(!msg.includes('PARTIAL BRIEFING'), 'no partial banner when everything is fresh');
+});
+
+test('stale canonical market data is withheld, not printed', () => {
+  const stale = fakeCanonical({ observedAt: '2026-06-17T04:00:00Z', computedAt: '2026-06-17T04:00:10Z' });
+  const data = dataFor({ autoMarketSnapshot: null, tradingRadar: {} }, NOW, stale);
+  assert.equal(data.freshness.marketUsable, false);
+  assert.equal(data.freshness.marketReason, MORNING_BRIEFING_DATA_REASONS.MARKET_STALE);
+  assert.equal(data.freshness.candidatesReason, MORNING_BRIEFING_DATA_REASONS.RADAR_STALE);
+  const msg = buildBriefingMessage({ data, dateStr: TODAY, ai: null, aiUsed: false });
+  assert.ok(msg.includes('BTC UNKNOWN'));
+  assert.ok(msg.includes('market data is 2 h old'), 'explicit age in the reason');
+});
+
+test('a PENDING canonical RADAR withholds the watchlist but keeps the market pulse', () => {
+  const pending = fakeCanonical({ status: 'PENDING' });
+  const data = dataFor(fakeFleet(), NOW, pending);
+  assert.equal(data.freshness.source, MORNING_BRIEFING_DATA_SOURCES.CANONICAL);
+  assert.equal(data.freshness.marketUsable, true);
+  assert.equal(data.freshness.candidatesUsable, false);
+  assert.equal(data.freshness.candidatesReason, MORNING_BRIEFING_DATA_REASONS.RADAR_PENDING);
+  const msg = buildBriefingMessage({ data, dateStr: TODAY, ai: null, aiUsed: false });
+  assert.ok(msg.includes('BTC -1.8%'), 'fresh pulse still shown');
+  assert.ok(msg.includes('Candidates tracked: UNKNOWN'));
+  assert.ok(msg.includes('not as an all-clear'));
+});
+
+test('a failed canonical read falls back to the fleet ONLY when the fleet is fresh, and says so', () => {
+  const data = dataFor(fakeFleet(), NOW, { ok: false, reason: 'DB_UNAVAILABLE' });
+  assert.equal(data.freshness.source, MORNING_BRIEFING_DATA_SOURCES.FLEET);
+  assert.equal(data.freshness.marketUsable, true, 'fixture snapshot is 1 min old');
+  const msg = buildBriefingMessage({ data, dateStr: TODAY, ai: null, aiUsed: false });
+  assert.ok(msg.includes('legacy fleet snapshot'), 'fallback source is labelled');
+  assert.ok(msg.includes('canonical read failed: DB_UNAVAILABLE'), 'canonical failure surfaced in risks');
+});
+
+test('mapCanonicalCandidate never promotes a payload to ENTRY_READY', () => {
+  const rows = fakeCanonical().radar.candidates;
+  const foo = mapCanonicalCandidate(rows[1]);
+  assert.equal(foo.symbol, 'FOOUSDT');
+  assert.notEqual(foo.actionability, 'ENTRY_READY', 'payload claim ignored when entry_ready=false');
+  const ready = mapCanonicalCandidate({ symbol: 'BARUSDT', entry_ready: true, status: 'ENTRY_READY', payload: { symbol: 'BARUSDT' } });
+  assert.equal(ready.actionability, 'ENTRY_READY');
+});
+
+test('mapCanonicalTicker keeps missing values null (never 0)', () => {
+  const row = mapCanonicalTicker({ market: 'spot', symbol: 'xyzusdt', price_change_percent: null, quote_volume: null, last_price: '1.5' });
+  assert.equal(row.symbol, 'XYZUSDT');
+  assert.equal(row.priceChangePercent, null);
+  assert.equal(row.quoteVolume, null);
+  assert.equal(row.lastPrice, 1.5);
+  assert.equal(mapCanonicalTicker(null), null);
+});
+
+test('AI context carries freshness and hides withheld numbers', () => {
+  const fresh = buildAiContext(dataFor(fakeFleet(), NOW, fakeCanonical()));
+  assert.equal(fresh.data_freshness.market_data_usable, true);
+  assert.equal(fresh.market_pulse.btc_change_24h, -1.79);
+
+  const withheld = buildAiContext(dataFor({ autoMarketSnapshot: null, tradingRadar: {} }, NOW));
+  assert.equal(withheld.market_pulse, null, 'no numbers handed to the model');
+  assert.equal(withheld.radar, null);
+  assert.equal(withheld.data_freshness.market_data_usable, false);
+  assert.equal(withheld.data_freshness.market_data_withheld_reason, MORNING_BRIEFING_DATA_REASONS.NO_MARKET_SNAPSHOT);
+});
+
+test('the AI prompt forbids narrating withheld market data', () => {
+  const geminiSrc = fs.readFileSync(new URL('../scripts/briefing/gemini-node.mjs', import.meta.url), 'utf8');
+  assert.ok(geminiSrc.includes('data_freshness'), 'prompt references the freshness block');
+  assert.ok(/market_data_usable is false/.test(geminiSrc), 'prompt states the withheld-data rule');
+});
+
+test('freshness bound is env-tunable and defaults to 15 minutes', () => {
+  assert.equal(maxDataAgeMs({}), DEFAULT_MAX_DATA_AGE_MS);
+  assert.equal(maxDataAgeMs({}), 15 * 60 * 1000);
+  assert.equal(maxDataAgeMs({ MORNING_BRIEFING_MAX_DATA_AGE_MIN: '45' }), 45 * 60 * 1000);
+  assert.equal(maxDataAgeMs({ MORNING_BRIEFING_MAX_DATA_AGE_MIN: 'nonsense' }), DEFAULT_MAX_DATA_AGE_MS);
+  // A wider bound makes an older state usable again — but only explicitly.
+  const stale = fakeCanonical({ observedAt: '2026-06-17T04:00:00Z', computedAt: '2026-06-17T04:00:00Z' });
+  const data = dataFor(fakeFleet(), NOW, stale, { MORNING_BRIEFING_MAX_DATA_AGE_MIN: '180' });
+  assert.equal(data.freshness.marketUsable, true);
+});
+
+test('fmtAge renders minutes / hours / days', () => {
+  assert.equal(fmtAge(30 * 1000), 'under 1 min');
+  assert.equal(fmtAge(4 * 60 * 1000), '4 min');
+  assert.equal(fmtAge(3 * 3600 * 1000 + 12 * 60 * 1000), '3 h 12 min');
+  assert.equal(fmtAge(2 * 86400 * 1000 + 3600 * 1000), '2 d 1 h');
+  assert.equal(fmtAge(null), 'unknown age');
+});
+
+test('runMorningBriefing reports data provenance in its diagnostics', async () => {
+  const r = recorder();
+  const { loadFleet, mutateFleet } = makeStore();
+  const diag = await runMorningBriefing({
+    env: ENABLED_ENV, now: NOW, loadFleet, mutateFleet, sendMessage: r.send,
+    loadMarketContext: async () => fakeCanonical(),
+  });
+  assert.equal(diag.sent, 1);
+  assert.equal(diag.dataSource, MORNING_BRIEFING_DATA_SOURCES.CANONICAL);
+  assert.equal(diag.marketDataUsable, true);
+  assert.equal(diag.radarDataUsable, true);
+  assert.ok(diag.marketDataAgeMs >= 0);
+});
+
+test('a throwing canonical read never crashes the briefing', async () => {
+  const r = recorder();
+  const { loadFleet, mutateFleet } = makeStore();
+  const diag = await runMorningBriefing({
+    env: ENABLED_ENV, now: NOW, loadFleet, mutateFleet, sendMessage: r.send,
+    loadMarketContext: async () => { throw new Error('boom'); },
+  });
+  assert.equal(diag.sent, 1, 'still sends, on the labelled fallback');
+  assert.equal(diag.dataSource, MORNING_BRIEFING_DATA_SOURCES.FLEET);
+  assert.ok(diag.providerErrors.some((e) => /market context read failed/.test(e)), 'failure is reported, not swallowed');
+});
+
+test('the netlify function reads the canonical store and logs provenance', () => {
+  assert.ok(fnSrc.includes('_market-context-store.mjs'), 'canonical store imported');
+  assert.ok(fnSrc.includes('loadMarketContext'), 'canonical read injected');
+  assert.ok(/console\.warn\('\[morning-briefing\] canonical_context/.test(fnSrc), 'canonical failure logged');
+  assert.ok(/data source=\$\{diag\.dataSource\}/.test(fnSrc), 'provenance logged on every run');
 });
