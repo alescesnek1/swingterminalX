@@ -647,3 +647,81 @@ test('provenance is logged as "not evaluated" when the run stopped at a gate', (
   assert.match(fnSrc, /data provenance not evaluated \(stopped at a gate/);
   assert.match(fnSrc, /if \(diag\.dataSource === null\)/);
 });
+
+// ── spot-only mandate (regression: 2026-08-02 briefing) ─────────────────────
+// Pointing the briefing at the canonical context brought FUTURES rows into its
+// universe. That morning 11 of the 16 coins it named — the whole "strongest
+// momentum" group and two of the three "closest to entry" — were futures-only
+// listings this spot-only desk cannot buy. A suggestion that cannot be acted on is
+// worse than no suggestion.
+function venueCanonical() {
+  const c = fakeCanonical();
+  c.market.tickers = [
+    { market: 'spot', symbol: 'BTCUSDT', base_asset: 'BTC', quote_asset: 'USDT', last_price: '63000', price_change_percent: '0.7', quote_volume: '500000000' },
+    { market: 'spot', symbol: 'GIGGLEUSDT', base_asset: 'GIGGLE', quote_asset: 'USDT', last_price: '2', price_change_percent: '12.0', quote_volume: '90000000' },
+    // Futures-only listings: no spot row anywhere, big moves and big volume.
+    { market: 'futures', symbol: '1000RATSUSDT', base_asset: '1000RATS', quote_asset: 'USDT', last_price: '0.1', price_change_percent: '58.4', quote_volume: '485000000' },
+    { market: 'futures', symbol: 'AKEUSDT', base_asset: 'AKE', quote_asset: 'USDT', last_price: '1', price_change_percent: '3.0', quote_volume: '592000000' },
+  ];
+  c.radar.candidates = [
+    { market: 'spot', symbol: 'GIGGLEUSDT', status: 'STABILIZING', entry_ready: false, setup_score: 79, computed_at: c.radar.computedAt,
+      payload: { symbol: 'GIGGLEUSDT', stage: 'STABILIZING', safetyStatus: 'SAFE', distanceToEntryReadyScore: 79, reasons: ['base forming'] } },
+    { market: 'futures', symbol: 'AKEUSDT', status: 'STABILIZING', entry_ready: false, setup_score: 76, computed_at: c.radar.computedAt,
+      payload: { symbol: 'AKEUSDT', stage: 'STABILIZING', safetyStatus: 'SAFE', distanceToEntryReadyScore: 76, reasons: ['base forming'] } },
+  ];
+  return c;
+}
+
+test('a futures-only listing is never suggested to a spot-only desk', () => {
+  const data = dataFor(fakeFleet(), NOW, venueCanonical());
+  const named = data.coinGroups.flatMap((g) => g.rows.map((r) => r.display));
+  assert.ok(named.includes('BTC') || named.includes('GIGGLE'), 'spot coins are still suggested');
+  assert.ok(!named.includes('1000RATS'), 'the biggest mover is futures-only → not suggested');
+  assert.ok(!named.includes('AKE'), 'the biggest volume is futures-only → not suggested');
+  // The RADAR watchlist and "closest to entry" obey the same rule.
+  assert.deepEqual(data.radarSummary.topClosest.map((t) => t.display), ['GIGGLE']);
+  const msg = buildBriefingMessage({ data, dateStr: TODAY, ai: null, aiUsed: false });
+  assert.ok(!msg.includes('1000RATS'));
+  assert.ok(!/\bAKE\b/.test(msg));
+});
+
+test('the exclusion is stated, never a silently shorter list', () => {
+  const data = dataFor(fakeFleet(), NOW, venueCanonical());
+  assert.equal(data.freshness.venueFiltered, true);
+  assert.equal(data.freshness.excludedFuturesOnlyMarkets, 2);
+  assert.equal(data.freshness.excludedFuturesOnlyCandidates, 1);
+  const msg = buildBriefingMessage({ data, dateStr: TODAY, ai: null, aiUsed: false });
+  assert.match(msg, /Spot-only desk: 2 market row\(s\) and 1 RADAR candidate\(s\) excluded as futures-only listings/);
+});
+
+test('a coin listed on BOTH venues stays eligible even when scored on futures', () => {
+  const c = venueCanonical();
+  // BTC has a spot row; a futures candidate for it must still be allowed through.
+  c.radar.candidates.push({ market: 'futures', symbol: 'BTCUSDT', status: 'STABILIZING', entry_ready: false, setup_score: 70, computed_at: c.radar.computedAt,
+    payload: { symbol: 'BTCUSDT', stage: 'STABILIZING', safetyStatus: 'SAFE', distanceToEntryReadyScore: 70, reasons: ['base forming'] } });
+  const data = dataFor(fakeFleet(), NOW, c);
+  assert.ok(data.radarSummary.topClosest.some((t) => t.display === 'BTC'), 'dual-listed coins are tradable on spot');
+});
+
+test('the legacy fleet path is unaffected — rows without a venue are all eligible', () => {
+  const data = dataFor(fakeFleet(), NOW);
+  assert.equal(data.freshness.venueFiltered, false, 'no venue information → no filtering');
+  assert.equal(data.freshness.excludedFuturesOnlyMarkets, 0);
+  assert.ok(data.coinCount > 0, 'the spot-only fleet snapshot still produces a watchlist');
+});
+
+test('the same coin is never listed twice under two quote pairs', () => {
+  // HOMEUSDT and HOMEUSDC are different symbols but the line renders the base asset,
+  // so keying the dedupe on the full symbol printed "HOME" twice with two numbers.
+  const c = fakeCanonical();
+  c.market.tickers = [
+    { market: 'spot', symbol: 'HOMEUSDT', base_asset: 'HOME', quote_asset: 'USDT', last_price: '1', price_change_percent: '31.2', quote_volume: '9000000' },
+    { market: 'spot', symbol: 'HOMEUSDC', base_asset: 'HOME', quote_asset: 'USDC', last_price: '1', price_change_percent: '31.0', quote_volume: '8000000' },
+    { market: 'spot', symbol: 'FRONTUSDT', base_asset: 'FRONT', quote_asset: 'USDT', last_price: '1', price_change_percent: '26.0', quote_volume: '7000000' },
+  ];
+  c.radar.candidates = [];
+  const data = dataFor(fakeFleet(), NOW, c);
+  const named = data.coinGroups.flatMap((g) => g.rows.map((r) => r.display));
+  assert.deepEqual(named.filter((x) => x === 'HOME').length, 1, 'one line per coin');
+  assert.ok(named.includes('FRONT'), 'the next distinct coin takes the freed slot');
+});

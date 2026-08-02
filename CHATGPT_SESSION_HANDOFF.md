@@ -13,6 +13,35 @@
 > `/reply` or `/admin_summary` support system** here. If you find yourself
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
+> _Briefing suggested coins the desk cannot buy — fixed (2026-08-02, local,
+> uncommitted, NOT deployed):_ Owner asked for the 2026-08-02 briefing to be
+> verified. Its NUMBERS were checked against live Binance data and are correct:
+> BTC +0.69% / ETH +0.47% at the stated 05:57:09Z observation (briefing said
+> +0.7% / +0.5%), summed volume $9.4B vs $9.3B, median ±1.8% vs ±1.6%, and every
+> named mover exists with the stated move (1000RATS +56.6% vs 58.4%, BLESS +49.7%
+> vs 49.2%, UAI +39.1% vs 36.7% — drift over the ~35 min between send and check).
+>
+> **But 11 of the 16 coins it named were FUTURES-ONLY listings** — the entire
+> "Strongest momentum" group (1000RATS, BLESS, UAI), two of the three "Closest to
+> entry" (AKE, CL), plus BEAT, CAP, BZ, SNDK. This desk is **spot only**; those
+> orders cannot be placed. It is a regression from pointing the briefing at the
+> canonical context: the Fleet snapshot it used to read came from the local
+> worker's SPOT exchangeInfo, while the canonical universe carries both venues and
+> a perp can out-rank every spot pair on volume or 24h move.
+>
+> Fixed: every "coins to watch" group (momentum, flush, RADAR watch, high volume,
+> safety-approved) and `topClosest` now draw only from coins with a SPOT row; a
+> coin listed on both venues stays eligible even when scored on futures. The count
+> excluded is STATED in the message ("Spot-only desk: N market row(s) and M RADAR
+> candidate(s) excluded as futures-only listings") — never a silently shorter list.
+> Rows with no venue at all (the legacy Fleet path) are unaffected. Replayed over
+> the live universe: 441 of 811 rows are futures-only, and the watchlist becomes
+> HOME / FRONT / HYPER / BTC / ETH.
+>
+> Also fixed while replaying: the watchlist deduped on the full SYMBOL, so HOMEUSDT
+> and HOMEUSDC both passed and the message printed "HOME" twice with two slightly
+> different numbers. It now dedupes on the COIN, across all groups.
+>
 > _RADAR signal journal — the archive a backtest can honestly use (2026-08-02,
 > local, uncommitted, NOT deployed; MIGRATION NOT APPLIED):_ Owner picked "path A"
 > — let real RADAR signals accumulate rather than reconstructing them from candles.
