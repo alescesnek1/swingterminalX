@@ -607,3 +607,22 @@ test('the netlify function reads the canonical store and logs provenance', () =>
   assert.ok(/console\.warn\('\[morning-briefing\] canonical_context/.test(fnSrc), 'canonical failure logged');
   assert.ok(/data source=\$\{diag\.dataSource\}/.test(fnSrc), 'provenance logged on every run');
 });
+
+test('an empty MORNING_BRIEFING_HOUR_LOCAL keeps the 08:00 default, not midnight', async () => {
+  // Number('') === 0, so an env var set to an empty value in the Netlify UI would have
+  // moved the briefing to 00:00 local time.
+  const r = recorder();
+  const { loadFleet, mutateFleet } = makeStore();
+  for (const raw of ['', '   ', 'nonsense', null, undefined, '25', '-1', '8.5']) {
+    const diag = await runMorningBriefing({
+      env: { ...ENABLED_ENV, MORNING_BRIEFING_HOUR_LOCAL: raw }, now: NOW, dryRun: true,
+      loadFleet, mutateFleet, sendMessage: r.send,
+    });
+    assert.equal(diag.targetHour, 8, `raw ${JSON.stringify(raw)} falls back to 08:00`);
+  }
+  const explicit = await runMorningBriefing({
+    env: { ...ENABLED_ENV, MORNING_BRIEFING_HOUR_LOCAL: '6' }, now: NOW, dryRun: true,
+    loadFleet, mutateFleet, sendMessage: r.send,
+  });
+  assert.equal(explicit.targetHour, 6, 'a real hour still overrides');
+});

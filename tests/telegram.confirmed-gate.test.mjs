@@ -65,7 +65,9 @@ async function sendCountFor(candidate, stateInput = {}) {
   };
   try {
     const state = normalizeRadarTelegramAlertState(stateInput);
-    const due = selectRadarEntryAlerts({ entryReady: [candidate] }, state, NOW);
+    // Freshness stated explicitly: the selector fails closed when it is unknown,
+    // and this helper is about the CONFIRMATION gate, not about staleness.
+    const due = selectRadarEntryAlerts({ dataFreshnessMs: 30_000, entryReady: [candidate] }, state, NOW);
     for (const c of due) {
       // eslint-disable-next-line no-await-in-loop
       const res = await sendRadarEntryReadyTelegram(c, state, 'tok', 'chat', { now: NOW });
@@ -187,6 +189,9 @@ async function runHandlerWith(envPatch) {
   try {
     await mutateFleet((fleet) => {
       fleet.tradingRadar = {
+        // The alert gate fails closed on unknown freshness, so a fixture about the
+        // CONFIRMATION gate must state the freshness it assumes.
+        dataFreshnessMs: 30_000,
         entryReady: [validEntry()],
         candidates: [validEntry()],
         telegramAlertState: normalizeRadarTelegramAlertState(),

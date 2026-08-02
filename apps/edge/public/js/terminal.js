@@ -5205,7 +5205,19 @@ function _cpRadarStateInnerHtml(model) {
   // "Never scored" and "the read failed" are different facts and must not share a
   // rendering — a blank/absent verdict may never stand in for an error.
   if (model.state === 'notScored') {
-    return wrap(`<div class="cp-radar-insight__row cp-radar-insight__note">No server RADAR verdict for <b>${_esc(model.symbol || '--')}</b> yet — it is outside the measured microstructure budget, so the server has not scored it. This is a coverage gap, <b>not</b> a rejected setup.</div>`);
+    // A miss has two causes and they must not share a sentence: this coin being
+    // outside the measured budget is a coverage gap; the server having scored NOTHING
+    // is a publisher outage. The endpoint reports the table's coverage so the panel
+    // states which one it actually is instead of asserting the friendlier one.
+    const cov = model.coverage || {};
+    if (cov.available === true && cov.scoredSymbols === 0) {
+      const age = Number.isFinite(cov.newestAgeMs) ? `${Math.round(cov.newestAgeMs / 60000)} min ago` : 'never';
+      return wrap(`<div class="cp-radar-insight__row cp-radar-insight__note"><b style="color:#ffaa00;">The server has scored NO coins</b> — the RADAR publisher is not writing verdicts (last write: ${_esc(age)}). This is a server-side outage, <b>not</b> a verdict about ${_esc(model.symbol || '--')}. Check the collector/publisher logs.</div>`);
+    }
+    const scoredNote = Number.isFinite(cov.scoredSymbols)
+      ? ` The server currently holds verdicts for ${_esc(cov.scoredSymbols)} coin(s).`
+      : '';
+    return wrap(`<div class="cp-radar-insight__row cp-radar-insight__note">No server RADAR verdict for <b>${_esc(model.symbol || '--')}</b> yet — it is outside the measured microstructure budget, so the server has not scored it. This is a coverage gap, <b>not</b> a rejected setup.${scoredNote}</div>`);
   }
   if (model.state === 'error') {
     return wrap(`<div class="cp-radar-insight__row cp-radar-insight__note"><b style="color:#ffaa00;">Server verdict unavailable</b> — ${_esc(model.message || 'unknown error')}. This is a failed read, not a "no setup" result.</div>`);
@@ -5258,7 +5270,7 @@ async function _refreshCockpitRadarState() {
     const r = await fetch(`/api/cockpit-radar-state?symbol=${encodeURIComponent(symbol)}`, { signal: ctrl.signal, headers: { 'Accept': 'application/json', ...authHeaders } });
     let body = null; try { body = await r.json(); } catch { /* fall back to the HTTP status as the reason */ }
     // 404 is the honest "server has not scored this coin", not a failure.
-    if (r.status === 404 || (body && body.found === false)) { _cpRadarStatePaint(symbol, { state: 'notScored', symbol }); return; }
+    if (r.status === 404 || (body && body.found === false)) { _cpRadarStatePaint(symbol, { state: 'notScored', symbol, coverage: (body && body.coverage) || null }); return; }
     if (!r.ok || !body || body.ok !== true) {
       const reason = (body && body.reason) || `HTTP ${r.status}`;
       console.warn('[CP-RADAR-STATE]', r.status, symbol, reason);

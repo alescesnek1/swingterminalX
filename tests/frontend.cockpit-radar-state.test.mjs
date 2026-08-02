@@ -63,3 +63,14 @@ test('the block is display-only: it imports nothing and triggers no trade action
   assert.match(block, /_esc\(/);
   assert.doesNotMatch(block, /innerHTML\s*=\s*[^_]*\$\{(?!_esc|_cpRadarStateInnerHtml)/);
 });
+
+// A miss has two causes and the panel must not assert the friendlier one.
+test('an empty state table is rendered as a publisher outage, not a coverage gap', () => {
+  assert.match(terminalJs, /The server has scored NO coins/);
+  assert.match(terminalJs, /This is a server-side outage, <b>not<\/b> a verdict about/);
+  // The coverage payload reaches the renderer.
+  assert.match(terminalJs, /coverage: \(body && body\.coverage\) \|\| null/);
+  assert.match(terminalJs, /cov\.available === true && cov\.scoredSymbols === 0/);
+  // And the coverage-gap branch now says how many coins ARE scored.
+  assert.match(terminalJs, /The server currently holds verdicts for/);
+});

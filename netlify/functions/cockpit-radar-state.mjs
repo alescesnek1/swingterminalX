@@ -105,8 +105,29 @@ export async function runCockpitRadarStateRead(req, deps = {}) {
     return json(req, { ok: false, reason }, reason === 'INVALID_SYMBOL' ? 400 : 503);
   }
   // "Not scored" is a real, distinguishable answer — not an error, and not an empty
-  // object the client could mistake for a computed verdict of nothing.
-  if (!result.state) return json(req, { ok: true, found: false, symbol, reason: 'NOT_SCORED' }, 404);
+  // object the client could mistake for a computed verdict of nothing. But it has two
+  // causes, so the miss carries the table's coverage: a gap for THIS coin
+  // (other coins are scored) is a different fact from the publisher writing nothing
+  // for anyone, and the client must be able to say which.
+  if (!result.state) {
+    // A failing coverage probe must not turn an honest 404 into a 500, so the miss is
+    // answered with the coverage reported as unavailable.
+    let coverage;
+    try { coverage = await store.getRadarStateCoverage(database); } catch { coverage = null; }
+    const covered = coverage && coverage.ok === true ? coverage.rows : null;
+    const newest = coverage && coverage.ok === true ? coverage.newestComputedAt : null;
+    const newestMs = newest ? new Date(newest).getTime() : NaN;
+    return json(req, {
+      ok: true, found: false, symbol,
+      reason: covered === 0 ? 'RADAR_STATE_EMPTY' : 'NOT_SCORED',
+      coverage: {
+        scoredSymbols: covered,
+        newestComputedAt: newest ?? null,
+        newestAgeMs: Number.isFinite(newestMs) ? Math.max(0, Date.now() - newestMs) : null,
+        available: !!(coverage && coverage.ok === true),
+      },
+    }, 404);
+  }
   return json(req, { ok: true, found: true, state: present(result.state, Date.now()) });
 }
 

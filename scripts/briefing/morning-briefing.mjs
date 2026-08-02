@@ -823,7 +823,15 @@ export async function runMorningBriefing(opts = {}) {
   } = opts;
 
   const timezone = env.MORNING_BRIEFING_TIMEZONE || 'Europe/Prague';
-  const targetHour = Number.isFinite(Number(env.MORNING_BRIEFING_HOUR_LOCAL)) ? Number(env.MORNING_BRIEFING_HOUR_LOCAL) : 8;
+  // An env var set to an EMPTY value is a normal state in the Netlify UI, and
+  // Number('') is 0 — which would silently move the briefing to midnight local time.
+  // Only a real 0-23 number may override the default hour.
+  const targetHour = (() => {
+    const raw = env.MORNING_BRIEFING_HOUR_LOCAL;
+    if (raw === null || raw === undefined || String(raw).trim() === '') return 8;
+    const value = Number(raw);
+    return Number.isInteger(value) && value >= 0 && value <= 23 ? value : 8;
+  })();
   const today = localDayString(now, timezone);
   const token = env.TG_BOT_TOKEN ? String(env.TG_BOT_TOKEN).trim() : '';
   const chatId = env.TG_CHAT_ID ? String(env.TG_CHAT_ID).trim() : '';

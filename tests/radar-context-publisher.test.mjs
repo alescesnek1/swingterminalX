@@ -5,6 +5,7 @@ import { runRadarContextPublisher } from '../netlify/functions/_radar-context-pu
 import * as radar from '../scripts/radar/trading-radar.mjs';
 import * as bridge from '../scripts/radar/collector-absorb-bridge.mjs';
 import * as rolling from '../scripts/radar/rolling-microstructure-snapshot.mjs';
+import * as store from '../netlify/functions/_market-context-store.mjs';
 
 const NOW = 1_800_000_000_000;
 const OBSERVED = new Date(NOW).toISOString();
@@ -192,4 +193,158 @@ test('the publisher key builder matches the snapshot reader format', async () =>
     assert.equal(klinesKeyFor(market, 'BTCUSDT'), `${market}:BTCUSDT`);
   }
   assert.equal(capture.payload.providerStatus.ABSORB_COVERAGE.DISTINCT_SYMBOLS, 2);
+});
+
+// ── venue identity / duplicate conflict target (regression: PG 21000) ──────
+// Production, every collector cycle up to 2026-08-01: the RADAR evaluator emitted
+// one candidate per venue but the candidate object carried no `market`, so
+// upsertRadarCandidateStates mapped BOTH onto (spot, SYMBOL). Postgres rejected the
+// batch with 21000 cardinality_violation ("ON CONFLICT DO UPDATE cannot affect row
+// a second time"), the shared transaction rolled back, and NOTHING RADAR-related was
+// written — which fail-closed the canonical alert path on every cycle.
+
+test('an evaluated candidate carries the venue of the row it was scored from', () => {
+  const spotAndFutures = [
+    { market: 'spot', symbol: 'BTCUSDT', lastPrice: 101, price: 101, quoteVolume: 9e8, quoteVolume24h: 9e8, priceChangePercent: -6, change24hPct: -6, high_24h: 120, low_24h: 99, status: 'TRADING' },
+    { market: 'futures', symbol: 'BTCUSDT', lastPrice: 101, price: 101, quoteVolume: 12e8, quoteVolume24h: 12e8, priceChangePercent: -6.1, change24hPct: -6.1, high_24h: 120, low_24h: 99, status: 'TRADING' },
+  ];
+  const out = radar.evaluateTradingRadar({ markets: spotAndFutures, source: 'test', fetchedAt: OBSERVED, now: NOW });
+  const btc = (out.candidates || []).filter((c) => c.symbol === 'BTCUSDT');
+  assert.equal(btc.length, 2, 'both venues are scored');
+  assert.deepEqual(btc.map((c) => c.market).sort(), ['futures', 'spot'], 'each carries its own venue');
+  // The venue is never guessed for a row that does not name one.
+  const bare = radar.evaluateTradingRadar({ markets: [{ symbol: 'FOOUSDT', lastPrice: 1, price: 1, quoteVolume: 5e7, quoteVolume24h: 5e7, priceChangePercent: -5, change24hPct: -5, status: 'TRADING' }], source: 'test', fetchedAt: OBSERVED, now: NOW });
+  assert.equal((bare.candidates || [])[0]?.market, null);
+});
+
+test('dedupeByVenueSymbol enforces the (market,symbol) conflict key', () => {
+  const res = store.dedupeByVenueSymbol([
+    { symbol: 'BTCUSDT', market: 'spot', SETUP_SCORE: 40 },
+    { symbol: 'BTCUSDT', market: 'futures', SETUP_SCORE: 30 },
+    { symbol: 'BTCUSDT', market: 'spot', SETUP_SCORE: 80 },
+    { symbol: '', market: 'spot' },
+  ]);
+  assert.equal(res.rows.length, 2, 'one row per venue');
+  assert.equal(res.dropped, 1);
+  assert.equal(res.skippedNoSymbol, 1);
+  const spot = res.rows.find((r) => r.market === 'spot');
+  assert.equal(spot.SETUP_SCORE, 80, 'higher setup score survives');
+});
+
+test('dedupe keeps the entry-ready row even when it scores lower', () => {
+  const res = store.dedupeByVenueSymbol([
+    { symbol: 'SOLUSDT', market: 'spot', SETUP_SCORE: 95, allRadarConditionsPassed: false },
+    { symbol: 'SOLUSDT', market: 'spot', SETUP_SCORE: 60, allRadarConditionsPassed: true },
+  ]);
+  assert.equal(res.rows.length, 1);
+  assert.equal(res.rows[0].allRadarConditionsPassed, true, 'entry-ready outranks the score');
+});
+
+test('a row without a venue is stored as spot but cannot collide with a named venue', () => {
+  assert.equal(store.radarStateVenue({ symbol: 'X' }), 'spot');
+  assert.equal(store.radarStateVenue({ symbol: 'X', market: 'futures' }), 'futures');
+  assert.equal(store.radarStateVenue({ symbol: 'X', market: 'spot' }), 'spot');
+});
+
+test('upsertRadarCandidateStates never sends a duplicate conflict target to Postgres', async () => {
+  const queries = [];
+  const db = { query: async (sql, values) => { queries.push({ sql, values }); return { rows: [] }; } };
+  const res = await store.upsertRadarCandidateStates(db, {
+    runId: 42, computedAt: new Date(NOW), observedAt: new Date(NOW),
+    candidates: [
+      { symbol: 'BTCUSDT', market: 'spot', STATUS: 'WATCH' },
+      { symbol: 'BTCUSDT', market: 'spot', STATUS: 'WATCH' },   // the 21000 trigger
+      { symbol: 'BTCUSDT', market: 'futures', STATUS: 'WATCH' },
+      { symbol: 'ETHUSDT', STATUS: 'WATCH' },                    // no venue → spot
+    ],
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.written, 3, 'the duplicate was collapsed, the venues were not');
+  assert.equal(queries.length, 1);
+  // Rebuild the (market,symbol) keys from the bound parameters: they must be unique.
+  const cols = 43;
+  const keys = [];
+  for (let i = 0; i < queries[0].values.length; i += cols) keys.push(`${queries[0].values[i]}:${queries[0].values[i + 1]}`);
+  assert.deepEqual(keys.sort(), ['futures:BTCUSDT', 'spot:BTCUSDT', 'spot:ETHUSDT']);
+  assert.equal(new Set(keys).size, keys.length, 'no key appears twice in one statement');
+});
+
+test('insertRadarRunResult stores an honest candidate_count (no silent DO NOTHING drop)', async () => {
+  const queries = [];
+  const db = { query: async (sql, values) => { queries.push({ sql, values }); return { rows: [] }; } };
+  const res = await store.insertRadarRunResult(db, {
+    runId: 7, status: 'ready', computedAt: new Date(NOW),
+    candidates: [
+      { symbol: 'BTCUSDT', market: 'spot' },
+      { symbol: 'BTCUSDT', market: 'spot' },
+      { symbol: 'BTCUSDT', market: 'futures' },
+    ],
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.candidateCount, 2, 'count matches the rows actually stored');
+  const snapshot = queries.find((q) => q.sql.includes('radar_run_snapshots'));
+  assert.equal(snapshot.values[4], 2, 'candidate_count column matches too');
+});
+
+// ── the state write must not be able to destroy the run snapshot ────────────
+test('a failing state write leaves the committed run snapshot in place', async () => {
+  const capture = {};
+  const committed = [];
+  const failingStore = {
+    ...fakeStore(capture),
+    insertRadarRunResult: async (_db, payload) => { capture.payload = payload; return { ok: true, candidateCount: payload.candidates.length }; },
+    upsertRadarCandidateStates: async () => ({ ok: false, reason: 'DB_UNAVAILABLE' }),
+  };
+  // Mirror withContextTransaction: a callback returning !ok rolls its own work back.
+  const withTransaction = async (cb) => {
+    const result = await cb({});
+    committed.push(result?.ok === true ? 'COMMIT' : 'ROLLBACK');
+    return result;
+  };
+  const res = await runRadarContextPublisher({
+    env: { MARKET_CONTEXT_RADAR_ENABLED: 'true' }, store: failingStore, withTransaction,
+    radar, bridge, rolling, bundle: fullBundle(),
+  });
+  assert.ok(capture.payload, 'the run result was written');
+  assert.equal(committed[0], 'COMMIT', 'the run-snapshot transaction committed BEFORE the state write');
+  assert.equal(committed[1], 'ROLLBACK', 'only the state transaction rolled back');
+  // The failure stays loud.
+  assert.equal(res.status, 503);
+  assert.equal(res.body.ok, false);
+  assert.equal(res.body.runSnapshotPublished, true, 'and it says the history survived');
+});
+
+test('the state write happens after the run snapshot, with the same run identity', async () => {
+  const capture = {};
+  const order = [];
+  const orderedStore = {
+    ...fakeStore(capture),
+    insertRadarRunResult: async (_db, payload) => { order.push('run'); capture.payload = payload; return { ok: true, candidateCount: payload.candidates.length }; },
+    upsertRadarCandidateStates: async (_db, payload) => { order.push('state'); capture.statePayload = payload; return { ok: true, written: payload.candidates.length }; },
+  };
+  const res = await runRadarContextPublisher({
+    env: { MARKET_CONTEXT_RADAR_ENABLED: 'true' }, store: orderedStore, withTransaction: async (cb) => cb({}),
+    radar, bridge, rolling, bundle: fullBundle(),
+  });
+  assert.equal(res.body.ok, true);
+  assert.deepEqual(order, ['run', 'state']);
+  assert.equal(capture.statePayload.runId, 42);
+  assert.equal(capture.statePayload.candidates.length, capture.payload.candidates.length);
+  assert.equal(capture.statePayload.observedAt, OBSERVED);
+});
+
+test('the publisher hands RADAR the instrument base/quote, not a symbol guess', async () => {
+  const capture = {};
+  const bundle = fullBundle();
+  bundle.tickers = [{ market: 'spot', symbol: 'BTCUSDT', base_asset: 'BTC', quote_asset: 'USDT', last_price: 101, price_change_percent: -6, high_price: 120, low_price: 99, base_volume: 5e5, quote_volume: 9e8, trade_count: 500000 }];
+  await runRadarContextPublisher({
+    env: { MARKET_CONTEXT_RADAR_ENABLED: 'true' }, store: fakeStore(capture), withTransaction: async (cb) => cb({}),
+    radar: {
+      ...radar,
+      evaluateTradingRadar: (args) => { capture.markets = args.markets; return radar.evaluateTradingRadar(args); },
+    },
+    bridge, rolling, bundle,
+  });
+  assert.equal(capture.markets[0].baseAsset, 'BTC');
+  assert.equal(capture.markets[0].quoteAsset, 'USDT');
 });

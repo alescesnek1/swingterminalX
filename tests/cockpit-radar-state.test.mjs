@@ -155,3 +155,55 @@ test('the route is read-only: no write, no scoring, no Telegram, no worker token
   assert.match(src, /'Cache-Control': 'no-store'/);
   assert.match(src, /path: '\/api\/cockpit-radar-state'/);
 });
+
+// ── a miss must say WHICH cause it is (audit 2026-08-01) ─────────────────────
+// The same 404 is returned when this coin is outside the measured budget and when
+// radar_candidate_state is EMPTY because the publisher is failing. Live on
+// 2026-08-01 it was the second, while the Cockpit asserted the first.
+test('a miss reports the table coverage, so a gap is distinguishable from an outage', async () => {
+  const res = await runCockpitRadarStateRead(request('symbol=BTCUSDT'), {
+    ...verified, database,
+    store: {
+      getRadarCandidateState: async () => ({ ok: true, state: null }),
+      getRadarStateCoverage: async () => ({ ok: true, rows: 143, newestComputedAt: new Date(NOW - 90_000).toISOString() }),
+    },
+  });
+  assert.equal(res.status, 404);
+  const body = await res.json();
+  assert.equal(body.found, false);
+  assert.equal(body.reason, 'NOT_SCORED', 'other coins ARE scored → a coverage gap');
+  assert.equal(body.coverage.scoredSymbols, 143);
+  assert.equal(body.coverage.available, true);
+  assert.ok(body.coverage.newestAgeMs >= 90_000 - 5_000);
+});
+
+test('an empty state table is reported as RADAR_STATE_EMPTY, not as a coverage gap', async () => {
+  const res = await runCockpitRadarStateRead(request('symbol=BTCUSDT'), {
+    ...verified, database,
+    store: {
+      getRadarCandidateState: async () => ({ ok: true, state: null }),
+      getRadarStateCoverage: async () => ({ ok: true, rows: 0, newestComputedAt: null }),
+    },
+  });
+  assert.equal(res.status, 404);
+  const body = await res.json();
+  assert.equal(body.reason, 'RADAR_STATE_EMPTY');
+  assert.equal(body.coverage.scoredSymbols, 0);
+  assert.equal(body.coverage.newestComputedAt, null);
+  assert.equal(body.coverage.newestAgeMs, null);
+});
+
+test('a failing coverage probe never breaks the miss answer', async () => {
+  const res = await runCockpitRadarStateRead(request('symbol=BTCUSDT'), {
+    ...verified, database,
+    store: {
+      getRadarCandidateState: async () => ({ ok: true, state: null }),
+      getRadarStateCoverage: async () => { throw new Error('db down'); },
+    },
+  });
+  assert.equal(res.status, 404);
+  const body = await res.json();
+  assert.equal(body.reason, 'NOT_SCORED');
+  assert.equal(body.coverage.available, false, 'and it says the coverage is unknown');
+  assert.equal(body.coverage.scoredSymbols, null);
+});

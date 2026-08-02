@@ -120,7 +120,7 @@ async function run(overrides = {}) {
   const result = await runPersonalAlerts({
     env: ENV_ENABLED,
     nowMs: NOW,
-    loadFleet: async () => ({ tradingRadar: { entryReady: [validEntry()] } }),
+    loadFleet: async () => ({ tradingRadar: { dataFreshnessMs: 30_000, entryReady: [validEntry()] } }),
     store,
     sendMessage,
     ...overrides,
@@ -276,7 +276,7 @@ test('parsePersonalAlertsAllowlist: unit behavior', () => {
 
 test('no confirmed RADAR ENTRY_READY alerts sends nothing', async () => {
   const { result, sends } = await run({
-    loadFleet: async () => ({ tradingRadar: { candidates: [validEntry({ telegramEligible: false })] } }),
+    loadFleet: async () => ({ tradingRadar: { dataFreshnessMs: 30_000, candidates: [validEntry({ telegramEligible: false })] } }),
   });
   assert.equal(result.reason, 'NO_CONFIRMED_ENTRY_READY');
   assert.equal(result.sent, 0);
@@ -428,7 +428,7 @@ test('per-user cap skips additional messages', async () => {
     store,
     perUserCap: 1,
     loadFleet: async () => ({
-      tradingRadar: { entryReady: [validEntry(), validEntry({ symbol: 'ETHUSDT', entryZone: { low: 3000, high: 3050 } })] },
+      tradingRadar: { dataFreshnessMs: 30_000, entryReady: [validEntry(), validEntry({ symbol: 'ETHUSDT', entryZone: { low: 3000, high: 3050 } })] },
     }),
   });
   assert.equal(result.sent, 1);
