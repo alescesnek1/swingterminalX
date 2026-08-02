@@ -294,3 +294,26 @@ test('PENDING names which stage is missing: collector, publisher, or an empty re
   assert.equal(emptyResult.radar.status, 'PENDING');
   assert.equal(emptyResult.radar.pendingReason, 'RADAR_RESULT_EMPTY');
 });
+
+// ── RADAR input bundle must rank a single currency (audit 2026-08-01) ────────
+// `quote_volume` is denominated in the QUOTE asset, so ordering it across mixed
+// quotes ranks by exchange rate. Measured on the live Binance spot universe (3,670
+// stored pairs): the unfiltered top 1,000 contained only 282 USDT/USDC rows, 718
+// slots went to IDR/TRY/BIDR/JPY/BRL pairs the universe filter rejects anyway, and
+// 774 real USD-stable pairs never reached the RADAR publisher at all.
+test('getRadarInputBundle restricts and ranks the ticker universe to USD-stable quotes', async () => {
+  const captured = [];
+  const db = { query: async (sql, values = []) => {
+    captured.push({ sql, values });
+    if (sql.includes('FROM market_collection_runs')) return { rows: [{ id: 90, observed_at: '2026-08-01T06:00:00.000Z' }] };
+    return { rows: [] };
+  } };
+  const bundle = await getRadarInputBundle(db, { topN: 5, tickerLimit: 1000 });
+  assert.equal(bundle.ok, true);
+  const tickerQuery = captured.find((q) => q.sql.includes('FROM market_ticker_observations'));
+  assert.ok(tickerQuery, 'the ticker universe is read');
+  assert.match(tickerQuery.sql, /JOIN market_instruments/, 'joined to the instrument');
+  assert.match(tickerQuery.sql, /quote_asset = ANY\(\$3\)/, 'filtered by quote asset');
+  assert.deepEqual(tickerQuery.values[2], ['USDT', 'USDC'], 'to the rankable USD-stable quotes');
+  assert.match(tickerQuery.sql, /i\.base_asset,i\.quote_asset/, 'base/quote travel with the row');
+});

@@ -241,7 +241,21 @@ export async function getRadarInputBundle(db, options = {}) {
     if (!prev && runsRes.rows.length > 1) console.warn('[ATOMIC_MARKET_STORE] no_baseline_run_in_window', { runId: latest.id, candidates: runsRes.rows.length - 1, nearestSec: elapsedSec(runsRes.rows[1]), band: [COLLECTOR_WINDOW_MIN_SEC, COLLECTOR_WINDOW_MAX_SEC] });
     const windowSec = prev ? elapsedSec(prev) : null;
     const [tickRes, measRes] = await Promise.all([
-      db.query(`SELECT market,symbol,last_price,price_change_percent,high_price,low_price,base_volume,quote_volume,trade_count,change_1h_pct,change_4h_pct,change_12h_pct,change_7d_pct,observed_at,data_status FROM market_ticker_observations WHERE run_id=$1 ORDER BY quote_volume DESC NULLS LAST LIMIT $2`, [latest.id, tickerLimit]),
+      // Joined to the instrument and restricted to USD-stable quotes, for the same
+      // reason getAtomizedMarketContext is: `quote_volume` is denominated in the QUOTE
+      // asset, so ordering it across mixed quotes ranks by exchange rate. Measured on
+      // the live Binance spot universe (3,670 stored pairs): the unfiltered top 1,000
+      // held only 282 USDT/USDC rows — 718 slots went to IDR/TRY/BIDR/JPY/BRL pairs
+      // that buildRadarUniverse rejects as 'non stable quote' anyway, and 774 real
+      // USD-stable pairs never reached the RADAR publisher at all. The strategy targets
+      // dislocated mid-caps, which is exactly the population that was being pushed out.
+      // base_asset/quote_asset travel with the row so the universe filter reads the
+      // instrument's real quote instead of guessing from the symbol string.
+      db.query(`SELECT t.market,t.symbol,i.base_asset,i.quote_asset,t.last_price,t.price_change_percent,t.high_price,t.low_price,t.base_volume,t.quote_volume,t.trade_count,t.change_1h_pct,t.change_4h_pct,t.change_12h_pct,t.change_7d_pct,t.observed_at,t.data_status
+             FROM market_ticker_observations t
+             JOIN market_instruments i ON i.market = t.market AND i.symbol = t.symbol
+            WHERE t.run_id=$1 AND i.quote_asset = ANY($3)
+            ORDER BY t.quote_volume DESC NULLS LAST LIMIT $2`, [latest.id, tickerLimit, RANKABLE_QUOTE_ASSETS]),
       // One row per (market, symbol), busiest first. This used to collapse to
       // DISTINCT ON (symbol) because the rolling snapshot was keyed by symbol alone,
       // so both venues of one symbol would land on a single key and one would be
@@ -325,7 +339,17 @@ export async function getRadarInputBundle(db, options = {}) {
 export async function insertRadarRunResult(db, payload = {}) {
   const runId = Number(payload.runId); if (!Number.isInteger(runId) || runId <= 0) return { ok: false, reason: 'INVALID_RUN' };
   const status = ['ready', 'pending', 'failed', 'unknown'].includes(payload.status) ? payload.status : 'unknown';
-  const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
+  // Same conflict key as the row insert below (run_id,market,symbol). Its
+  // DO NOTHING would swallow a duplicate silently and leave candidate_count
+  // claiming rows that were never stored, so the collapse happens here where it
+  // can be counted and logged.
+  const deduped = dedupeByVenueSymbol(Array.isArray(payload.candidates) ? payload.candidates : []);
+  if (deduped.dropped > 0 || deduped.skippedNoSymbol > 0) {
+    console.warn('[ATOMIC_MARKET_STORE] radar_run_duplicates_collapsed', {
+      runId, written: deduped.rows.length, duplicates: deduped.dropped, missingSymbol: deduped.skippedNoSymbol,
+    });
+  }
+  const candidates = deduped.rows;
   try {
     await db.query(
       `INSERT INTO radar_run_snapshots (run_id,status,source,computed_at,candidate_count,entry_ready_count,market_regime,pipeline,absorb_funnel,universe_diagnostics,provider_status)
@@ -337,7 +361,7 @@ export async function insertRadarRunResult(db, payload = {}) {
     for (const chunk of chunks(candidates)) {
       const values = [];
       for (const c of chunk) {
-        const market = c.market === 'futures' ? 'futures' : 'spot';
+        const market = radarStateVenue(c);
         values.push(runId, market, upper(c.symbol || '', 32), c.stage ?? null, c.v1Status ?? c.entryStatus ?? c.status ?? null, c.ABSORB_STATUS ?? null, c.ABSORB_MODE ?? null, c.STRICT_ABSORB_STATUS ?? null, c.PROXY_ABSORB_STATUS ?? null, num(c.STRICT_ABSORB_SCORE), num(c.PROXY_ABSORB_SCORE), c.STRICT_ABSORB_CONFIRMED === true, c.RECLAIM_STATUS ?? c.reclaimStatus ?? null, ['ready', 'pending', 'unknown'].includes(c.dataStatus) ? c.dataStatus : 'ready', safeJson(sanitizeDiagnostics(c)));
       }
       await db.query(`INSERT INTO radar_run_candidates (run_id,market,symbol,stage,entry_status,absorb_status,absorb_mode,strict_absorb_status,proxy_absorb_status,strict_absorb_score,proxy_absorb_score,strict_absorb_confirmed,reclaim_status,data_status,payload) VALUES ${valuesSql(chunk.length, 15)} ON CONFLICT (run_id,market,symbol) DO NOTHING`, values);
@@ -386,8 +410,53 @@ function missingInputsOf(candidate) {
 // silent corruption, but keeping it named makes the two easy to check against.
 const RADAR_STATE_COLUMNS = 43;
 
+// Venue of a candidate. A row that does not name its venue is stored as spot —
+// which is what the single-venue legacy path has always meant — but it is NOT
+// allowed to collide with a row that names one (see dedupeByVenueSymbol).
+export function radarStateVenue(candidate) {
+  return candidate && candidate.market === 'futures' ? 'futures' : 'spot';
+}
+
+// ON CONFLICT DO UPDATE cannot touch the same row twice in one statement: a batch
+// carrying (spot,BTCUSDT) twice raises Postgres 21000 (cardinality_violation) and
+// takes the WHOLE publish transaction with it. Observed in production for every
+// cycle between 2026-07-3x and 2026-08-01: the RADAR evaluator emitted one
+// candidate per venue but candidates carried no `market`, so both collapsed onto
+// spot and nothing RADAR-related was written at all.
+//
+// So the conflict key is enforced HERE, before the database sees it. The survivor
+// is the one that matters most operationally — entry-ready first, then the higher
+// setup score — never an arbitrary one, and the collapse is reported so a
+// duplicate that should not exist stays visible.
+export function dedupeByVenueSymbol(candidates) {
+  const bySymbol = new Map();
+  let dropped = 0;
+  let skippedNoSymbol = 0;
+  const rank = (c) => [c && c.allRadarConditionsPassed === true ? 1 : 0, numberOrNull(c && c.SETUP_SCORE) ?? -1];
+  for (const c of candidates) {
+    const symbol = upper((c && c.symbol) || '', 32);
+    if (!symbol) { skippedNoSymbol += 1; continue; }
+    const key = `${radarStateVenue(c)}:${symbol}`;
+    const prev = bySymbol.get(key);
+    if (!prev) { bySymbol.set(key, c); continue; }
+    dropped += 1;
+    const [pReady, pScore] = rank(prev);
+    const [cReady, cScore] = rank(c);
+    if (cReady > pReady || (cReady === pReady && cScore > pScore)) bySymbol.set(key, c);
+  }
+  return { rows: Array.from(bySymbol.values()), dropped, skippedNoSymbol };
+}
+
 export async function upsertRadarCandidateStates(db, payload = {}) {
-  const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
+  const incoming = Array.isArray(payload.candidates) ? payload.candidates : [];
+  const deduped = dedupeByVenueSymbol(incoming);
+  if (deduped.dropped > 0 || deduped.skippedNoSymbol > 0) {
+    console.warn('[ATOMIC_MARKET_STORE] radar_state_duplicates_collapsed', {
+      incoming: incoming.length, written: deduped.rows.length,
+      duplicates: deduped.dropped, missingSymbol: deduped.skippedNoSymbol,
+    });
+  }
+  const candidates = deduped.rows;
   const computedAt = asDate(payload.computedAt);
   const observedAt = asDate(payload.observedAt, computedAt);
   const runId = Number.isInteger(Number(payload.runId)) && Number(payload.runId) > 0 ? Number(payload.runId) : null;
@@ -398,7 +467,7 @@ export async function upsertRadarCandidateStates(db, payload = {}) {
     for (const chunk of chunks(candidates)) {
       const values = [];
       for (const c of chunk) {
-        const market = c.market === 'futures' ? 'futures' : 'spot';
+        const market = radarStateVenue(c);
         const status = RADAR_V1_STATES.has(c.STATUS) ? c.STATUS : 'UNKNOWN';
         const size = parsePositionSizePct(c.POSITION_SIZE_GUIDANCE);
         values.push(
@@ -500,6 +569,23 @@ export async function getRadarCandidateState(db, symbol, options = {}) {
     const result = await db.query(`SELECT ${RADAR_STATE_SELECT} FROM radar_candidate_state WHERE symbol=$1${venue} ORDER BY (market='spot') DESC LIMIT 1`, params);
     return { ok: true, state: result.rows[0] || null };
   } catch (error) { dbError('radar_state_symbol_read_failed', error); return { ok: false, reason: 'DB_UNAVAILABLE' }; }
+}
+
+// Coverage of the per-symbol RADAR state table: how many coins carry a verdict at
+// all, and when the newest one was written.
+//
+// A single-coin miss has TWO very different causes that the row itself cannot tell
+// apart: the coin is outside the measured microstructure budget (a coverage gap), or
+// the publisher is not writing anything for anybody (an outage — observed live on
+// 2026-08-01, when every cycle died on a duplicate conflict target). Asserting the
+// first while the second is true sends the owner looking for the wrong problem, so
+// the miss path reports this instead of guessing.
+export async function getRadarStateCoverage(db) {
+  try {
+    const result = await db.query('SELECT count(*)::int AS rows, max(computed_at) AS newest FROM radar_candidate_state');
+    const row = result.rows[0] || {};
+    return { ok: true, rows: Number(row.rows) || 0, newestComputedAt: row.newest ?? null };
+  } catch (error) { dbError('radar_state_coverage_read_failed', error); return { ok: false, reason: 'DB_UNAVAILABLE' }; }
 }
 
 // The canonical RADAR read. Candidates and freshness come from the atomized

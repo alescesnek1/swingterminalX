@@ -50,6 +50,14 @@ export function resolveLocalOutput(output, cwd = process.cwd()) {
 
 export function formatKuCoinRadarBacktestReport(report) {
   const summary = report.backtest.summary; const costs = report.backtest.assumptions.costAssumptions;
+  // "trades: 0" alone reads like "the strategy found nothing" when the truth may be
+  // "the plan was refused and nothing was ever simulated". The veto reasons are part
+  // of the result, not debug detail.
+  const vetoes = (Array.isArray(report.backtest.riskDecisions) ? report.backtest.riskDecisions : []).filter((d) => d && d.decision === 'vetoed');
+  const vetoCodes = [...new Set(vetoes.flatMap((d) => Array.isArray(d.reasonCodes) ? d.reasonCodes : []))];
+  const vetoLine = vetoes.length
+    ? `NO TRADE SIMULATED - ${vetoes.length} plan(s) vetoed: ${vetoCodes.join(', ')}`
+    : `plans vetoed: 0`;
   return [
     'KuCoin public-data RADAR backtest MVP (LOCAL ONLY - NOT LIVE)',
     'symbol: ' + report.market.symbol,
@@ -57,7 +65,9 @@ export function formatKuCoinRadarBacktestReport(report) {
     'date range: ' + report.market.range.start + ' to ' + report.market.range.end,
     'candles loaded: ' + report.market.candleCount + ' | gaps detected: ' + report.dataset.gaps.length,
     'candidate fixture: ' + report.fixture.name + ' | validation: ' + (report.fixture.validation.ok ? 'PASS' : 'REJECTED'),
-    'trades: ' + summary.trades + ' | wins/losses: ' + summary.wins + '/' + summary.losses + ' | win rate: ' + summary.winRate,
+    'fixture market: ' + (report.fixture.selectedSymbolMapping?.normalizedSymbol ?? 'UNMAPPED'),
+    vetoLine,
+    'trades: ' + summary.trades + ' (closed ' + (summary.closedTrades ?? 0) + ') | wins/losses: ' + summary.wins + '/' + summary.losses + ' | win rate: ' + summary.winRate,
     'gross PnL: ' + summary.grossPnl + ' | fees: ' + summary.fees + ' | spread/slippage bps: ' + costs.spreadBps + '/' + costs.slippageBps,
     'net PnL: ' + summary.netPnl + ' | max drawdown: ' + summary.maxDrawdown + ' | open position at end: ' + summary.openPositions,
     'warnings / UNKNOWN: ' + [...report.backtest.warnings, ...report.reconstruction.notReconstructable].join(', '),
@@ -79,13 +89,24 @@ export async function runKuCoinRadarBacktest(options, dependencies = {}) {
   if (!cached) await writeCache(cachePath, { cacheVersion: 'kucoin-public-candles-cache/v1', cacheKey, fetched });
   const datasetValidation = validateHistoricalMarketDataset(fetched.dataset);
   const normalizedSymbol = settings.symbol.replace('-', '/');
-  const fixtureForMarket = { ...fixture, symbolMapping: { normalizedSymbol, product: 'spot', supported: true } };
+  // The fixture's symbolMapping is EVIDENCE about the market its candidate was
+  // captured on — never a parameter to be rewritten to whatever market was requested.
+  // Overwriting it defeated the mapping validation and let a SOL candidate (stop 135,
+  // target 145) be simulated against BTC-USDT candles at 73,939, reporting a
+  // "take profit" that lost 99.9% of the notional. A fixture that names a different
+  // market is refused here; one that is deliberately unmapped/unsupported is passed
+  // through untouched so the engine vetoes it on its own terms.
+  const mapping = fixture.symbolMapping && typeof fixture.symbolMapping === 'object' ? fixture.symbolMapping : null;
+  if (mapping && mapping.supported === true && mapping.normalizedSymbol !== normalizedSymbol) {
+    throw new Error(`fixture_symbol_mismatch: fixture '${fixture.name}' was captured on ${mapping.normalizedSymbol}, requested market is ${normalizedSymbol}`);
+  }
+  const fixtureForMarket = fixture;
   const fixtureClockMs = Date.parse(fixture.capturedAt);
   const fixtureValidation = { ...fixture.expectedValidation, fixtureVersion: fixture.fixtureVersion, schemaVersion: fixture.schemaVersion };
   const backtest = runRadarBacktest({ dataset: fetched.dataset, candidateFixture: fixtureForMarket, mode: 'spot', quote: settings.quote, clockMs: fixtureClockMs, candidateMaxAgeMs: 120000, quoteBalances: { [settings.quote]: settings.initialEquity }, sizing: { model: 'fixedNotional', fixedNotional: settings.notional }, riskLimits: { maxExposurePerTrade: settings.notional, maxRealRiskAtStop: settings.initialEquity, maxOpenPositions: 1, maxDailyLoss: settings.initialEquity }, costAssumptions: settings.costAssumptions, closeAtDatasetEnd: true });
   const reconstruction = assessRadarHistoricalReconstruction(fetched.dataset, { historicalCandidateFixture: fixtureForMarket });
   const output = resolveLocalOutput(settings.output, cwd);
-  const report = { reportVersion: 'kucoin-radar-backtest-report/v1', generatedAt: now().toISOString(), localOnly: true, nonLive: true, input: { product: settings.product, symbol: settings.symbol, quote: settings.quote, interval: settings.interval, fromMs: settings.fromMs, toMs: settings.toMs, fixture: settings.fixtureName, initialEquity: settings.initialEquity, riskModel: settings.riskModel, notional: settings.notional, costAssumptions: settings.costAssumptions }, market: { product: 'spot', symbol: settings.symbol, quote: settings.quote, interval: settings.interval, range: fetched.dataset.range, candleCount: fetched.dataset.candles.length, source: fetched.request }, dataset: sourceSummary(fetched.dataset), datasetValidation, fixture: { name: fixture.name, fixtureVersion: fixture.fixtureVersion, schemaVersion: fixture.schemaVersion, source: fixture.source, validation: fixtureValidation, selectedSymbolMapping: fixtureForMarket.symbolMapping }, reconstruction, backtest, limitations: ['public KuCoin candles only; no authenticated or private endpoint was called', 'RADAR actionability and Strict Absorb come only from the supplied stored/synthetic fixture and were not reconstructed from candles', 'fixture levels are not derived from the fetched market and this report is not a production strategy result', 'no order, exchange execution adapter, scheduler, runner, Telegram behavior, or live trading path exists in this CLI'], artifact: { output: settings.output, format: 'json' }, cache: { key: cacheKey, path: path.relative(cwd, cachePath), status: cached ? 'hit' : 'miss' } };
+  const report = { reportVersion: 'kucoin-radar-backtest-report/v1', generatedAt: now().toISOString(), localOnly: true, nonLive: true, input: { product: settings.product, symbol: settings.symbol, quote: settings.quote, interval: settings.interval, fromMs: settings.fromMs, toMs: settings.toMs, fixture: settings.fixtureName, initialEquity: settings.initialEquity, riskModel: settings.riskModel, notional: settings.notional, costAssumptions: settings.costAssumptions }, market: { product: 'spot', symbol: settings.symbol, quote: settings.quote, interval: settings.interval, range: fetched.dataset.range, candleCount: fetched.dataset.candles.length, source: fetched.request }, dataset: sourceSummary(fetched.dataset), datasetValidation, fixture: { name: fixture.name, fixtureVersion: fixture.fixtureVersion, schemaVersion: fixture.schemaVersion, source: fixture.source, validation: fixtureValidation, selectedSymbolMapping: fixtureForMarket.symbolMapping ?? null }, reconstruction, backtest, limitations: ['public KuCoin candles only; no authenticated or private endpoint was called', 'RADAR actionability and Strict Absorb come only from the supplied stored/synthetic fixture and were not reconstructed from candles', 'fixture levels are not derived from the fetched market and this report is not a production strategy result', 'no order, exchange execution adapter, scheduler, runner, Telegram behavior, or live trading path exists in this CLI'], artifact: { output: settings.output, format: 'json' }, cache: { key: cacheKey, path: path.relative(cwd, cachePath), status: cached ? 'hit' : 'miss' } };
   const writeReport = dependencies.writeReport ?? (async (target, value) => { await fs.mkdir(path.dirname(target), { recursive: true }); await fs.writeFile(target, JSON.stringify(value, null, 2) + '\n', 'utf8'); });
   await writeReport(output, report);
   return { report, output, text: formatKuCoinRadarBacktestReport(report) };

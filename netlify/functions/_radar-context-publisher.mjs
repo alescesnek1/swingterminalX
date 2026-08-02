@@ -25,6 +25,11 @@ function num(value) { return value === null || value === undefined || !Number.is
 function tickerToMarket(t) {
   return {
     symbol: t.symbol, market: t.market === 'futures' ? 'futures' : 'spot', status: 'TRADING',
+    // The instrument's real base/quote, so buildRadarUniverse classifies the pair from
+    // exchange data instead of parsing the symbol string (which mis-reads pairs whose
+    // suffix collides with another asset name, e.g. USDTIDRT).
+    baseAsset: typeof t.base_asset === 'string' ? t.base_asset : null,
+    quoteAsset: typeof t.quote_asset === 'string' ? t.quote_asset : null,
     lastPrice: num(t.last_price), price: num(t.last_price),
     quoteVolume: num(t.quote_volume), quoteVolume24h: num(t.quote_volume), volume: num(t.quote_volume),
     priceChangePercent: num(t.price_change_percent), change24hPct: num(t.price_change_percent),
@@ -165,22 +170,48 @@ export async function runRadarContextPublisher(deps = {}) {
       absorbFunnel: result.absorbFunnel, universeDiagnostics: result.universeDiagnostics, providerStatus,
     });
     if (!written.ok) return written;
-    // Atomized current-state write, keyed by (market, symbol) rather than by run.
-    // The run-keyed insert above stays as the per-run history the funnel rollups
-    // scan; this is what the terminal/Cockpit/alert path read, so a freshly
-    // published run can no longer be found un-scored.
-    const state = await store.upsertRadarCandidateStates(db, {
-      candidates, runId: bundle.run.id, source: 'canonical_context',
-      computedAt: new Date(nowMs), observedAt: bundle.run.observedAt,
-    });
-    // A failed state write must be loud: the read path serves this table, so silently
-    // keeping the previous cycle's rows would show stale verdicts as current.
-    if (!state.ok) { console.warn('[RADAR_PUBLISH] state_upsert_failed', { runId: bundle.run.id, reason: state.reason }); return state; }
-    return { ok: true, runId: bundle.run.id, candidateCount: written.candidateCount, entryReadyCount, trustedMicro: providerStatus.COVERAGE_SYMBOLS, absorbCoverage: providerStatus.ABSORB_COVERAGE, absorbMode: providerStatus.ABSORB_MODE };
+    return {
+      ok: true, runId: bundle.run.id, candidateCount: written.candidateCount, entryReadyCount,
+      trustedMicro: providerStatus.COVERAGE_SYMBOLS, absorbCoverage: providerStatus.ABSORB_COVERAGE,
+      absorbMode: providerStatus.ABSORB_MODE,
+      // Carried out of the transaction: the per-symbol state write happens AFTER
+      // this commit (see below).
+      candidates, computedAt: new Date(nowMs), observedAt: bundle.run.observedAt,
+    };
   }, { getDbImpl: deps.getDbImpl });
 
   if (!tx?.ok) { console.warn('[RADAR_PUBLISH] cycle_failed', { reason: tx?.reason || 'DB_UNAVAILABLE' }); return outcome(503, { ok: false, reason: tx?.reason || 'DB_UNAVAILABLE' }); }
   if (tx.skipped) return outcome(200, { ok: true, skipped: true, reason: tx.reason });
+
+  // Atomized current-state write, keyed by (market, symbol) rather than by run.
+  // The run-keyed insert stays as the per-run history the funnel rollups scan; this
+  // is what the terminal/Cockpit/alert path read, so a freshly published run can no
+  // longer be found un-scored.
+  //
+  // DELIBERATELY OUTSIDE the transaction above. It used to share it, so a failure
+  // here rolled the run snapshot back too — and the run_snapshot_fallback in
+  // readCanonicalRadar, which exists precisely for "state table not written", could
+  // never fire because the snapshot had been destroyed by the same failure. In
+  // production that turned one bad batch into: no state rows, no run snapshot, RADAR
+  // reading PENDING, and the canonical alert path fail-closing on every cycle.
+  // Committing the history first means the worst case degrades to a LABELLED older
+  // verdict instead of no verdict at all. The two writes are no longer atomic; that
+  // is safe because every row carries its own computed_at, so a lagging state row is
+  // reported as old rather than as current.
+  let state = { ok: true, written: 0, skipped: true };
+  if (Array.isArray(tx.candidates) && tx.candidates.length) {
+    state = await transaction(async (db) => await store.upsertRadarCandidateStates(db, {
+      candidates: tx.candidates, runId: tx.runId, source: 'canonical_context',
+      computedAt: tx.computedAt, observedAt: tx.observedAt,
+    }), { getDbImpl: deps.getDbImpl }) || { ok: false, reason: 'DB_UNAVAILABLE' };
+  }
+  // A failed state write must stay loud: the read path serves that table, so keeping
+  // the previous cycle's rows would show stale verdicts as current. The difference
+  // from before is only that the run snapshot survives to back the labelled fallback.
+  if (!state.ok) {
+    console.warn('[RADAR_PUBLISH] state_upsert_failed', { runId: tx.runId, reason: state.reason, runSnapshotPublished: true });
+    return outcome(503, { ok: false, reason: state.reason || 'DB_UNAVAILABLE', runId: tx.runId, runSnapshotPublished: true });
+  }
   console.info('[RADAR_PUBLISH] cycle_completed', { runId: tx.runId, candidateCount: tx.candidateCount, entryReadyCount: tx.entryReadyCount, trustedMicro: tx.trustedMicro });
   console.info('[RADAR_ABSORB] coverage', { runId: tx.runId, absorbMode: tx.absorbMode, ...tx.absorbCoverage });
   if (tx.absorbCoverage && tx.absorbCoverage.SUPPLIED_MEASUREMENTS > 0 && tx.absorbCoverage.STRICT_READY === 0) {

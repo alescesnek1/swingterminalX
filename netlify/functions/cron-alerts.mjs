@@ -146,7 +146,16 @@ export function normalizeRadarTelegramAlertState(input = {}) {
   const sent = state.sent && typeof state.sent === 'object' && !Array.isArray(state.sent) ? state.sent : {};
   return {
     mode: 'ENTRY_READY_ONLY',
-    cooldownMs: Number.isFinite(Number(state.cooldownMs)) ? Number(state.cooldownMs) : RADAR_TELEGRAM_COOLDOWN_MS,
+    // NOT `Number.isFinite(Number(state.cooldownMs))`: Number(null) and Number('') are
+    // both 0, so an absent cooldown resolved to "no cooldown at all" and the
+    // per-symbol anti-spam window silently disappeared. A missing or non-positive
+    // value must fall back to the real window.
+    cooldownMs: (() => {
+      const raw = state.cooldownMs;
+      if (raw === null || raw === undefined || raw === '') return RADAR_TELEGRAM_COOLDOWN_MS;
+      const value = Number(raw);
+      return Number.isFinite(value) && value > 0 ? value : RADAR_TELEGRAM_COOLDOWN_MS;
+    })(),
     sent,
     lastSentAt: state.lastSentAt || null,
     lastError: state.lastError || null,
@@ -288,10 +297,36 @@ export function shouldSendRadarTelegramAlert(candidate, state = {}, nowMs = Date
   return true;
 }
 
+// Staleness bound for the radar object at hand. The browser-driven Fleet feed is
+// refreshed continuously, so 120s is the honest bound there. The canonical RADAR is
+// republished once per 180s collector cycle, so 120s would mark it stale for most of
+// every cycle — exactly when it is as fresh as it can ever be. loadCanonicalRadarForAlerts
+// already used the two-cycle bound, but selectRadarEntryAlerts is called without opts
+// and re-applied the 120s one, silently blocking every alert on a verdict 120-360s old.
+export function radarStaleBoundMs(radar = {}) {
+  return String(radar && radar.source) === 'canonical_context' ? CANONICAL_RADAR_STALE_MS : RADAR_STALE_MS;
+}
+
 export function selectRadarEntryAlerts(radar = {}, state = {}, nowMs = Date.now(), opts = {}) {
+  const boundMs = Number.isFinite(Number(opts.staleMs)) && Number(opts.staleMs) > 0
+    ? Number(opts.staleMs)
+    : radarStaleBoundMs(radar);
+  // Unknown freshness is STALE, not fresh. `dataFreshnessMs` is null exactly when the
+  // radar has no dated market observation behind it (evaluateTradingRadar sets it from
+  // fetchedAt/receivedAt, and the production Fleet blob carried null for days while a
+  // frozen state kept reporting status WATCHING). Treating that as alertable is a
+  // fail-OPEN on missing data, which this repo's alert logic must never do.
+  // NOT `Number(radar.dataFreshnessMs)`: Number(null) is 0, which reads as "observed
+  // this instant" — the absent value would have become the freshest possible one.
+  const rawFreshness = radar.dataFreshnessMs;
+  const freshnessMs = (rawFreshness === null || rawFreshness === undefined || rawFreshness === '')
+    ? Number.NaN
+    : Number(rawFreshness);
+  const freshnessKnown = Number.isFinite(freshnessMs);
   const stale = opts.stale === true
     || radar.status === 'STALE'
-    || (Number.isFinite(Number(radar.dataFreshnessMs)) && Number(radar.dataFreshnessMs) > RADAR_STALE_MS);
+    || !freshnessKnown
+    || freshnessMs > boundMs;
   const candidates = (Array.isArray(radar.entryReady) && radar.entryReady.length > 0)
     ? radar.entryReady
     : (Array.isArray(radar.candidates) ? radar.candidates : []);

@@ -2636,6 +2636,13 @@ export function evaluateTradingRadar({
 
       return {
         symbol: m.symbol,
+        // Venue of the row this candidate was scored from. A symbol trades on BOTH
+        // spot and futures, so the venue is part of its identity: without it the
+        // canonical writer collapsed both rows onto (spot, SYMBOL) and every
+        // publish cycle died on a duplicate conflict target (Postgres 21000), which
+        // rolled back the whole RADAR result. Null when the caller's rows carry no
+        // venue (the legacy Fleet path) — never guessed.
+        market: m.market === 'futures' ? 'futures' : (m.market === 'spot' ? 'spot' : null),
         computedBreakdownLevel: m.computedBreakdownLevel,
         computedReclaimLevel: m.computedReclaimLevel,
         computedLostSupportLevel: m.computedLostSupportLevel,

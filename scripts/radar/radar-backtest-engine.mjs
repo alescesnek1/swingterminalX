@@ -37,6 +37,43 @@ function sizingFor(sizing, balance, entry, stop, limits) {
   return { reasons, notional, quantity, realRisk };
 }
 
+// A simulated trade may only ever mix prices from ONE price domain. The entry comes
+// from the dataset's candles while stop/target come from the candidate fixture, so
+// nothing structurally prevented a fixture captured on a DIFFERENT symbol from being
+// replayed against this dataset. Observed: a candidate whose levels were stop 135 /
+// target 145 replayed against a dataset trading near 73,900 entered at 73,939 and
+// "hit its take profit" at 144.89 — a -99.9% loss reported as a take-profit exit.
+//
+// The invariant is therefore explicit: the levels must bracket the entry, and both
+// must lie inside the price band the dataset actually traded in. A violation is a
+// VETO — never a trade, never a PnL number — because a number produced across two
+// price domains is not a worse estimate, it is a different market's arithmetic.
+const LEVEL_BAND_TOLERANCE = 0.5; // ±50% around the dataset's own high/low band
+
+function datasetPriceBand(candles) {
+  let low = Infinity; let high = -Infinity;
+  for (const candle of candles) {
+    if (num(candle?.low)) low = Math.min(low, candle.low);
+    if (num(candle?.high)) high = Math.max(high, candle.high);
+  }
+  if (!Number.isFinite(low) || !Number.isFinite(high)) return null;
+  return { low: low * (1 - LEVEL_BAND_TOLERANCE), high: high * (1 + LEVEL_BAND_TOLERANCE) };
+}
+
+// Returns the reason codes for an incompatible level set; empty when consistent.
+export function levelDomainReasons(entry, stop, target, band) {
+  const reasons = [];
+  if (!num(entry) || entry <= 0) return ['unknown_state'];
+  if (num(stop) && stop >= entry) add(reasons, 'levels_not_bracketing_entry');
+  if (num(target) && target <= entry) add(reasons, 'levels_not_bracketing_entry');
+  if (band) {
+    for (const level of [stop, target]) {
+      if (num(level) && (level < band.low || level > band.high)) add(reasons, 'levels_outside_market_range');
+    }
+  }
+  return reasons;
+}
+
 function fillRatio(value) { return num(value) && value > 0 && value <= 1 ? value : null; }
 function utcDay(value) { const ms = Date.parse(value); return Number.isFinite(ms) ? new Date(ms).toISOString().slice(0, 10) : null; }
 function fundingFeesFor(dataset, notional, entryTime, exitTime, warnings) { const futures = dataset?.futures; if (!record(futures)) return 0; const events = Array.isArray(futures.fundingEvents) ? futures.fundingEvents : null; if (events) { let fee = 0; for (const item of events) { const at = Date.parse(item?.time); if (Number.isFinite(at) && at > Date.parse(entryTime) && at <= Date.parse(exitTime) && num(item.rate)) fee += notional * item.rate; } return fee; } if (num(futures.fundingRate)) return notional * futures.fundingRate; add(warnings, 'funding_unknown'); return 0; }
@@ -90,6 +127,9 @@ export function runRadarBacktest(input) {
     if (num(limits.maxOpenPositions) && active >= limits.maxOpenPositions) add(decisionCodes, 'max_open_positions_exceeded');
     if (mode === 'futures' && assumptions.liquidation.status === 'UNKNOWN') { add(warnings, 'liquidation_unknown'); add(decisionCodes, 'liquidation_unknown'); }
     const baseEntry = entryFill?.price; const entryPrice = num(baseEntry) ? baseEntry * (1 + executionBps / 10000) : null;
+    // Price-domain invariant, BEFORE sizing: a level set that does not belong to this
+    // market can never become a position, a fill, or a PnL figure.
+    for (const code of levelDomainReasons(entryPrice, stop, target, datasetPriceBand(candles))) add(decisionCodes, code);
     const size = num(entryPrice) ? sizingFor(input.sizing, ledgers[quote].equity, entryPrice, stop, limits) : { reasons: ['unknown_state'] };
     for (const code of size.reasons) add(decisionCodes, code);
     if (num(limits.maxDailyLoss) && dailyPnl - (size.realRisk ?? 0) <= -limits.maxDailyLoss) add(decisionCodes, 'max_daily_loss_exceeded');
@@ -114,7 +154,11 @@ export function runRadarBacktest(input) {
     const entryMs = Date.parse(position.entryTime); const exitMs = Date.parse(exit.time); summary.exposureTime += Number.isFinite(entryMs) && Number.isFinite(exitMs) ? Math.max(0, exitMs - entryMs) : 0;
   }
   for (const q of Object.keys(ledgers)) { const l = ledgers[q]; l.equity = round(l.initialBalance + l.realizedPnl + l.unrealizedPnl); l.availableBalance = round(l.equity - l.marginUsed); }
-  const relevant = ledgers[quote]; const closed = positions.filter((p) => p.status === 'CLOSED'); summary.trades = positions.length; summary.wins = closed.filter((p) => p.realizedPnl > 0).length; summary.losses = closed.filter((p) => p.realizedPnl < 0).length; summary.winRate = summary.trades ? summary.wins / summary.trades : 0; summary.grossPnl = round(closed.reduce((sum, p) => sum + p.realizedPnl + p.entryFee + p.exitFee + p.fundingFee, 0)); summary.fees = round(relevant?.fees ?? 0); summary.netPnl = round((relevant?.realizedPnl ?? 0) + (relevant?.unrealizedPnl ?? 0)); let peakEquity = -Infinity; let maxDrawdown = 0; for (const point of equityCurve.filter((point) => point.quote === quote)) { peakEquity = Math.max(peakEquity, point.equity); maxDrawdown = Math.max(maxDrawdown, peakEquity - point.equity); } summary.maxDrawdown = round(maxDrawdown); summary.openPositions = positions.filter((p) => p.status === 'OPEN').length;
+  const relevant = ledgers[quote]; const closed = positions.filter((p) => p.status === 'CLOSED'); summary.trades = positions.length; summary.wins = closed.filter((p) => p.realizedPnl > 0).length; summary.losses = closed.filter((p) => p.realizedPnl < 0).length; summary.closedTrades = closed.length;
+  // Win rate is a property of DECIDED trades. Dividing by every opened position let a
+  // position still open at the dataset end silently drag the rate down, which reads as
+  // a loss that never happened; `openPositions` reports those separately.
+  summary.winRate = closed.length ? summary.wins / closed.length : 0; summary.grossPnl = round(closed.reduce((sum, p) => sum + p.realizedPnl + p.entryFee + p.exitFee + p.fundingFee, 0)); summary.fees = round(relevant?.fees ?? 0); summary.netPnl = round((relevant?.realizedPnl ?? 0) + (relevant?.unrealizedPnl ?? 0)); let peakEquity = -Infinity; let maxDrawdown = 0; for (const point of equityCurve.filter((point) => point.quote === quote)) { peakEquity = Math.max(peakEquity, point.equity); maxDrawdown = Math.max(maxDrawdown, peakEquity - point.equity); } summary.maxDrawdown = round(maxDrawdown); summary.openPositions = positions.filter((p) => p.status === 'OPEN').length;
   return result(true, reasonCodes, warnings, summary, events, assumptions, riskDecisions, equityCurve, ledgers, positions);
 }
 

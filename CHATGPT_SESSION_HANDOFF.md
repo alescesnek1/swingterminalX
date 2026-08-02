@@ -13,6 +13,93 @@
 > `/reply` or `/admin_summary` support system** here. If you find yourself
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
+> _RADAR / Cockpit / trading-path audit — 8 defects found and fixed (2026-08-01,
+> local, uncommitted, NOT deployed):_ Owner asked for a hard audit of the newly
+> built pieces after the stale-briefing find, focused on RADAR, the Cockpit and
+> "the bot that trades from RADAR via KuCoin".
+>
+> **1. There is no KuCoin trading path — at all.** Only
+> `scripts/radar/kucoin-public-candles.mjs` (public UTA candle GET, host/path
+> allowlisted) and `scripts/radar/run-kucoin-radar-backtest.mjs` (one-shot LOCAL
+> CLI). No adapter, credential, order, runner or scheduler exists, and several
+> tests actively assert their absence. **RADAR also drives no order path even on
+> Binance:** `scripts/auto/auto-trader.mjs` contains zero RADAR references, every
+> `AUTO_*` flag is unset in production, and live spot stays hard-locked behind 7
+> flags + a single-BTC-symbol micro cap. What RADAR does drive is the Telegram
+> ENTRY_READY alert and the UI. The expectation "a coin passes RADAR → the bot buys
+> on KuCoin" is not implemented anywhere.
+>
+> **2. RADAR publish died on EVERY cycle (Postgres 21000).** Live logs: runs
+> 3976…4011 all `radar_state_upsert_failed {code:'21000'}` →
+> `state_upsert_failed` → `cycle_failed`, `radarOk:false`. Cause: the evaluator's
+> candidate object carried no `market`, so `upsertRadarCandidateStates` mapped both
+> venues of a dual-listed symbol onto `(spot, SYMBOL)`; `ON CONFLICT (market,symbol)
+> DO UPDATE` cannot touch a row twice → cardinality_violation. Both writes shared
+> ONE transaction, so the failure **rolled back the run snapshot too**, which is why
+> `readCanonicalRadar`'s documented `run_snapshot_fallback` could never fire.
+> Consequence: nothing RADAR-related was written for days → canonical alert path
+> fail-closed (no ENTRY_READY Telegram at all) and the Cockpit had no verdicts.
+> Fixed three ways: candidates now carry `market` (null when the caller's rows have
+> no venue — never guessed); `dedupeByVenueSymbol` enforces the conflict key before
+> the database sees it (entry-ready first, then higher setup score, collapse
+> logged); the state write moved OUT of the run-snapshot transaction so a bad batch
+> degrades to a labelled older verdict instead of no verdict. Verified against live
+> exchange data: 398 dual-listed symbols, 24 duplicate conflict targets in one real
+> batch before the fix → 0 after, both venues preserved (134 futures + 34 spot).
+>
+> **3. RADAR scored the wrong universe.** `getRadarInputBundle` took the top 1000
+> tickers by raw `quote_volume` across ALL quotes — the same bug already fixed in
+> `getAtomizedMarketContext`. Measured on the live Binance spot universe (3,670
+> stored pairs): only **282 of 1000** rows were USDT/USDC, 718 slots went to
+> IDR/TRY/BIDR/JPY/BRL pairs the universe filter rejects anyway, and **774 real
+> USD-stable pairs never reached the publisher** (SANDUSDT and hundreds of mid-caps
+> — exactly the dislocation population the strategy targets). Now joined to
+> `market_instruments` and restricted to `RANKABLE_QUOTE_ASSETS`, with base/quote
+> travelling to the evaluator instead of being guessed from the symbol string.
+>
+> **4. Backtest engine simulated across price domains.** The public-candle MVP
+> replayed a SOL fixture (stop 135 / target 145) against BTC-USDT candles: entered
+> at 73,939, "hit its take profit" at 144.89, reported **net −499.52 on a 500
+> notional (−99.9%) as a take-profit exit**. The CLI was overwriting the fixture's
+> `symbolMapping` with whatever market was requested, defeating the mapping
+> validation. Engine now vetoes a plan whose levels do not bracket the entry or lie
+> outside the dataset's ±50% price band (`levels_not_bracketing_entry`,
+> `levels_outside_market_range`) — no position, no PnL; the CLI refuses a fixture
+> captured on another market; the report prints `NO TRADE SIMULATED - vetoed: …`
+> instead of a bare `trades: 0`; win rate is now measured over CLOSED trades.
+>
+> **5. Alert staleness bound ignored the canonical source.**
+> `loadCanonicalRadarForAlerts` accepted up to `CANONICAL_RADAR_STALE_MS` (6 min =
+> 2 collector cycles) but `selectRadarEntryAlerts` was called with no opts and
+> re-applied the legacy 120s bound, so a canonical verdict 120–360s old — as fresh
+> as a 180s collector can ever make it — was silently `stale_candidate` and every
+> alert was suppressed. Bound is now source-aware (`radarStaleBoundMs`).
+>
+> **6. `Number(null) === 0` — the same trap in three more places** (it also caused
+> the briefing's `$0` volumes). Alert gate: `dataFreshnessMs: null` (which is
+> exactly "no dated market observation", the live Fleet state for days) became
+> "0 ms old = freshest possible" → an undated radar was alertable. Now unknown
+> freshness fails CLOSED. `telegramAlertState.cooldownMs: null/''` became a **0 ms
+> cooldown**, silently removing the 60-minute per-symbol anti-spam window.
+> `MORNING_BRIEFING_HOUR_LOCAL=''` (a normal Netlify state) resolved to hour **0**,
+> moving the briefing to midnight. All three now reject null/empty explicitly.
+>
+> **7. Cockpit asserted a cause it could not know.** A state miss rendered "it is
+> outside the measured microstructure budget… a coverage gap, not a rejected setup"
+> — but the same 404 is returned when `radar_candidate_state` is EMPTY because the
+> publisher is failing (the live case). The endpoint now reports table coverage on
+> the miss path (`RADAR_STATE_EMPTY` vs `NOT_SCORED`, with scored count + newest
+> age) and the panel renders a publisher outage distinctly from a coverage gap.
+> Cache-bust `6k2` → `6k3`.
+>
+> Everything else audited in the chain held up: `insertAtomicMarketRecords` upserts
+> an instrument row for every ticker (so the new JOIN cannot silently drop rows);
+> the confirmed-ENTRY_READY gate re-checks every field so the looser `entryReady`
+> list in `shapeCanonicalRadarForAlerts` cannot widen it; the Cockpit read reports
+> freshness, distinguishes NOT_SCORED from a failed read, and renders UNKNOWN rather
+> than 0. Tests: 2205 (was 2182), all pass, `npm run lint` 0 errors. Fixture files
+> that were implicitly relying on the fail-open freshness now state their freshness.
+>
 > _Morning briefing was reporting STALE numbers as today's — fixed (2026-08-01,
 > local, uncommitted, NOT deployed):_ Owner reported "the numbers don't add up".
 > Verified: they were wrong. The 08:00 Telegram briefing of 2026-08-01 said

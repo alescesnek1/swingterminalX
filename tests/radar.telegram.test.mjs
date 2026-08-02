@@ -62,6 +62,8 @@ const ENTRY = {
 
 test('Selector and gate accept only the fully confirmed RADAR ENTRY_READY candidate', () => {
   const radar = {
+    // Freshness stated: the selector fails closed when it is unknown.
+    dataFreshnessMs: 30_000,
     entryReady: [
       { ...ENTRY, symbol: 'WATCHUSDT', STATUS: 'WATCH', stage: 'WATCH' },
       { ...ENTRY, symbol: 'STABLEUSDT', STATUS: 'STABILIZING', stage: 'STABILIZING' },
@@ -370,4 +372,58 @@ test('RADAR Context respects 500 row payload limit and maps detected fields', as
   assert.equal(storedFleet.radarContext.scannerRowsReceived, 500);
   assert.equal(storedFleet.radarContext.scannerRowsSanitized, 500);
   assert.equal(storedFleet.radarContext.scannerRowsRejected, 0);
+});
+
+// ── staleness bound must match the SOURCE that produced the verdict ──────────
+// Audit 2026-08-01: loadCanonicalRadarForAlerts accepted a canonical verdict up to
+// two collector cycles old (6 min) but selectRadarEntryAlerts was called without opts
+// and re-applied the legacy 120s bound written for the browser feed. A canonical
+// verdict 120-360s old — as fresh as a 180s collector can ever make it — was therefore
+// marked stale_candidate and EVERY alert was silently suppressed.
+test('the canonical source keeps its two-cycle staleness bound in the selector', async () => {
+  const { selectRadarEntryAlerts, radarStaleBoundMs, RADAR_STALE_MS, CANONICAL_RADAR_STALE_MS } = await import('../netlify/functions/cron-alerts.mjs');
+  assert.equal(radarStaleBoundMs({ source: 'canonical_context' }), CANONICAL_RADAR_STALE_MS);
+  assert.equal(radarStaleBoundMs({ source: 'fleet_snapshot' }), RADAR_STALE_MS);
+  assert.equal(radarStaleBoundMs({}), RADAR_STALE_MS, 'the legacy feed keeps the strict bound');
+
+  const candidate = { ...ENTRY };
+  const canonical = { source: 'canonical_context', status: 'READY', dataFreshnessMs: 200 * 1000, entryReady: [candidate], candidates: [candidate] };
+  assert.equal(selectRadarEntryAlerts(canonical, {}, Date.now()).length, 1, '200s-old canonical verdict is alertable');
+
+  // Beyond two cycles it is stale for the canonical source too.
+  const tooOld = { ...canonical, dataFreshnessMs: 7 * 60 * 1000 };
+  assert.equal(selectRadarEntryAlerts(tooOld, {}, Date.now()).length, 0);
+
+  // The browser-driven feed is unchanged: 200s is stale there.
+  const fleet = { status: 'READY', dataFreshnessMs: 200 * 1000, entryReady: [candidate], candidates: [candidate] };
+  assert.equal(selectRadarEntryAlerts(fleet, {}, Date.now()).length, 0);
+
+  // An explicit override still wins.
+  assert.equal(selectRadarEntryAlerts(canonical, {}, Date.now(), { stale: true }).length, 0);
+  assert.equal(selectRadarEntryAlerts(canonical, {}, Date.now(), { staleMs: 60 * 1000 }).length, 0);
+});
+
+// Unknown freshness must fail CLOSED. The production Fleet blob carried
+// dataFreshnessMs: null for days (no market snapshot behind it) while still reporting
+// status WATCHING, so an undated radar was being handed to the alert selector as if
+// it were current.
+test('a radar with unknown freshness can never alert', async () => {
+  const { selectRadarEntryAlerts } = await import('../netlify/functions/cron-alerts.mjs');
+  const candidate = { ...ENTRY };
+  const undated = { status: 'WATCHING', entryReady: [candidate], candidates: [candidate] };
+  assert.equal(selectRadarEntryAlerts(undated, {}, Date.now()).length, 0, 'no dataFreshnessMs → not alertable');
+  assert.equal(selectRadarEntryAlerts({ ...undated, dataFreshnessMs: null }, {}, Date.now()).length, 0);
+  assert.equal(selectRadarEntryAlerts({ ...undated, dataFreshnessMs: 'soon' }, {}, Date.now()).length, 0);
+  assert.equal(selectRadarEntryAlerts({ ...undated, dataFreshnessMs: Number.POSITIVE_INFINITY }, {}, Date.now()).length, 0);
+  // A dated, fresh radar still alerts — the gate did not simply close.
+  assert.equal(selectRadarEntryAlerts({ ...undated, dataFreshnessMs: 30_000 }, {}, Date.now()).length, 1);
+});
+
+test('an absent per-symbol cooldown falls back to the real window, never to zero', async () => {
+  const { normalizeRadarTelegramAlertState, RADAR_TELEGRAM_COOLDOWN_MS } = await import('../netlify/functions/cron-alerts.mjs');
+  for (const raw of [null, undefined, '', 0, -5, 'soon']) {
+    assert.equal(normalizeRadarTelegramAlertState({ cooldownMs: raw }).cooldownMs, RADAR_TELEGRAM_COOLDOWN_MS,
+      `cooldownMs ${JSON.stringify(raw)} must not disable the anti-spam window`);
+  }
+  assert.equal(normalizeRadarTelegramAlertState({ cooldownMs: 90_000 }).cooldownMs, 90_000, 'a real value is honoured');
 });
