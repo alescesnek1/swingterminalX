@@ -428,13 +428,49 @@ export function gatherBriefingData(fleet = {}, env = process.env, context = null
     .sort((a, b) => b.avgChange - a.avgChange)
     .slice(0, 5);
 
+  // ── spot tradability ──
+  // This desk is SPOT ONLY (no futures/margin/leverage path exists anywhere), but the
+  // canonical universe carries both venues, so a futures-only perp can out-rank every
+  // spot pair on volume or 24h move. Observed 2026-08-02: 11 of the 16 coins the
+  // briefing named — the whole "strongest momentum" group and two of the three
+  // "closest to entry" — were futures-only listings the owner cannot buy. Suggesting
+  // them is worse than saying nothing: it invites an order that cannot be placed.
+  //
+  // A coin qualifies if the canonical market rows list it on SPOT. When no row names a
+  // venue at all (the legacy Fleet snapshot, which was spot-only by construction),
+  // every row qualifies — the filter must not silently empty an already-honest path.
+  const venueAware = (Array.isArray(ctx.markets) ? ctx.markets : []).some((m) => m && (m.market === 'spot' || m.market === 'futures'));
+  const spotBases = new Set();
+  if (venueAware) {
+    for (const m of (Array.isArray(ctx.markets) ? ctx.markets : [])) {
+      if (m && m.market === 'spot' && m.symbol) spotBases.add(baseOf(m.symbol));
+    }
+  }
+  const spotTradable = (row) => {
+    if (!venueAware) return true;
+    if (row && row.market === 'spot') return true;
+    return spotBases.has(baseOf(row && row.symbol));
+  };
+  const onlySpot = (rows) => (Array.isArray(rows) ? rows.filter(spotTradable) : []);
+  const spotMarkets = onlySpot(markets);
+  const spotCandidates = onlySpot(candidates);
+  const excludedFuturesOnly = {
+    markets: markets.length - spotMarkets.length,
+    candidates: candidates.length - spotCandidates.length,
+  };
+
   // ── coins to watch (grouped, deduped, capped) ──
   const used = new Set();
+  // Deduped by the COIN, not by the trading pair. Keying on the full symbol let
+  // HOMEUSDT and HOMEUSDC both through, and since the line renders the base asset
+  // the reader saw "HOME" listed twice with two slightly different numbers. The same
+  // key spans every group, so a coin already named as a flush setup is not repeated
+  // under high volume.
   const take = (rows, max) => {
     const out = [];
     for (const r of rows) {
       if (out.length >= max) break;
-      const key = String(r.symbol || '').toUpperCase();
+      const key = String(r.display || baseOf(r.symbol) || '').toUpperCase();
       if (!key || used.has(key)) continue;
       used.add(key);
       out.push(r);
@@ -442,12 +478,12 @@ export function gatherBriefingData(fleet = {}, env = process.env, context = null
     return out;
   };
 
-  const candByDistance = candidates
+  const candByDistance = spotCandidates
     .slice()
     .sort((a, b) => (num(b.distanceToEntryReadyScore) || 0) - (num(a.distanceToEntryReadyScore) || 0));
 
   const momentum = take(
-    markets
+    spotMarkets
       .filter((m) => !STABLES.has(baseOf(m.symbol)) && (rowChange(m) || 0) >= 3)
       .sort((a, b) => (rowChange(b) || 0) - (rowChange(a) || 0))
       .map((m) => ({
@@ -459,7 +495,7 @@ export function gatherBriefingData(fleet = {}, env = process.env, context = null
   );
 
   const flush = take(
-    candidates
+    spotCandidates
       .filter((c) => FLUSH_STAGES.has(String(c.stage || '').toUpperCase()))
       .map((c) => candidateRow(c, 'flush/rebound')),
     3,
@@ -473,7 +509,7 @@ export function gatherBriefingData(fleet = {}, env = process.env, context = null
   );
 
   const highVolume = take(
-    markets
+    spotMarkets
       .filter((m) => !STABLES.has(baseOf(m.symbol)) && num(m.quoteVolume) != null)
       .sort((a, b) => (num(b.quoteVolume) || 0) - (num(a.quoteVolume) || 0))
       .map((m) => ({
@@ -485,7 +521,7 @@ export function gatherBriefingData(fleet = {}, env = process.env, context = null
   );
 
   const safetyApproved = take(
-    candidates
+    spotCandidates
       .filter((c) => String(c.safetyStatus || '').toUpperCase() === 'SAFE')
       .map((c) => candidateRow(c, 'safety-approved')),
     2,
@@ -558,6 +594,12 @@ export function gatherBriefingData(fleet = {}, env = process.env, context = null
     candidatesReason: (ctx.candidatesFreshness && ctx.candidatesFreshness.reason) || null,
     marketRowsAvailable: Array.isArray(ctx.markets) ? ctx.markets.length : 0,
     candidatesAvailable: Array.isArray(ctx.candidates) ? ctx.candidates.length : 0,
+    // What the spot-only mandate removed from the watchlist. Reported, never a
+    // silent drop: "nothing to watch" and "everything worth watching is a perp"
+    // are different answers.
+    venueFiltered: venueAware,
+    excludedFuturesOnlyMarkets: excludedFuturesOnly.markets,
+    excludedFuturesOnlyCandidates: excludedFuturesOnly.candidates,
   };
 
   return {
@@ -730,6 +772,14 @@ export function buildBriefingMessage({ data, dateStr, ai = null, aiUsed = false 
 
   // 5. Coins to watch today
   L.push('<b>5. Coins to watch today</b>');
+  // The desk is spot-only, so a futures-only listing is not a suggestion, it is an
+  // order that cannot be placed. Say how many were left out rather than quietly
+  // shortening the list.
+  const excludedMarkets = num(f.excludedFuturesOnlyMarkets) || 0;
+  const excludedCandidates = num(f.excludedFuturesOnlyCandidates) || 0;
+  if (f.venueFiltered && (excludedMarkets > 0 || excludedCandidates > 0)) {
+    L.push(`<i>Spot-only desk: ${escapeHtml(excludedMarkets)} market row(s) and ${escapeHtml(excludedCandidates)} RADAR candidate(s) excluded as futures-only listings.</i>`);
+  }
   if (data.coinGroups.length) {
     for (const g of data.coinGroups) {
       L.push(`<i>${escapeHtml(g.label)}</i>`);
