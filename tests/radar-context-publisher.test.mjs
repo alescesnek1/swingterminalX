@@ -348,3 +348,67 @@ test('the publisher hands RADAR the instrument base/quote, not a symbol guess', 
   assert.equal(capture.markets[0].baseAsset, 'BTC');
   assert.equal(capture.markets[0].quoteAsset, 'USDT');
 });
+
+// ── signal journal wiring ────────────────────────────────────────────────────
+test('the publisher records state entries against the statuses held BEFORE the cycle', async () => {
+  const capture = {};
+  const recorded = [];
+  const journalStore = {
+    ...fakeStore(capture),
+    getRadarStatusIndex: async () => ({ ok: true, index: new Map([['spot:BTCUSDT', { status: 'WATCH' }]]) }),
+    selectRadarSignalTransitions: store.selectRadarSignalTransitions,
+    insertRadarSignals: async (_db, payload) => { recorded.push(payload); return { ok: true, written: payload.transitions.length }; },
+  };
+  const res = await runRadarContextPublisher({
+    env: { MARKET_CONTEXT_RADAR_ENABLED: 'true' }, store: journalStore, withTransaction: async (cb) => cb({}),
+    radar, bridge, rolling, bundle: fullBundle(),
+  });
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.signalJournalOk, true);
+  assert.equal(typeof res.body.signalsRecorded, 'number');
+  if (recorded.length) {
+    assert.equal(recorded[0].runId, 42, 'the signal carries its run');
+    assert.equal(recorded[0].observedAt, OBSERVED, 'and the market time it was produced from');
+    for (const t of recorded[0].transitions) {
+      assert.ok(store.RADAR_JOURNALED_STATES.includes(t.status), `${t.status} is a journaled state`);
+    }
+  }
+});
+
+test('a failing signal journal never fails the publish cycle', async () => {
+  const capture = {};
+  const journalStore = {
+    ...fakeStore(capture),
+    getRadarStatusIndex: async () => ({ ok: true, index: new Map() }),
+    selectRadarSignalTransitions: () => ([{ market: 'spot', symbol: 'BTCUSDT', status: 'STABILIZATION', previousStatus: null, candidate: { symbol: 'BTCUSDT' } }]),
+    insertRadarSignals: async () => ({ ok: false, reason: 'DB_UNAVAILABLE' }),
+  };
+  const res = await runRadarContextPublisher({
+    env: { MARKET_CONTEXT_RADAR_ENABLED: 'true' }, store: journalStore, withTransaction: async (cb) => cb({}),
+    radar, bridge, rolling, bundle: fullBundle(),
+  });
+  assert.equal(res.status, 200, 'the archive is not a gate');
+  assert.equal(res.body.ok, true);
+  // But the failure is reported rather than looking like "nothing changed".
+  assert.equal(res.body.signalJournalOk, false);
+  assert.equal(res.body.signalsRecorded, null);
+});
+
+test('a status index read failure degrades to first-sighting, never to a crash', async () => {
+  const capture = {};
+  const recorded = [];
+  const journalStore = {
+    ...fakeStore(capture),
+    getRadarStatusIndex: async () => ({ ok: false, reason: 'DB_UNAVAILABLE', index: new Map() }),
+    selectRadarSignalTransitions: store.selectRadarSignalTransitions,
+    insertRadarSignals: async (_db, payload) => { recorded.push(payload); return { ok: true, written: payload.transitions.length }; },
+  };
+  const res = await runRadarContextPublisher({
+    env: { MARKET_CONTEXT_RADAR_ENABLED: 'true' }, store: journalStore, withTransaction: async (cb) => cb({}),
+    radar, bridge, rolling, bundle: fullBundle(),
+  });
+  assert.equal(res.body.ok, true);
+  for (const payload of recorded) {
+    for (const t of payload.transitions) assert.equal(t.previousStatus, null, 'unknown history is recorded as unknown');
+  }
+});

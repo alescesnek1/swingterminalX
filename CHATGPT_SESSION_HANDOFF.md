@@ -13,6 +13,57 @@
 > `/reply` or `/admin_summary` support system** here. If you find yourself
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
+> _RADAR signal journal — the archive a backtest can honestly use (2026-08-02,
+> local, uncommitted, NOT deployed; MIGRATION NOT APPLIED):_ Owner picked "path A"
+> — let real RADAR signals accumulate rather than reconstructing them from candles.
+>
+> **Why it was needed:** nothing remembered what RADAR said. `radar_candidate_state`
+> is upserted per (market, symbol) — one row per coin, overwritten every cycle — and
+> the per-run history (`radar_run_snapshots` / `radar_run_candidates`) is pruned by
+> retention after `MARKET_CONTEXT_RETENTION_RADAR_HOURS` (default **7 days**;
+> `MARKET_CONTEXT_RETENTION_ENABLED=true` in production, neither hours flag set).
+> Candles can always be re-fetched from a public endpoint; a past verdict cannot.
+> That absence is exactly why the backtest MVP had to use a synthetic fixture.
+>
+> **Sizing, measured on the live universe** (171 candidates/cycle, 480 cycles/day):
+> keeping every verdict = ~82,000 rows/day; every actionable row = ~7,200/day;
+> recording only STATE ENTRIES = a few hundred/day worst case. So the journal records
+> transitions, not snapshots — a coin holding STABILIZATION for six hours is one
+> fact, not 120.
+>
+> **New:** migration `20260802060000_add_radar_signal_journal` (append-only
+> `radar_signal_journal`, unique on `(market,symbol,status,computed_at)` so a retried
+> publish cannot double-record, `run_id ON DELETE SET NULL`, deliberately NOT pruned).
+> Store gains `selectRadarSignalTransitions` (pure), `getRadarStatusIndex`,
+> `insertRadarSignals`, `getRadarSignalJournal`, `RADAR_JOURNALED_STATES`
+> (DISLOCATION_CONFIRMED and above — WATCH/IGNORE are resting states and would bury
+> the archive). The publisher reads the status index BEFORE the state upsert (a
+> transition is only knowable against the previous cycle) and records AFTER it; the
+> journal is an archive, feeds no gate, and a failure never fails the cycle — it is
+> reported as `signalJournalOk:false` rather than looking like "nothing changed".
+> The row carries the PLAN (entry zone, stop, hard invalidation, TP1-3) plus evidence
+> quality (absorb/reclaim/safety), because a signal without its levels cannot be
+> replayed.
+>
+> **Two more defects found while doing it:**
+> - `numberOrNull()` — the helper that writes EVERY RADAR score, level and stop to the
+>   database — ran `Number(value)` first, and `Number(null)` is 0. "Not computed" was
+>   being stored as a real reading of zero, against the schema's own contract that a
+>   NULL score must never read as zero/bearish. 25 call sites. (Fifth instance of this
+>   trap in two days.)
+> - Every scheduled `morning-briefing` run ended in `NetlifyUserError: Function
+>   returned an unsupported value` **after** doing its work — the handler returned the
+>   diagnostics object; the runtime accepts only a Response or undefined. Every other
+>   scheduled function in the repo already returned one. Also: the provenance log line
+>   printed `marketUsable=false` for runs that stopped at a gate and never looked at
+>   any data — now logged as "not evaluated".
+>
+> **Still to do for path A:** apply the migration in production
+> (`netlify database migrations apply` — a deploy does NOT apply it), then let the
+> archive fill. The reader that turns journal rows into backtest trade plans is
+> deliberately NOT built yet: it should be written against real recorded rows, not
+> against an imagined shape. Tests: 2216, 0 fail; lint 0 errors.
+>
 > _RADAR / Cockpit / trading-path audit — 8 defects found and fixed (2026-08-01,
 > local, uncommitted, NOT deployed):_ Owner asked for a hard audit of the newly
 > built pieces after the stale-briefing find, focused on RADAR, the Cockpit and

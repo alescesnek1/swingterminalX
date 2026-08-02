@@ -142,19 +142,30 @@ export default async (req) => {
   });
 
   console.log(`[morning-briefing] code=${diag.code} sent=${diag.sent} aiUsed=${diag.aiUsed} aiFallback=${diag.aiFallbackUsed} rows=${diag.marketRowsUsed} radar=${diag.radarCandidatesUsed} len=${diag.messageLength} skip=${diag.skippedReason || '-'}`);
-  // Data provenance is logged on every run, not only on failure: a briefing that
-  // went out on withheld data must be findable in the function logs afterwards.
+  // Data provenance is logged whenever it was actually resolved: a briefing that went
+  // out on withheld data must be findable in the function logs afterwards. A run that
+  // stopped at a gate (outside the window, already sent, disabled) never looked at any
+  // data, and printing `marketUsable=false` for it would report a measurement that was
+  // never taken — the same dishonesty this line exists to prevent.
   const ageMin = (ms) => (ms == null ? 'n/a' : Math.round(ms / 60000));
-  const logDataState = (diag.marketDataUsable && diag.radarDataUsable) ? console.log : console.warn;
-  logDataState(`[morning-briefing] data source=${diag.dataSource} marketUsable=${diag.marketDataUsable} marketAgeMin=${ageMin(diag.marketDataAgeMs)} marketReason=${diag.marketDataReason || '-'} radarUsable=${diag.radarDataUsable} radarAgeMin=${ageMin(diag.radarDataAgeMs)} radarReason=${diag.radarDataReason || '-'}`);
+  if (diag.dataSource === null) {
+    console.log(`[morning-briefing] data provenance not evaluated (stopped at a gate: ${diag.skippedReason || diag.code || 'unknown'})`);
+  } else {
+    const logDataState = (diag.marketDataUsable && diag.radarDataUsable) ? console.log : console.warn;
+    logDataState(`[morning-briefing] data source=${diag.dataSource} marketUsable=${diag.marketDataUsable} marketAgeMin=${ageMin(diag.marketDataAgeMs)} marketReason=${diag.marketDataReason || '-'} radarUsable=${diag.radarDataUsable} radarAgeMin=${ageMin(diag.radarDataAgeMs)} radarReason=${diag.radarDataReason || '-'}`);
+  }
 
   // Manual invocation returns JSON (preview included for dry runs).
   if (isManual) {
     return new Response(JSON.stringify({ ok: true, ...publicDiag(diag, { includePreview: wantsDryRun }) }, null, 2), { status: 200, headers: jsonHeaders });
   }
 
-  // Scheduled invocation returns the diagnostics object (no preview body).
-  return publicDiag(diag);
+  // Scheduled invocation. The Netlify runtime accepts ONLY a Response or undefined:
+  // returning the diagnostics object made every scheduled run end in
+  // "Function returned an unsupported value" AFTER doing its work, so a healthy
+  // briefing was recorded as a failed invocation (observed live, every run). The
+  // diagnostics are in the log lines above; the response body is not read by anyone.
+  return new Response(JSON.stringify(publicDiag(diag)), { status: 200, headers: jsonHeaders });
 };
 
 // Hourly across the morning window (UTC). The function's own local-hour gate +

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { makeRunKey, sanitizeDiagnostics, insertAtomicMarketRecords, getAtomizedMarketContext, getRadarInputBundle, upsertRadarCandidateStates, getRadarCandidateState } from '../netlify/functions/_market-context-store.mjs';
+import { makeRunKey, sanitizeDiagnostics, insertAtomicMarketRecords, getAtomizedMarketContext, getRadarInputBundle, upsertRadarCandidateStates, getRadarCandidateState, selectRadarSignalTransitions, insertRadarSignals } from '../netlify/functions/_market-context-store.mjs';
 
 // Runs that drifted closer together than the honest collector window (120s). Taking
 // the immediately previous run as the depth baseline yielded windowSec ~40 and the
@@ -316,4 +316,116 @@ test('getRadarInputBundle restricts and ranks the ticker universe to USD-stable 
   assert.match(tickerQuery.sql, /quote_asset = ANY\(\$3\)/, 'filtered by quote asset');
   assert.deepEqual(tickerQuery.values[2], ['USDT', 'USDC'], 'to the rankable USD-stable quotes');
   assert.match(tickerQuery.sql, /i\.base_asset,i\.quote_asset/, 'base/quote travel with the row');
+});
+
+// ── append-only signal journal ───────────────────────────────────────────────
+// Nothing remembered what RADAR said: radar_candidate_state is upserted per coin
+// (one row, overwritten every cycle) and the per-run history is pruned after 7 days.
+// Measured on the live universe, keeping every verdict would be ~82,000 rows/day, so
+// the archive records only the moment a coin ENTERS a journaled state.
+test('only transitions INTO a journaled state are recorded', () => {
+  const previous = new Map([
+    ['spot:AAAUSDT', { status: 'STABILIZATION' }],
+    ['spot:BBBUSDT', { status: 'WATCH' }],
+    ['futures:CCCUSDT', { status: 'LONG_FLUSH_CONFIRMED' }],
+  ]);
+  const candidates = [
+    { symbol: 'AAAUSDT', market: 'spot', STATUS: 'STABILIZATION' },          // unchanged → no signal
+    { symbol: 'BBBUSDT', market: 'spot', STATUS: 'LONG_FLUSH_CONFIRMED' },   // entered → signal
+    { symbol: 'CCCUSDT', market: 'futures', STATUS: 'STANDARD_ENTRY_READY' },// progressed → signal
+    { symbol: 'DDDUSDT', market: 'spot', STATUS: 'DISLOCATION_CONFIRMED' },  // first sighting → signal
+    { symbol: 'EEEUSDT', market: 'spot', STATUS: 'WATCH' },                  // resting state → never
+    { symbol: 'FFFUSDT', market: 'spot', STATUS: 'IGNORE' },
+    { symbol: '', market: 'spot', STATUS: 'STABILIZATION' },                 // no symbol → dropped
+  ];
+  const out = selectRadarSignalTransitions(candidates, previous);
+  assert.deepEqual(out.map((t) => `${t.market}:${t.symbol}:${t.previousStatus}->${t.status}`), [
+    'spot:BBBUSDT:WATCH->LONG_FLUSH_CONFIRMED',
+    'futures:CCCUSDT:LONG_FLUSH_CONFIRMED->STANDARD_ENTRY_READY',
+    'spot:DDDUSDT:null->DISLOCATION_CONFIRMED',
+  ]);
+});
+
+test('a coin sitting in the same state produces one signal, not one per cycle', () => {
+  const candidates = [{ symbol: 'AAAUSDT', market: 'spot', STATUS: 'STABILIZATION' }];
+  const first = selectRadarSignalTransitions(candidates, new Map());
+  assert.equal(first.length, 1, 'entering the state is a signal');
+  const after = new Map([['spot:AAAUSDT', { status: 'STABILIZATION' }]]);
+  for (let cycle = 0; cycle < 120; cycle += 1) {
+    assert.equal(selectRadarSignalTransitions(candidates, after).length, 0, 'staying in it is not');
+  }
+});
+
+test('spot and futures of one symbol are journaled independently', () => {
+  const out = selectRadarSignalTransitions([
+    { symbol: 'AAAUSDT', market: 'spot', STATUS: 'STABILIZATION' },
+    { symbol: 'AAAUSDT', market: 'futures', STATUS: 'STABILIZATION' },
+  ], new Map([['spot:AAAUSDT', { status: 'STABILIZATION' }]]));
+  assert.deepEqual(out.map((t) => t.market), ['futures'], 'only the venue that changed');
+});
+
+test('insertRadarSignals writes an idempotent, append-only row per transition', async () => {
+  const captured = [];
+  const db = { query: async (sql, values) => { captured.push({ sql, values }); return { rows: [], rowCount: 2 }; } };
+  const res = await insertRadarSignals(db, {
+    runId: 91, computedAt: '2026-08-02T06:00:00.000Z', observedAt: '2026-08-02T05:59:00.000Z',
+    transitions: [
+      { market: 'spot', symbol: 'AAAUSDT', status: 'STANDARD_ENTRY_READY', previousStatus: 'STABILIZATION',
+        candidate: { symbol: 'AAAUSDT', STATUS: 'STANDARD_ENTRY_READY', actionability: 'ENTRY_READY', allRadarConditionsPassed: true, SETUP_SCORE: 74, EXECUTION_SCORE: 70, ENTRY_ZONE: { low: 1.1, high: 1.2 }, HARD_INVALIDATION: 1.0, TAKE_PROFIT_LEVELS: [{ level: 1.4 }, { level: 1.6 }, { level: 1.8 }], safetyStatus: 'SAFE' } },
+      { market: 'futures', symbol: 'BBBUSDT', status: 'LONG_FLUSH_CONFIRMED', previousStatus: null,
+        candidate: { symbol: 'BBBUSDT', STATUS: 'LONG_FLUSH_CONFIRMED', SETUP_SCORE: null } },
+    ],
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.written, 2);
+  const sql = captured[0].sql;
+  assert.match(sql, /INSERT INTO radar_signal_journal/);
+  assert.match(sql, /ON CONFLICT ON CONSTRAINT radar_signal_journal_unique_transition DO NOTHING/, 'a retried publish cannot double-record');
+  assert.doesNotMatch(sql, /DELETE|UPDATE/, 'append-only');
+  // The plan travels with the signal — without it the archive cannot be replayed.
+  const cols = 28;
+  const first = captured[0].values.slice(0, cols);
+  assert.equal(first[0], 'spot');
+  assert.equal(first[1], 'AAAUSDT');
+  assert.equal(first[6], 'STABILIZATION', 'previous status recorded');
+  assert.equal(first[7], 'STANDARD_ENTRY_READY');
+  assert.equal(first[9], true, 'entry_ready comes from allRadarConditionsPassed');
+  assert.equal(first[16], 1.1, 'entry zone low');
+  assert.equal(first[20], 1.4, 'tp1');
+  // A missing score stays NULL, never 0.
+  const second = captured[0].values.slice(cols, cols * 2);
+  assert.equal(second[11], null, 'absent setup score is NULL');
+});
+
+test('an empty transition list touches the database at all', async () => {
+  let called = false;
+  const res = await insertRadarSignals({ query: async () => { called = true; return { rows: [] }; } }, { transitions: [] });
+  assert.equal(res.ok, true);
+  assert.equal(res.written, 0);
+  assert.equal(called, false, 'no query is issued for nothing to record');
+});
+
+// Every RADAR score, level and stop reaches Postgres through numberOrNull. It used
+// to run `Number(value)` first, and Number(null) is 0 — so "not computed" was stored
+// as a real reading of zero, against the schema's own contract that a NULL score must
+// never read as a zero/bearish score. A stop of 0 is a verdict, not an absence.
+test('a missing score or level is stored as NULL, never as a zero reading', async () => {
+  const captured = [];
+  const db = { query: async (sql, values) => { captured.push({ sql, values }); return { rows: [], rowCount: 1 }; } };
+  await upsertRadarCandidateStates(db, {
+    runId: 5, computedAt: new Date('2026-08-02T06:00:00.000Z'), observedAt: new Date('2026-08-02T06:00:00.000Z'),
+    candidates: [{
+      symbol: 'AAAUSDT', market: 'spot', STATUS: 'WATCH',
+      SETUP_SCORE: null, EXECUTION_SCORE: '', RISK_REWARD_SCORE: undefined,
+      STOP_LOSS_LEVEL: null, HARD_INVALIDATION: '', ENTRY_ZONE: { low: null, high: '' },
+      CONFIDENCE: 61,
+    }],
+  });
+  const values = captured[0].values;
+  for (const [label, index] of [['setup', 9], ['execution', 10], ['riskReward', 11]]) {
+    assert.equal(values[index], null, `${label} score stays NULL`);
+  }
+  assert.equal(values[13], 61, 'a real score is still written');
+  // Levels: entry_zone_low/high, stop_loss, hard_invalidation.
+  for (const index of [27, 28, 29, 30]) assert.equal(values[index], null, 'absent levels stay NULL');
 });

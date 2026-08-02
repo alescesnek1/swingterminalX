@@ -626,3 +626,24 @@ test('an empty MORNING_BRIEFING_HOUR_LOCAL keeps the 08:00 default, not midnight
   });
   assert.equal(explicit.targetHour, 6, 'a real hour still overrides');
 });
+
+// ── scheduled-invocation contract (observed live 2026-08-02) ─────────────────
+// Every scheduled run ended in "Function returned an unsupported value. Accepted
+// types are 'Response' or 'undefined'" AFTER doing its work: the handler returned the
+// diagnostics object. A healthy briefing was therefore recorded as a failed
+// invocation. Every other scheduled function in the repo returns a Response.
+test('the scheduled invocation returns a Response, not a bare object', async () => {
+  const mod = await import('../netlify/functions/morning-briefing.mjs');
+  const res = await mod.default(new Request('https://example.test/.netlify/functions/morning-briefing'));
+  assert.ok(res instanceof Response, 'the runtime only accepts a Response or undefined');
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.code, MORNING_BRIEFING_CODES.DISABLED_BY_ENV, 'and it still carries the diagnostics');
+});
+
+test('provenance is logged as "not evaluated" when the run stopped at a gate', () => {
+  // Printing marketUsable=false for a run that never looked at any data reports a
+  // measurement that was never taken.
+  assert.match(fnSrc, /data provenance not evaluated \(stopped at a gate/);
+  assert.match(fnSrc, /if \(diag\.dataSource === null\)/);
+});
