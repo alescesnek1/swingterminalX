@@ -135,7 +135,15 @@ export async function runRadarContextPublisher(deps = {}) {
   let rolling; try { rolling = deps.rolling || await (deps.loadRolling || loadRolling)(); } catch { return outcome(503, { ok: false, reason: 'ROLLING_MODULE_UNAVAILABLE' }); }
   const transaction = deps.withTransaction || store.withContextTransaction;
 
+  // Read the CURRENT statuses before anything is overwritten: the signal journal
+  // records the moment a coin ENTERS a state, which is only knowable by comparing
+  // against what the state table held before this cycle's upsert.
+  let previousStatuses = new Map();
   const tx = await transaction(async (db) => {
+    if (typeof store.getRadarStatusIndex === 'function') {
+      const index = await store.getRadarStatusIndex(db);
+      if (index?.ok) previousStatuses = index.index;
+    }
     const bundle = deps.bundle || await store.getRadarInputBundle(db, { topN: topN(env), tickerLimit: 1000 });
     if (!bundle?.ok) return bundle || { ok: false, reason: 'DB_UNAVAILABLE' };
     if (!bundle.run) return { ok: true, skipped: true, reason: 'NO_PUBLISHED_RUN' };
@@ -205,6 +213,31 @@ export async function runRadarContextPublisher(deps = {}) {
       computedAt: tx.computedAt, observedAt: tx.observedAt,
     }), { getDbImpl: deps.getDbImpl }) || { ok: false, reason: 'DB_UNAVAILABLE' };
   }
+  // ── append-only signal journal ──
+  // The archive of what RADAR actually said, recorded on STATE ENTRY only. It is the
+  // only record that survives: radar_candidate_state is overwritten every cycle and
+  // the per-run history is pruned by retention, so without this there is nothing
+  // honest to review or backtest later — candles can be re-fetched forever, a past
+  // verdict cannot be reconstructed.
+  //
+  // Strictly an archive: it feeds no gate, no alert and no read path that decides
+  // anything, so a failure here must never fail the cycle. It is recorded AFTER the
+  // state write so a journal problem cannot cost the current verdict.
+  let journal = { ok: true, written: 0, skipped: true };
+  if (typeof store.insertRadarSignals === 'function' && Array.isArray(tx.candidates) && tx.candidates.length) {
+    const transitions = store.selectRadarSignalTransitions(tx.candidates, previousStatuses);
+    if (transitions.length) {
+      journal = await transaction(async (db) => await store.insertRadarSignals(db, {
+        transitions, runId: tx.runId, source: 'canonical_context',
+        computedAt: tx.computedAt, observedAt: tx.observedAt,
+      }), { getDbImpl: deps.getDbImpl }) || { ok: false, reason: 'DB_UNAVAILABLE' };
+      if (!journal.ok) console.warn('[RADAR_PUBLISH] signal_journal_failed', { runId: tx.runId, reason: journal.reason, transitions: transitions.length });
+      else console.info('[RADAR_PUBLISH] signals_recorded', { runId: tx.runId, transitions: transitions.length, written: journal.written });
+    } else {
+      journal = { ok: true, written: 0, skipped: false };
+    }
+  }
+
   // A failed state write must stay loud: the read path serves that table, so keeping
   // the previous cycle's rows would show stale verdicts as current. The difference
   // from before is only that the run snapshot survives to back the labelled fallback.
@@ -217,5 +250,12 @@ export async function runRadarContextPublisher(deps = {}) {
   if (tx.absorbCoverage && tx.absorbCoverage.SUPPLIED_MEASUREMENTS > 0 && tx.absorbCoverage.STRICT_READY === 0) {
     console.warn('[RADAR_ABSORB] no_strict_coverage', { runId: tx.runId, rejections: tx.absorbCoverage.REJECTIONS });
   }
-  return outcome(200, { ok: true, skipped: false, runId: tx.runId, candidateCount: tx.candidateCount, entryReadyCount: tx.entryReadyCount, trustedMicro: tx.trustedMicro });
+  return outcome(200, {
+    ok: true, skipped: false, runId: tx.runId, candidateCount: tx.candidateCount,
+    entryReadyCount: tx.entryReadyCount, trustedMicro: tx.trustedMicro,
+    // Reported, never asserted: a cycle that recorded nothing because the journal
+    // write failed must be distinguishable from one where no coin changed state.
+    signalsRecorded: journal.ok ? journal.written : null,
+    signalJournalOk: journal.ok === true,
+  });
 }

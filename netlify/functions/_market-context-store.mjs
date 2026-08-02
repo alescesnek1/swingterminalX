@@ -21,7 +21,18 @@ const COLLECTOR_WINDOW_MAX_SEC = 900;
 const SECRET_KEY = /token|secret|authorization|cookie|password|api[_-]?key|header|bearer/i;
 const SAFE_STATUS = new Set(['complete', 'partial', 'unavailable', 'unsupported']);
 
-function numberOrNull(value) { const n = Number(value); return Number.isFinite(n) ? n : null; }
+// null / '' must NOT become 0. Number(null) is 0 and Number('') is 0, both finite, so
+// this helper — which writes every RADAR score, level and stop into the database —
+// was storing "not computed" as a real reading of zero. The schema's own contract is
+// the opposite: "a NULL score must never read as a zero/bearish score", and a stop of
+// 0 or a setup score of 0 is a verdict, not an absence. `undefined` already behaved
+// correctly (NaN); null did not, and null is exactly what an unset JSON field is.
+function numberOrNull(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string' && value.trim() === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
 function integerOrNull(value) { const n = numberOrNull(value); return n === null ? null : Math.trunc(n); }
 function asDate(value, fallback = new Date()) { const d = value instanceof Date ? value : new Date(value); return Number.isNaN(d.getTime()) ? fallback : d; }
 function upper(value, max = 32) { return typeof value === 'string' ? value.trim().toUpperCase().slice(0, max) : ''; }
@@ -569,6 +580,135 @@ export async function getRadarCandidateState(db, symbol, options = {}) {
     const result = await db.query(`SELECT ${RADAR_STATE_SELECT} FROM radar_candidate_state WHERE symbol=$1${venue} ORDER BY (market='spot') DESC LIMIT 1`, params);
     return { ok: true, state: result.rows[0] || null };
   } catch (error) { dbError('radar_state_symbol_read_failed', error); return { ok: false, reason: 'DB_UNAVAILABLE' }; }
+}
+
+// ── Append-only signal journal ───────────────────────────────────────────────
+// The states worth remembering. WATCH/IGNORE are the resting states of most of the
+// universe; recording them would bury the archive in noise. Everything from a
+// confirmed dislocation upwards is a moment the desk would want to review or
+// backtest later.
+export const RADAR_JOURNALED_STATES = Object.freeze([
+  'DISLOCATION_CONFIRMED', 'LONG_FLUSH_CONFIRMED', 'STABILIZATION', 'RECLAIM_DETECTED',
+  'EARLY_ENTRY_READY', 'STANDARD_ENTRY_READY', 'AGGRESSIVE_ENTRY_READY',
+]);
+const JOURNALED = new Set(RADAR_JOURNALED_STATES);
+
+// A signal is the moment a coin ENTERS a journaled state — not the fact that it is
+// still sitting in one. A coin holding STABILIZATION for six hours is one signal,
+// not 120 copies of it (the collector runs 480 cycles a day).
+//
+// `previousByKey` is the state table as it was BEFORE this cycle's upsert, keyed
+// "market:symbol". A coin with no previous row is a first sighting and counts as a
+// transition — otherwise the very first signal after a deploy would be lost.
+export function selectRadarSignalTransitions(candidates = [], previousByKey = new Map()) {
+  const out = [];
+  const seen = new Set();
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    const symbol = upper((candidate && candidate.symbol) || '', 32);
+    if (!symbol) continue;
+    const status = candidate && typeof candidate.STATUS === 'string' ? candidate.STATUS : null;
+    if (!status || !JOURNALED.has(status)) continue;
+    const market = radarStateVenue(candidate);
+    const key = `${market}:${symbol}`;
+    if (seen.has(key)) continue; // one row per coin per cycle, whatever the input held
+    const previous = previousByKey instanceof Map ? previousByKey.get(key) : (previousByKey || {})[key];
+    const previousStatus = previous && typeof previous.status === 'string' ? previous.status : null;
+    if (previousStatus === status) continue; // still in the same state → not a new signal
+    seen.add(key);
+    out.push({ candidate, market, symbol, status, previousStatus });
+  }
+  return out;
+}
+
+// Reads just the status column of the current state table, for transition detection.
+export async function getRadarStatusIndex(db) {
+  try {
+    const result = await db.query('SELECT market,symbol,status FROM radar_candidate_state');
+    const index = new Map();
+    for (const row of result.rows) index.set(`${row.market}:${row.symbol}`, { status: row.status });
+    return { ok: true, index };
+  } catch (error) { dbError('radar_status_index_read_failed', error); return { ok: false, reason: 'DB_UNAVAILABLE', index: new Map() }; }
+}
+
+const SIGNAL_JOURNAL_COLUMNS = 28;
+
+// Records the transitions. Append-only and idempotent: a retried publish of the same
+// run re-sends the same (market, symbol, status, computed_at) and is ignored.
+export async function insertRadarSignals(db, payload = {}) {
+  const transitions = Array.isArray(payload.transitions) ? payload.transitions : [];
+  if (!transitions.length) return { ok: true, written: 0 };
+  const computedAt = asDate(payload.computedAt);
+  const observedAt = asDate(payload.observedAt, computedAt);
+  const runId = Number.isInteger(Number(payload.runId)) && Number(payload.runId) > 0 ? Number(payload.runId) : null;
+  const source = typeof payload.source === 'string' ? payload.source.slice(0, 64) : 'canonical_context';
+  try {
+    let written = 0;
+    for (const chunk of chunks(transitions)) {
+      const values = [];
+      for (const t of chunk) {
+        const c = t.candidate || {};
+        const size = parsePositionSizePct(c.POSITION_SIZE_GUIDANCE);
+        values.push(
+          t.market, t.symbol, computedAt, observedAt, runId, source,
+          t.previousStatus, t.status, stringOrNull(c.ENTRY_TYPE), c.allRadarConditionsPassed === true,
+          stringOrNull(c.actionability, 32),
+          numberOrNull(c.SETUP_SCORE), numberOrNull(c.EXECUTION_SCORE), numberOrNull(c.RISK_REWARD_SCORE),
+          numberOrNull(c.MARKET_REGIME_SCORE), numberOrNull(c.FINAL_CONFIDENCE ?? c.CONFIDENCE),
+          numberOrNull(c.ENTRY_ZONE?.low), numberOrNull(c.ENTRY_ZONE?.high),
+          numberOrNull(c.STOP_LOSS_LEVEL), numberOrNull(c.HARD_INVALIDATION),
+          tpLevel(c, 0), tpLevel(c, 1), tpLevel(c, 2),
+          stringOrNull(c.RECLAIM_STATUS), stringOrNull(c.ABSORB_STATUS), stringOrNull(c.STRICT_ABSORB_STATUS),
+          stringOrNull(c.safetyStatus, 32),
+          safeJson(sanitizeDiagnostics(c)),
+        );
+        // size is intentionally not stored: the journal records the SIGNAL, and
+        // position sizing is a portfolio decision made at replay time.
+        void size;
+      }
+      const result = await db.query(
+        `INSERT INTO radar_signal_journal (
+           market,symbol,computed_at,observed_at,run_id,source,
+           previous_status,status,entry_type,entry_ready,actionability,
+           setup_score,execution_score,risk_reward_score,market_regime_score,confidence,
+           entry_zone_low,entry_zone_high,stop_loss,hard_invalidation,
+           tp1_level,tp2_level,tp3_level,
+           reclaim_status,absorb_status,strict_absorb_status,safety_status,payload
+         ) VALUES ${valuesSql(chunk.length, SIGNAL_JOURNAL_COLUMNS)}
+         ON CONFLICT ON CONSTRAINT radar_signal_journal_unique_transition DO NOTHING`,
+        values,
+      );
+      written += typeof result?.rowCount === 'number' ? result.rowCount : chunk.length;
+    }
+    return { ok: true, written };
+  } catch (error) { dbError('radar_signal_journal_insert_failed', error); return { ok: false, reason: 'DB_UNAVAILABLE' }; }
+}
+
+// Read side: the archive, newest first. Bounded, and every field it returns is a
+// stored fact — the reader never recomputes a verdict.
+export async function getRadarSignalJournal(db, options = {}) {
+  const limit = Math.min(Math.max(Number(options.limit) || 200, 1), 2000);
+  const params = [limit];
+  const where = [];
+  if (typeof options.symbol === 'string' && /^[A-Z0-9]{2,32}$/.test(options.symbol.toUpperCase())) {
+    params.push(options.symbol.toUpperCase()); where.push(`symbol=$${params.length}`);
+  }
+  if (options.entryReadyOnly === true) where.push('entry_ready');
+  if (options.since instanceof Date || typeof options.since === 'string') {
+    params.push(asDate(options.since)); where.push(`computed_at >= $${params.length}`);
+  }
+  try {
+    const result = await db.query(
+      `SELECT id,market,symbol,computed_at,observed_at,run_id,previous_status,status,entry_type,entry_ready,actionability,
+              setup_score,execution_score,risk_reward_score,market_regime_score,confidence,
+              entry_zone_low,entry_zone_high,stop_loss,hard_invalidation,tp1_level,tp2_level,tp3_level,
+              reclaim_status,absorb_status,strict_absorb_status,safety_status
+         FROM radar_signal_journal
+        ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+        ORDER BY computed_at DESC, id DESC LIMIT $1`,
+      params,
+    );
+    return { ok: true, signals: result.rows };
+  } catch (error) { dbError('radar_signal_journal_read_failed', error); return { ok: false, reason: 'DB_UNAVAILABLE' }; }
 }
 
 // Coverage of the per-symbol RADAR state table: how many coins carry a verdict at
