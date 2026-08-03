@@ -175,8 +175,9 @@ test('every versioned asset carries the same single bumped cache-bust token', ()
   // error log; 6k1 → 6k2 for the native-auth browser switch (auth-client.js and
   // admin-users-panel.js added, terminal.js auth wiring changed); 6k2 -> 6k3 for the
   // Cockpit miss diagnosis (terminal.js renders a publisher outage distinctly from a
-  // coverage gap).
-  assert.equal(tokens[0], '6k3', 'token was bumped for this JS change');
+  // coverage gap); 6k3 -> 6k4 for the native-account AI fix (ai-analysis.js resolves its
+  // token through AuthClient, auth-client.js announces the ended mode).
+  assert.equal(tokens[0], '6k4', 'token was bumped for this JS change');
 });
 
 // The measurement budget targets the deepest drawdowns, and DISLOCATION is 20% of

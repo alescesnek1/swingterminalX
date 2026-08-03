@@ -1111,6 +1111,28 @@ email allowlist (§9), not a billing tier.
     redeploy. Verified from production: unknown-account login →
     `401 INVALID_CREDENTIALS` (proves `app_users` exists and was queried),
     unauthenticated `/api/admin-users` → `401`.
+  - 🩹 **Post-cutover bug, fixed 2026-08-03 (`fix/native-session-ai-401`, local,
+    unpushed): AI was unusable for native-only accounts.** `js/ai-analysis.js`
+    was the ONE frontend module still reading
+    `window.__supabase.auth.getSession()` directly instead of `AuthClient`. An
+    account created in the admin panel has **no Supabase session at all**, so
+    every AI action (coin analysis, briefing, market briefing) got `null` there
+    and rendered a client-side `401 Neautorizovaný přístup` — whose branch then
+    called `window.location.reload()`, bouncing the user to the login gate every
+    time they pressed an AI button. Scanner / RADAR / admin panel worked
+    throughout (they go through `AuthClient`), and an owner still holding a
+    legacy Supabase session could not reproduce it. Three fixes:
+    (1) `getAccessToken()` in `ai-analysis.js` now goes through `AuthClient`
+    (Supabase only as fallback) and logs + `ErrorLog.record()`s a missing token;
+    (2) the 401 branch reloads **at most once per page** and **never** for a
+    locally-detected missing token (`renderError(..., { reload: false })`);
+    (3) `auth-client.js` `clearNative()` now emits the mode that *ended*
+    (`'native'`) instead of the already-nulled one — `terminal.js`'s
+    `AuthClient.onChange` handler returns early unless `mode === 'native'`, so a
+    session ending mid-use previously left the app looking signed in while every
+    request 401'd. Guards: `tests/ai.frontend-diagnostics.test.mjs` (token source
+    + no reload loop) and `tests/frontend.auth-client.test.mjs` (the ended mode
+    is announced). Cache-bust `6k3 → 6k4`.
   - ⚠️ **`netlify database migrations apply` MUST be run by hand.** Netlify does
     NOT apply migrations on deploy despite its CLI saying so — after a successful
     deploy, 9 were still pending. The command's own "applies to the local

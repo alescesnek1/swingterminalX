@@ -366,3 +366,51 @@ test('a throwing onChange listener does not break the state machine', async () =
   assert.equal(result.ok, true);
   assert.equal(AuthClient.mode(), 'native');
 });
+
+// ── the end of a native session must be VISIBLE ──
+//
+// terminal.js applies the signed-out UI only for `mode === 'native'`
+// (Supabase transitions arrive through onAuthStateChange instead). Emitting the
+// already-nulled mode meant a native session that ended mid-use left the
+// terminal looking signed in while every request came back 401 — the exact
+// failure the owner reported as "AI analysis says 401 but I look logged in".
+test('a 401 refresh announces the end WITH the native mode', async () => {
+  const { AuthClient } = makeHarness({
+    routes: { [REFRESH]: { status: 401, body: { ok: false, reason: 'TOKEN_VERSION_STALE' } } },
+    storage: {
+      'swing.nativeAuth.v1': JSON.stringify({
+        token: TOKEN,
+        session: { userId: 'u-1', email: 'owner@example.com', role: 'admin', expiresAt: FUTURE() },
+      }),
+    },
+  });
+  const events = [];
+  AuthClient.onChange((session, mode) => events.push({ signedIn: Boolean(session), mode }));
+
+  await AuthClient.init();
+
+  const ended = events.filter((e) => !e.signedIn);
+  assert.ok(ended.length > 0, 'the end of the session must be announced');
+  assert.ok(
+    ended.some((e) => e.mode === 'native'),
+    'the listener must be told the NATIVE session ended, or terminal.js keeps the app open with a dead token',
+  );
+});
+
+test('an expired stored session is announced with the native mode on restore', async () => {
+  const { AuthClient } = makeHarness({
+    storage: {
+      'swing.nativeAuth.v1': JSON.stringify({
+        token: TOKEN,
+        session: { userId: 'u-1', email: 'owner@example.com', role: 'admin', expiresAt: PAST() },
+      }),
+    },
+  });
+  const events = [];
+  AuthClient.onChange((session, mode) => events.push({ signedIn: Boolean(session), mode }));
+
+  await AuthClient.init();
+
+  assert.deepEqual(events, [{ signedIn: false, mode: 'native' }]);
+  assert.equal(AuthClient.mode(), null, 'and the mode itself is cleared');
+});

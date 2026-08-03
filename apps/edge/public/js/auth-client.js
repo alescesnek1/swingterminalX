@@ -102,6 +102,13 @@
 
   function clearNative(reason) {
     const had = Boolean(_token);
+    // The mode is nulled below, but listeners must still be told WHICH source
+    // just ended. terminal.js only applies the signed-out UI for `mode ===
+    // 'native'`, so emitting the already-nulled mode meant a session that ended
+    // mid-use (expired token, disabled account, rotated secret) left the app
+    // looking signed in while every request came back 401 — the failure was
+    // invisible exactly where the user was looking.
+    const endedMode = _mode === 'native' ? 'native' : _mode;
     _token = null;
     _session = null;
     if (_mode === 'native') _mode = null;
@@ -109,14 +116,15 @@
     persist();
     if (had) {
       log('native session cleared', { reason: reason || 'unspecified' });
-      emit();
+      emit(endedMode);
     }
   }
 
-  function emit() {
+  function emit(modeOverride) {
+    const mode = modeOverride === undefined ? _mode : modeOverride;
     for (const fn of _listeners) {
       try {
-        fn(_session, _mode);
+        fn(_session, mode);
       } catch (err) {
         // A broken listener must not take the auth state machine down with it.
         log('an onChange listener threw', { name: err && err.name });

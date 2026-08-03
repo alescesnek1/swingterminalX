@@ -250,6 +250,21 @@ before `terminal.js`. Everything that needs a token goes through
 `AuthClient.getAccessToken()`, so `_getAuthHeaders()` in `terminal.js` is
 identical for both identity sources.
 
+> **Every** module must resolve its token this way — no exceptions.
+> `js/ai-analysis.js` was missed in the original cutover and read
+> `window.__supabase.auth.getSession()` directly. A native-only account has no
+> Supabase session, so all three AI entry points failed with a client-side
+> `401` and then reloaded the page, which read as "the terminal keeps logging me
+> out". Fixed 2026-08-03; guarded by
+> `tests/ai.frontend-diagnostics.test.mjs`. If you add a module that calls an
+> authenticated endpoint, go through `AuthClient` — reading Supabase directly is
+> a bug even while Supabase is still accepted.
+>
+> Related: `clearNative()` announces the mode that *ended* (`'native'`), because
+> `terminal.js`'s `AuthClient.onChange` handler ignores any transition whose mode
+> is not `'native'`. Emitting the already-nulled mode left the app open with a
+> dead token instead of showing the login gate.
+
 **It is self-configuring, deliberately.** There is no flag in the browser:
 `signIn()` posts to `/api/auth-login` and, if that answers
 `503 NATIVE_AUTH_DISABLED`, falls back to Supabase transparently. So the same
