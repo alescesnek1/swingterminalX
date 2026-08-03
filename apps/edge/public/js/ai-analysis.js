@@ -121,7 +121,15 @@ function renderMeta(metaEl, m, prefix = '') {
   metaEl.textContent = parts.join(' │ ');
 }
 
-function renderError(bodyEl, metaEl, error, status) {
+// A 401 from the SERVER can be worth one page reload (the app re-runs its
+// session restore on boot). A reload must never happen more than once per page,
+// and must never happen for a 401 we produced ourselves because no token was
+// available — reloading cannot conjure a session, it only bounces the user back
+// to the login gate while the session restore is still in flight, which is
+// exactly the "it logs me out every few seconds" loop this guard removes.
+let _reloadScheduled = false;
+
+function renderError(bodyEl, metaEl, error, status, opts = {}) {
   if (!bodyEl) return;
   let icon = '❌';
   let title = 'Chyba';
@@ -130,9 +138,14 @@ function renderError(bodyEl, metaEl, error, status) {
 
   if (status === 401) {
     icon = '🔒'; title = 'Neautorizovaný přístup';
-    detail = error?.detail || 'Vaše relace vypršela.';
-    hint = 'Stránka se za chvíli automaticky obnoví.';
-    setTimeout(() => window.location.reload(), 3000);
+    detail = error?.detail || error?.error || 'Vaše relace vypršela.';
+    if (opts.reload === false || _reloadScheduled) {
+      hint = opts.hint || 'Stránka se sama neobnoví. Přihlas se prosím znovu.';
+    } else {
+      _reloadScheduled = true;
+      hint = 'Stránka se za chvíli automaticky obnoví.';
+      setTimeout(() => window.location.reload(), 3000);
+    }
   } else if (status === 429) {
     icon = '⏳'; title = 'Rate Limit';
     detail = 'Příliš mnoho požadavků.';
@@ -243,16 +256,48 @@ function extractBriefingText(payload) {
 
 // ── Auth ──
 
+// Resolve the bearer token the SAME way every other panel does — through
+// AuthClient, which answers for BOTH identity sources (a native account from
+// our own database, or Supabase). This file used to read
+// `window.__supabase.auth.getSession()` directly, so a user signed in with a
+// native account (NATIVE_AUTH_ENABLED=true, no Supabase session at all) got
+// `null` here and every AI action failed with a client-side 401
+// "Neautorizovaný přístup" — while the same account's scanner, RADAR and admin
+// panel worked, because those go through AuthClient. See docs/native-auth.md.
 async function getAccessToken() {
   try {
+    if (window.AuthClient) return await window.AuthClient.getAccessToken();
+    // Fallback only for the unexpected case where auth-client.js failed to load.
     const sb = window.__supabase;
     if (!sb) return null;
     const { data: { session } } = await sb.auth.getSession();
     return session?.access_token || null;
   } catch (err) {
-    console.error('[AI] Failed to get session:', err);
+    // A missing token is a legitimate state (signed out) and is reported by the
+    // caller; a THROWN error is not, so it must be visible on its own.
+    console.error('[AI] Failed to resolve an access token:', err);
+    window.ErrorLog?.record({
+      level: 'error', kind: 'auth', title: 'Token unavailable for AI',
+      reason: (err && err.message) || 'unknown', endpoint: '/api/auth',
+    });
     return null;
   }
+}
+
+/**
+ * "No token" is rendered to the user by the caller, but it must ALSO be logged
+ * and land in the central error log — otherwise a silently signed-out terminal
+ * looks like a broken AI feature and the owner hunts the wrong problem.
+ */
+function _reportNoSession() {
+  const mode = (() => {
+    try { return window.AuthClient?.mode() || 'none'; } catch { return 'unknown'; }
+  })();
+  console.warn('[AI] no access token — refusing to call the AI endpoint', { authMode: mode });
+  window.ErrorLog?.record({
+    level: 'warn', kind: 'auth', title: 'AI blocked: no session token',
+    reason: `authMode=${mode}`, endpoint: '/api/auth',
+  });
 }
 
 // ── SSE stream consumption ──
@@ -309,7 +354,11 @@ export async function requestAnalysis(symbol, _id, context) {
 
   const accessToken = await getAccessToken();
   if (!accessToken) {
-    renderError(modalBody, modalMeta, { error: 'No active session' }, 401);
+    _reportNoSession();
+    renderError(modalBody, modalMeta, {
+      error: 'Nejsi přihlášen — chybí platný token relace.',
+      detail: 'Terminál nemá token ani pro nativní účet, ani pro Supabase.',
+    }, 401, { reload: false, hint: 'Přihlas se prosím znovu (odhlásit → přihlásit). Pokud to trvá, otevři konzoli a spusť errors().' });
     return;
   }
 
@@ -402,7 +451,11 @@ export async function requestBriefing(symbols) {
 
   const accessToken = await getAccessToken();
   if (!accessToken) {
-    renderError(briefingBody, briefingMeta, { error: 'No active session' }, 401);
+    _reportNoSession();
+    renderError(briefingBody, briefingMeta, {
+      error: 'Nejsi přihlášen — chybí platný token relace.',
+      detail: 'Terminál nemá token ani pro nativní účet, ani pro Supabase.',
+    }, 401, { reload: false, hint: 'Přihlas se prosím znovu (odhlásit → přihlásit). Pokud to trvá, otevři konzoli a spusť errors().' });
     return;
   }
 
@@ -628,7 +681,11 @@ export async function requestMarketBriefing(opts = {}) {
 
   const accessToken = await getAccessToken();
   if (!accessToken) {
-    renderError(contentEl, footerEl, { error: 'No active session' }, 401);
+    _reportNoSession();
+    renderError(contentEl, footerEl, {
+      error: 'Nejsi přihlášen — chybí platný token relace.',
+      detail: 'Terminál nemá token ani pro nativní účet, ani pro Supabase.',
+    }, 401, { reload: false, hint: 'Přihlas se prosím znovu (odhlásit → přihlásit). Pokud to trvá, otevři konzoli a spusť errors().' });
     return;
   }
 
