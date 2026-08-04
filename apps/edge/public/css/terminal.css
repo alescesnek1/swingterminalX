@@ -211,6 +211,10 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .lead-score--high{color:var(--txt);border-color:rgba(168,85,247,.35);background:rgba(168,85,247,.08)}
 .lead-score--extreme{color:var(--pur);border-color:rgba(168,85,247,.55);background:rgba(168,85,247,.14)}
 .lead-score--unknown{color:var(--txt3);opacity:.7}
+/* A degraded basis (FUTURES_ONLY / SPOT_ONLY) is scored from partial evidence.
+   Dashed border so it never reads as solid as a full spot+futures comparison;
+   the tooltip always names the basis. */
+.lead-score--degraded{border-style:dashed}
 
 /* DETAIL PANEL */
 .dhead{display:flex;justify-content:space-between;align-items:flex-start;padding:10px 12px 8px;border-bottom:1px solid var(--b1)}

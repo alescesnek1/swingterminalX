@@ -14,6 +14,7 @@ import {
   leadScoreInputFromRow,
   leadScoreForRow,
   LEAD_SCORE_ADVISORY_NOTE,
+  LEAD_SCORE_BASES,
 } from '../apps/edge/public/js/scanner-lead-score.js';
 
 const terminalJs = fs.readFileSync(new URL('../apps/edge/public/js/terminal.js', import.meta.url), 'utf8');
@@ -29,6 +30,10 @@ function stripComments(src) {
   return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
 }
 const leadScoreCode = stripComments(leadScoreJs);
+
+// premium, volumeRatio, moveGap, oi, funding, flow + the two futures-only
+// components. A row with nothing readable reports all of them as missing.
+const ALL_COMPONENT_COUNT = 8;
 
 // Reference inputs. `aligned` is a quiet market; `led` is a loudly
 // futures-driven one. Individual tests clone and perturb them.
@@ -62,7 +67,8 @@ test('UNKNOWN when no data at all is present', () => {
     assert.equal(r.direction, 'unknown');
     assert.equal(r.confidence, 'none');
     assert.deepEqual(r.present, []);
-    assert.equal(r.missing.length, 6);
+    // Nothing was readable, so every component the model knows about is listed.
+    assert.equal(r.missing.length, ALL_COMPONENT_COUNT);
   }
 });
 
@@ -77,10 +83,20 @@ test('UNKNOWN when only perp-side data exists — nothing compares futures to sp
   assert.ok(r.missing.includes('futures vs spot 24h move'));
 });
 
-test('UNKNOWN when only one side of each pair is present', () => {
+// Regression (production hotfix): the original model demanded a futures-vs-spot
+// comparison for ANY score, so every spot-only listing (most of the Binance
+// USD-stable universe) and every futures-only perp read UNKNOWN, which is what
+// made the shipped column useless.
+test('a spot-only listing scores SPOT_ONLY / LOW, not UNKNOWN', () => {
   const r = computeLeadScore({ spotPrice: 100, spotQuoteVolume24h: 5e7, spotChange24hPct: 3 });
-  assert.equal(r.label, 'UNKNOWN');
-  assert.equal(r.score, null);
+  assert.equal(r.basis, 'SPOT_ONLY');
+  assert.equal(r.label, 'LOW');
+  assert.equal(r.score, 0);
+  assert.equal(r.direction, 'unknown');
+  assert.match(r.basisNote, /No futures venue found/);
+  // It must still say what it could not see.
+  assert.ok(r.missing.includes('futures/spot premium'));
+  assert.ok(r.missing.includes('funding rate'));
 });
 
 test('null / empty-string / boolean inputs are rejected before Number() can coerce them to 0', () => {
@@ -92,9 +108,24 @@ test('null / empty-string / boolean inputs are rejected before Number() can coer
     spotChange24hPct: false, futuresChange24hPct: 3,
     fundingPct: null, openInterestChangePct: '', takerBuyRatio: null,
   });
-  assert.equal(r.label, 'UNKNOWN');
-  assert.equal(r.score, null);
-  assert.equal(r.missing.length, 6);
+  // Not one of the three PAIRED components may exist: each needs both legs,
+  // and every missing leg here is null / '' / false. If any had coerced to 0
+  // we would be publishing a fabricated -100 % premium or a 0x volume ratio.
+  for (const key of ['premium', 'volumeRatio', 'moveGap']) assert.ok(!r.present.includes(key), key);
+  assert.notEqual(r.basis, 'FULL_SPOT_FUTURES');
+  // funding / OI / flow were null or '' — they must not have become readings.
+  for (const key of ['funding', 'oi', 'flow']) assert.ok(!r.present.includes(key), key);
+
+  // With nothing readable at all it still fails closed to UNKNOWN.
+  const empty = computeLeadScore({
+    spotPrice: null, futuresPrice: null, spotQuoteVolume24h: '', futuresQuoteVolume24h: null,
+    spotChange24hPct: false, futuresChange24hPct: null, fundingPct: null,
+    openInterestChangePct: '', takerBuyRatio: null,
+  });
+  assert.equal(empty.label, 'UNKNOWN');
+  assert.equal(empty.score, null);
+  assert.equal(empty.basis, 'NO_USABLE_DATA');
+  assert.equal(empty.missing.length, ALL_COMPONENT_COUNT);
 });
 
 test('a zero or negative price/volume is treated as not reported, never as a reading', () => {
@@ -170,6 +201,115 @@ test('the same strength on the short side reads as futures-led down', () => {
   assert.equal(r.label, 'EXTREME');
 });
 
+// ── basis: degraded scoring paths (production hotfix) ─────────
+
+test('full spot+futures reports FULL_SPOT_FUTURES and is never UNKNOWN', () => {
+  for (const input of [ALIGNED, LED]) {
+    const r = computeLeadScore(input);
+    assert.equal(r.basis, 'FULL_SPOT_FUTURES');
+    assert.notEqual(r.label, 'UNKNOWN');
+    assert.ok(Number.isInteger(r.score));
+  }
+});
+
+test('a futures-only row with price/change/volume scores FUTURES_ONLY, not UNKNOWN', () => {
+  const r = computeLeadScore({
+    futuresPrice: 0.42, futuresQuoteVolume24h: 9e8, futuresChange24hPct: 14.2, fundingPct: 0.05,
+  });
+  assert.equal(r.basis, 'FUTURES_ONLY');
+  assert.notEqual(r.label, 'UNKNOWN');
+  assert.ok(r.score > 0, `score ${r.score}`);
+  // Direction is the perp's own push — it must NOT claim a lead over spot.
+  assert.equal(r.direction, 'futures pressure up');
+  assert.match(r.basisNote, /No matched spot leg found — score uses futures pressure only\./);
+});
+
+test('futures-only turnover scales across orders of magnitude, not linearly', () => {
+  const at = (vol) => computeLeadScore({ futuresPrice: 1, futuresQuoteVolume24h: vol, futuresChange24hPct: 5 }).score;
+  const small = at(1e7);
+  const mid = at(3e8);
+  const big = at(5e9);
+  assert.ok(small < mid && mid < big, `${small} < ${mid} < ${big}`);
+  // A sub-floor perp contributes nothing from turnover.
+  assert.ok(at(1e6) <= small);
+});
+
+test('futures-only: funding / OI / taker flow missing does NOT force UNKNOWN', () => {
+  const r = computeLeadScore({ futuresPrice: 2, futuresQuoteVolume24h: 4e8, futuresChange24hPct: 8 });
+  assert.equal(r.basis, 'FUTURES_ONLY');
+  assert.notEqual(r.label, 'UNKNOWN');
+  assert.ok(r.missing.includes('funding rate'));
+  assert.ok(r.missing.includes('open interest change'));
+  assert.ok(r.missing.includes('taker buy/sell flow'));
+});
+
+test('full basis: funding / OI / taker flow missing does NOT force UNKNOWN', () => {
+  const r = computeLeadScore({
+    spotPrice: 100, futuresPrice: 100.3,
+    spotQuoteVolume24h: 1e8, futuresQuoteVolume24h: 5e8,
+    spotChange24hPct: 2, futuresChange24hPct: 3,
+  });
+  assert.equal(r.basis, 'FULL_SPOT_FUTURES');
+  assert.notEqual(r.label, 'UNKNOWN');
+  assert.equal(r.missing.length, 3);
+});
+
+test('a lone perp metric with no futures venue reading stays UNKNOWN', () => {
+  // Funding/OI/flow describe a perp but carry no price, turnover or move, so
+  // there is no pressure magnitude to report.
+  const r = computeLeadScore({ fundingPct: 0.09, openInterestChangePct: 40, takerBuyRatio: 0.9 });
+  assert.equal(r.label, 'UNKNOWN');
+  assert.equal(r.basis, 'NO_USABLE_DATA');
+});
+
+test('no usable market data stays UNKNOWN with a stated basis', () => {
+  for (const input of [{}, null, undefined, { spotPrice: null, futuresPrice: '' }]) {
+    const r = computeLeadScore(input);
+    assert.equal(r.label, 'UNKNOWN');
+    assert.equal(r.score, null);
+    assert.equal(r.basis, 'NO_USABLE_DATA');
+    assert.ok(r.basisNote.length > 0);
+  }
+});
+
+test('one weak futures-only component alone cannot produce EXTREME or HIGH', () => {
+  const r = computeLeadScore({ futuresPrice: 1, futuresChange24hPct: 0.4 });
+  assert.equal(r.basis, 'FUTURES_ONLY');
+  assert.equal(r.present.length, 1);
+  assert.notEqual(r.label, 'EXTREME');
+  assert.notEqual(r.label, 'HIGH');
+});
+
+test('futures-only caps at HIGH unless at least three components are strong', () => {
+  // Two maxed components, everything else missing: loud, but not EXTREME.
+  const two = computeLeadScore({ futuresPrice: 1, futuresQuoteVolume24h: 2e10, futuresChange24hPct: 40 });
+  assert.equal(two.basis, 'FUTURES_ONLY');
+  assert.notEqual(two.label, 'EXTREME');
+  assert.ok(two.score <= 79, `score ${two.score}`);
+
+  // Five strong components clears the ceiling.
+  const many = computeLeadScore({
+    futuresPrice: 1, futuresQuoteVolume24h: 2e10, futuresChange24hPct: 40,
+    fundingPct: 0.09, openInterestChangePct: 30, takerBuyRatio: 0.85,
+  });
+  assert.ok(many.score > two.score, `${many.score} !> ${two.score}`);
+  assert.equal(many.label, 'EXTREME');
+});
+
+test('a degraded basis never outscores the same evidence with a spot leg attached', () => {
+  const futuresOnly = computeLeadScore({ futuresPrice: 1, futuresQuoteVolume24h: 2e10, futuresChange24hPct: 40 });
+  assert.ok(futuresOnly.score <= 79, 'futures-only is discounted and capped');
+  assert.equal(futuresOnly.basis, 'FUTURES_ONLY');
+});
+
+test('every reported basis is one of the declared set', () => {
+  const inputs = [ALIGNED, LED, {}, { spotPrice: 5 }, { futuresPrice: 5, futuresChange24hPct: 2 },
+    { spotPrice: 1, futuresPrice: 1 }, { fundingPct: 0.03 }];
+  for (const i of inputs) {
+    assert.ok(LEAD_SCORE_BASES.includes(computeLeadScore(i).basis), JSON.stringify(i));
+  }
+});
+
 // ── confidence / conflict / caps ──────────────────────────────
 
 test('mixed, conflicting evidence lowers the score and the confidence', () => {
@@ -234,13 +374,20 @@ test('losing components lowers the score for otherwise identical readings', () =
   assert.deepEqual(partial.missing, ['open interest change', 'funding rate', 'taker buy/sell flow']);
 });
 
-test('evidence and missing lists are always exposed and never overlap', () => {
-  for (const input of [ALIGNED, LED, { spotPrice: 1, futuresPrice: 2 }, {}]) {
+test('evidence and missing lists are always exposed, whatever the basis', () => {
+  const inputs = [ALIGNED, LED, { spotPrice: 1, futuresPrice: 2 }, {},
+    { spotPrice: 3, spotQuoteVolume24h: 1e6 },
+    { futuresPrice: 3, futuresQuoteVolume24h: 1e8, futuresChange24hPct: 4 }];
+  for (const input of inputs) {
     const r = computeLeadScore(input);
-    assert.ok(Array.isArray(r.evidence));
+    assert.ok(Array.isArray(r.evidence), JSON.stringify(input));
     assert.ok(Array.isArray(r.missing));
-    assert.equal(r.evidence.length + r.missing.length, 6);
+    assert.ok(r.missing.length > 0 || r.basis === 'FULL_SPOT_FUTURES');
+    // A component is either evidence or missing, never silently neither.
+    if (r.basis === 'FULL_SPOT_FUTURES') assert.equal(r.evidence.length + r.missing.length, 6);
+    if (r.basis === 'FUTURES_ONLY') assert.equal(r.evidence.length + r.missing.length, 5);
     assert.equal(r.advisory, LEAD_SCORE_ADVISORY_NOTE);
+    assert.ok(LEAD_SCORE_BASES.includes(r.basis));
   }
 });
 
@@ -263,7 +410,7 @@ test('display model never leaks null / undefined / NaN into any rendered string'
   ];
   for (const c of cases) {
     const d = buildLeadScoreDisplay(c);
-    for (const key of ['display', 'scoreText', 'label', 'direction', 'confidence', 'tooltip', 'cssClass', 'advisory']) {
+    for (const key of ['display', 'scoreText', 'label', 'direction', 'confidence', 'tooltip', 'cssClass', 'advisory', 'basis', 'basisNote', 'basisClass']) {
       const v = d[key];
       assert.equal(typeof v, 'string', `${key} for ${JSON.stringify(c)}`);
       assert.ok(v.length > 0, `${key} empty for ${JSON.stringify(c)}`);
@@ -348,7 +495,10 @@ test('Scanner renders a column labelled exactly "Lead Score"', () => {
 });
 
 test('the Lead Score cell is advisory-styled and carries its evidence tooltip', () => {
-  assert.match(terminalJs, /class="lead-score \$\{_esc\(v\.cssClass\)\}" title="\$\{_esc\(v\.tooltip\)\}"/);
+  assert.match(terminalJs, /const cls = `lead-score \$\{v\.cssClass \|\| 'lead-score--unknown'\}/);
+  assert.match(terminalJs, /v\.degraded \? ' lead-score--degraded' : ''/);
+  assert.match(terminalJs, /title="\$\{_esc\(v\.tooltip\)\}"/);
+  assert.match(terminalCss, /\.lead-score--degraded\{border-style:dashed\}/);
   // Neutral styling only — no bullish/bearish colour on this column.
   const leadCss = terminalCss.slice(terminalCss.indexOf('.lead-score{'), terminalCss.indexOf('.lead-score--unknown') + 200);
   assert.doesNotMatch(leadCss, /var\(--grn\)|var\(--red\)/);
