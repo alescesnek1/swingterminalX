@@ -991,6 +991,14 @@ Tabs rendered in `apps/edge/public/index.html` (function `sv(...)` switches view
   view, and the CoinGecko Highlights panel (GECKO).
 - **MANUAL** — interactive "every signal explained" manual.
 
+**Tab order is user-customizable** (order only). A "⇄ TABS" control at the right
+of the tab bar turns on reorder mode, where each tab gets ◀/▶ buttons; the order
+is saved per browser in `localStorage['terminalX.tabOrder.v1']` and a RESET
+button restores the shipped order. Every tab carries a canonical `data-view` id
+matching the id passed to `sv()`. This is navigation personalization ONLY — it
+creates no views, no duplicate tabs, no workspaces and no parallel mounted
+panels, and `sv(view, el)` remains the single view switcher.
+
 There is **no** hidden broker-command system, no chat command palette to a bot,
 no subscription/paywall UI. Access control is per-user via Supabase JWT + an admin
 email allowlist (§9), not a billing tier.
@@ -1535,6 +1543,20 @@ email allowlist (§9), not a billing tier.
 ## 11. Known completed work / recent milestones
 
 From current git history (most recent first, condensed — see `git log` for full):
+- **Customizable top tab order (LOCAL, UNPUSHED, branch `feat/custom-tab-order`)**
+  — the 14 main nav tabs can be reordered and the order persists per browser in
+  `localStorage['terminalX.tabOrder.v1']`. Resolution lives in the pure
+  `apps/edge/public/js/tab-order.js`: unknown/stale/duplicate saved ids are
+  dropped and tabs missing from a saved order are appended, so a customized user
+  still receives a newly shipped tab. Reorder mode injects ◀/▶ buttons (works on
+  desktop and touch; their handler stops propagation so moving never switches
+  view), plus a RESET that clears the key. Reordering moves the EXISTING nodes
+  with `appendChild`, so a tab can never be duplicated and the active tab keeps
+  its `.on` class and its view. Order-only personalization: no new views, no
+  workspaces, no parallel mounted panels; `sv(view, el)` is untouched and remains
+  the single switcher. Also fixed three call sites that grabbed "the first tab"
+  and assumed it was SCANNER — with a reordered bar that highlighted the wrong
+  tab and could resolve the wrong view via its `data-target`. Asset token → `6l1`.
 - **Advisory Scanner "Lead Score" (LOCAL, UNPUSHED, branch
   `feat/scanner-lead-score`)** — one new Scanner column scoring 0–100 /
   LOW·MED·HIGH·EXTREME·UNKNOWN for "is the futures side leading the spot move?".

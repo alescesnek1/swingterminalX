@@ -139,8 +139,18 @@ document.addEventListener('click', (e) => {
   try { pickCoin(id); } catch (err) { console.warn('[DELEGATION] pickCoin failed:', err.message); }
   const targetTab = el.dataset.coinTab;
   if (targetTab) {
-    const tabBtn = document.querySelector('#tabs .tab') || document.querySelector('.tab');
-    if (tabBtn) { try { sv(targetTab, tabBtn); } catch {} }
+    // Must be the tab that OWNS targetTab. This used to grab the first tab in
+    // the bar and assume it was SCANNER — with a user-reordered bar that both
+    // highlights the wrong tab and (via its data-target) can resolve the wrong
+    // view entirely.
+    const tabBtn = (typeof _tabEl === 'function' ? _tabEl(targetTab) : null)
+      || document.querySelector(`#tabs .tab[data-view="${targetTab}"]`);
+    if (tabBtn) {
+      try { sv(targetTab, tabBtn); }
+      catch (err) { console.warn('[DELEGATION] view switch failed:', targetTab, err && err.message); }
+    } else {
+      console.warn('[DELEGATION] no tab button for view:', targetTab);
+    }
   }
 });
 
@@ -3698,7 +3708,7 @@ window.showBubbleDetail = function(id, el) {
       <div>24h Vol<br><b style="color:var(--txt);">${_esc(_hmFmtCap(vol))}</b></div>
       <div style="grid-column: span 2;">Market Cap<br><b style="color:var(--txt);">${_esc(_hmFmtCap(mc))}</b></div>
     </div>
-    <button onclick="document.getElementById('bub-detail').style.display='none'; pickCoin('${_esc(String(d.id||'').toLowerCase())}'); const t=document.querySelector('#tabs .tab'); if(t) sv('scanner', t);" style="width:100%; padding:10px; background:var(--s3); color:var(--acc); border:1px solid var(--acc); border-radius:var(--rad); cursor:pointer; font-weight:700; font-family:inherit;">
+    <button onclick="document.getElementById('bub-detail').style.display='none'; pickCoin('${_esc(String(d.id||'').toLowerCase())}'); const t=document.querySelector('#tabs .tab[data-view=scanner]'); if(t) sv('scanner', t);" style="width:100%; padding:10px; background:var(--s3); color:var(--acc); border:1px solid var(--acc); border-radius:var(--rad); cursor:pointer; font-weight:700; font-family:inherit;">
       GO TO SCANNER
     </button>
   `;
@@ -3730,7 +3740,7 @@ window.showHeatmapDetail = function(d) {
       <div>24h Vol<br><b style="color:var(--txt);">${_esc(_hmFmtCap(vol))}</b></div>
       <div style="grid-column: span 2;">Market Cap<br><b style="color:${mc > 0 ? 'var(--txt)' : 'var(--amb)'};">${mc > 0 ? _esc(_hmFmtCap(mc)) : 'no data' + (window.__marketCapEnrichment && window.__marketCapEnrichment.ok === false ? ' — /api/markets failed' : '')}</b></div>
     </div>
-    <button onclick="document.getElementById('hm-detail').style.display='none'; pickCoin('${_esc(String(d.id||'').toLowerCase())}'); const t=document.querySelector('#tabs .tab'); if(t) sv('scanner', t);" style="width:100%; padding:10px; background:var(--s3); color:var(--acc); border:1px solid var(--acc); border-radius:var(--rad); cursor:pointer; font-weight:700; font-family:inherit;">
+    <button onclick="document.getElementById('hm-detail').style.display='none'; pickCoin('${_esc(String(d.id||'').toLowerCase())}'); const t=document.querySelector('#tabs .tab[data-view=scanner]'); if(t) sv('scanner', t);" style="width:100%; padding:10px; background:var(--s3); color:var(--acc); border:1px solid var(--acc); border-radius:var(--rad); cursor:pointer; font-weight:700; font-family:inherit;">
       GO TO SCANNER
     </button>
   `;
@@ -3802,6 +3812,174 @@ function renderMovers() {
 
 function _viewNameFromId(id) {
   return String(id || '').replace(/^#/, '').replace(/^view-/, '').replace(/^v-/, '');
+}
+
+// ─────────────────────────────────────────────────────────────
+// CUSTOM TAB ORDER — personalization of the top nav bar only.
+//
+// The user can reorder the main tabs; the order is saved in this browser
+// (localStorage `terminalX.tabOrder.v1`) and re-applied on boot. Nothing
+// else changes: `sv(view, el)` is still the only view switcher, view ids
+// are untouched, no view is created, duplicated or re-mounted, and the
+// default active tab is whatever the markup ships with `.on`.
+//
+// Reordering moves the EXISTING tab nodes with appendChild. Because the
+// same element is moved (not re-created), its `.on` class, its inline
+// onclick, its badge children and every listener survive — which is why
+// the active tab stays active and no view content resets.
+//
+// Resolution/validation lives in the pure js/tab-order.js module
+// (window.__tabOrder). If that module fails to load, the bar simply keeps
+// its shipped DOM order and the control hides itself — never a broken nav.
+// ─────────────────────────────────────────────────────────────
+function _tabOrderApi() {
+  const api = typeof window !== 'undefined' ? window.__tabOrder : null;
+  return api && typeof api.resolveTabOrder === 'function' ? api : null;
+}
+
+// Every reorderable tab, in current DOM order. `.tab-tools` has no
+// data-view and is therefore never treated as a tab.
+function _tabNodes() {
+  return Array.from(document.querySelectorAll('#tabs .tab[data-view]'));
+}
+
+// The tab button for a view id. Order-independent by design: several call
+// sites used to grab "the first tab" and assume it was SCANNER, which a
+// user reorder would silently break.
+function _tabEl(viewId) {
+  if (!viewId) return null;
+  const sel = `#tabs .tab[data-view="${String(viewId).replace(/"/g, '')}"]`;
+  return document.querySelector(sel) || null;
+}
+
+// The shipped order — read from the markup so there is no second list to
+// drift out of sync with index.html.
+let _canonicalTabOrder = null;
+function _canonicalTabIds() {
+  if (!_canonicalTabOrder) _canonicalTabOrder = _tabNodes().map(n => n.dataset.view).filter(Boolean);
+  return _canonicalTabOrder.slice();
+}
+
+function _currentTabOrder() {
+  const api = _tabOrderApi();
+  const canonical = _canonicalTabIds();
+  return api ? api.readTabOrder(canonical) : canonical;
+}
+
+// Re-seat the tab nodes into `order`. appendChild MOVES a node that is
+// already in the DOM, so this cannot duplicate a tab even if called twice.
+function _applyTabOrder(order) {
+  const bar = document.getElementById('tabs');
+  if (!bar) return;
+  const byView = new Map(_tabNodes().map(n => [n.dataset.view, n]));
+  for (const view of order) {
+    const node = byView.get(view);
+    if (node) bar.appendChild(node);
+  }
+  // Keep the tools block last whatever the user did.
+  const tools = document.getElementById('tab-tools');
+  if (tools) bar.appendChild(tools);
+}
+
+let _tabReorderMode = false;
+
+// Arrow controls, injected only while reorder mode is on and removed on
+// exit, so the normal bar carries no extra nodes.
+function _renderTabReorderControls() {
+  const order = _currentTabOrder();
+  const api = _tabOrderApi();
+  for (const node of _tabNodes()) {
+    node.querySelectorAll('.tab-move').forEach(b => b.remove());
+    if (!_tabReorderMode) { node.classList.remove('tab--reorderable'); continue; }
+    node.classList.add('tab--reorderable');
+    const view = node.dataset.view;
+    for (const dir of [-1, 1]) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'tab-move';
+      btn.dataset.move = String(dir);
+      btn.dataset.view = view;
+      btn.textContent = dir < 0 ? '◀' : '▶';
+      btn.title = dir < 0 ? 'Move tab left' : 'Move tab right';
+      btn.setAttribute('aria-label', `Move ${view} tab ${dir < 0 ? 'left' : 'right'}`);
+      if (api && !api.canMove(order, view, dir)) btn.disabled = true;
+      if (dir < 0) node.insertBefore(btn, node.firstChild);
+      else node.appendChild(btn);
+    }
+  }
+}
+
+function _setTabReorderMode(on) {
+  _tabReorderMode = !!on;
+  const bar = document.getElementById('tabs');
+  const toggle = document.getElementById('tab-reorder-toggle');
+  const reset = document.getElementById('tab-reorder-reset');
+  if (bar) bar.classList.toggle('tabs--reorder', _tabReorderMode);
+  if (toggle) {
+    toggle.classList.toggle('on', _tabReorderMode);
+    toggle.setAttribute('aria-pressed', _tabReorderMode ? 'true' : 'false');
+    toggle.textContent = _tabReorderMode ? '✓ DONE' : '⇄ TABS';
+  }
+  if (reset) reset.hidden = !_tabReorderMode;
+  _renderTabReorderControls();
+}
+
+function _moveTabBy(viewId, delta) {
+  const api = _tabOrderApi();
+  if (!api) return;
+  const next = api.moveTab(_currentTabOrder(), viewId, delta);
+  // Persistence is best-effort: a blocked localStorage still reorders the
+  // bar for this session, it just will not survive a reload (and says so).
+  if (!api.writeTabOrder(next)) {
+    console.warn('[TAB-ORDER] order applied for this session only — it could not be saved');
+  }
+  _applyTabOrder(next);
+  _renderTabReorderControls();
+}
+
+function _resetTabOrder() {
+  const api = _tabOrderApi();
+  if (api) api.clearTabOrder();
+  _applyTabOrder(_canonicalTabIds());
+  _renderTabReorderControls();
+}
+
+function initTabOrder() {
+  const bar = document.getElementById('tabs');
+  if (!bar) return;
+  _canonicalTabIds();                 // snapshot the shipped order before any move
+  const tools = document.getElementById('tab-tools');
+  if (!_tabOrderApi()) {
+    // No module → keep the shipped order and hide a control that cannot work.
+    if (tools) tools.hidden = true;
+    console.warn('[TAB-ORDER] tab-order.js not loaded — tab bar keeps its default order');
+    return;
+  }
+  _applyTabOrder(_currentTabOrder());
+
+  // One delegated listener. Arrow clicks must NOT fall through to the tab's
+  // inline onclick (that would switch views while merely reordering), so the
+  // handler stops propagation before the bubble reaches the tab element.
+  bar.addEventListener('click', (e) => {
+    const t = e.target;
+    if (!t || typeof t.closest !== 'function') return;   // text/SVG targets
+    const move = t.closest('.tab-move');
+    if (move) {
+      e.preventDefault();
+      e.stopPropagation();
+      _moveTabBy(move.dataset.view, Number(move.dataset.move));
+      return;
+    }
+    if (t.closest('#tab-reorder-toggle')) {
+      e.preventDefault(); e.stopPropagation();
+      _setTabReorderMode(!_tabReorderMode);
+      return;
+    }
+    if (t.closest('#tab-reorder-reset')) {
+      e.preventDefault(); e.stopPropagation();
+      _resetTabOrder();
+    }
+  });
 }
 
 function _viewCandidateIds(v, el) {
@@ -11982,6 +12160,7 @@ async function initTerminalApp() {
   if (_appRunning) return;
   _appRunning = true;
   loadTgConfig();
+  initTabOrder();            // user-customized top tab order (personalization only)
   initColumnDnD();           // V7.3 — drag-to-reorder header
   initPanicManual();         // V7.3 — [?] info modal
   initHotnessTooltip();

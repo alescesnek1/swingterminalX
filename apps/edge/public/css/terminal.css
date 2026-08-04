@@ -57,6 +57,20 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 #tabs{display:flex;background:var(--s1);border-bottom:1px solid var(--b2);padding:0 12px;overflow-x:auto}
 .tab{padding:7px 12px;font-size:10px;letter-spacing:.07em;color:var(--txt3);cursor:pointer;border-bottom:2px solid transparent;transition:all .12s;white-space:nowrap;font-weight:500}
 .tab:hover{color:var(--txt2)}.tab.on{color:var(--acc);border-bottom-color:var(--acc)}
+/* TAB PERSONALIZATION — order only. Sticky to the right edge so the control
+   stays reachable while #tabs scrolls horizontally on narrow viewports. */
+.tab-tools{display:flex;align-items:center;gap:4px;margin-left:auto;padding:0 4px 0 10px;position:sticky;right:0;background:var(--s1);flex-shrink:0}
+.tab-tools__btn{font-family:inherit;font-size:8px;letter-spacing:.06em;font-weight:700;color:var(--txt3);background:var(--s3);border:1px solid var(--b2);border-radius:2px;padding:2px 6px;cursor:pointer;white-space:nowrap}
+.tab-tools__btn:hover{color:var(--txt2);border-color:var(--b2)}
+.tab-tools__btn.on{color:var(--acc);border-color:var(--acc);background:rgba(0,232,200,.08)}
+.tab-tools__btn--reset{color:var(--txt3)}
+.tab-tools__btn--reset:hover{color:var(--amb);border-color:rgba(255,176,32,.4)}
+/* Reorder mode: tabs are still clickable for navigation; the arrows are what
+   move them (their handler stops propagation so a move never switches view). */
+#tabs.tabs--reorder .tab--reorderable{background:var(--s3);border-radius:2px 2px 0 0}
+.tab-move{font-family:inherit;font-size:8px;line-height:1;color:var(--txt3);background:transparent;border:0;padding:0 3px;margin:0 1px;cursor:pointer;vertical-align:middle}
+.tab-move:hover:not(:disabled){color:var(--acc)}
+.tab-move:disabled{opacity:.25;cursor:default}
 .tab .cnt{font-size:8px;color:var(--red);margin-left:3px}
 /* V6.3 VIEW ROUTING — display type is per-view, visibility is global.
    Base: hidden. .on: visible. Display type set per-ID so flex views

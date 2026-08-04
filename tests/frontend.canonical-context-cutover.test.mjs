@@ -190,7 +190,10 @@ test('every versioned asset carries the same single bumped cache-bust token', ()
   // 6k8 -> 6k9 for the Lead Score degraded-basis hotfix (FUTURES_ONLY /
   // SPOT_ONLY scoring paths so the column stops reading UNKNOWN on every
   // unpaired row; basis surfaced in the cell tooltip + .lead-score--degraded).
-  assert.equal(tokens[0], '6k9', 'token was bumped for this JS change');
+  // 6k9 -> 6l1 for the customizable top tab order (new js/tab-order.js,
+  // data-view ids + reorder controls in index.html, .tab-tools / .tab-move
+  // styles in terminal.css).
+  assert.equal(tokens[0], '6l1', 'token was bumped for this JS change');
 });
 
 // The measurement budget targets the deepest drawdowns, and DISLOCATION is 20% of
