@@ -46,6 +46,33 @@ Weighted multi-timeframe stretch over whatever the row actually carries:
   UI says the stretch is *not* volatility-normalized.
 - **BTC-relative nudge:** a bounded ±12 score points from
   `btcRelativeChangePct`, reported separately as `momentum.btcRelativePoints`.
+- **Uncorroborated-momentum damping.** A single contributing timeframe with
+  **unknown volatility** is the weakest evidence accepted here — and it is the
+  common case, since Fleet snapshot rows carry only a 24 h change. Undamped, an
+  18 % reference plus the ±1.5 unit cap made a −12 % day score −67 and read
+  `DEEPLY_OVERSOLD`: a routine crypto day labelled an extreme, which in a broad
+  selloff paints the whole RADAR `DEEPLY_OVERSOLD` and reads as a bug rather than
+  as information. So such a score is **compressed above the ±25 knee into the
+  headroom below the ±60 DEEPLY edge** (cap ±55), applied *after* the BTC nudge so
+  that bounded ±12 cannot push a compressed reading back over the edge.
+
+  | 24 h change (no ATR) | before | now |
+  |---|---|---|
+  | −5 % | OVERSOLD | OVERSOLD (unchanged) |
+  | −8 % | OVERSOLD | OVERSOLD (unchanged) |
+  | −12 % | **DEEPLY_OVERSOLD** | **OVERSOLD** |
+  | −18 % and beyond | DEEPLY_OVERSOLD | OVERSOLD (score pinned at −55) |
+
+  Compression is monotonic and leaves the FAIR↔OVERSOLD boundary **exactly**
+  where it was, so no row changes band except the suppressed `DEEPLY` escalation.
+  A `DEEPLY_*` band now requires at least one of: **(a)** two or more
+  contributing timeframes, **(b)** usable volatility normalization, or **(c)**
+  stored-history corroboration (the history layer carries 55 % of the combined
+  score, so it can lift the total past the edge). Never silent: the momentum
+  layer reports `damped`, `dampReason` and the undamped `rawScore`, the summary
+  sentence says *"momentum compressed from …"*, and a caveat states the band
+  cannot reach `DEEPLY` without corroboration — that caveat *replaces* the bare
+  "not volatility-normalized" one rather than duplicating it.
 
 Because the Fleet snapshot rows carry only a 24 h change, most rows get a
 one-timeframe momentum read. That is why the database layer matters.
@@ -68,6 +95,15 @@ Honesty rules baked into this layer:
 
 - Requires **≥ 12 usable points spanning ≥ 30 minutes**; otherwise
   `INSUFFICIENT_HISTORY` (distinct from `NO_HISTORY`).
+- **`options.now` is REQUIRED whenever there is a series to evaluate.** This
+  module is deliberately clock-free, so it cannot know how old the newest sample
+  is unless the caller says what "now" is. Defaulting to the newest sample's own
+  timestamp would make every series look zero-seconds old and mark arbitrarily
+  stale stored changes as fresh — a fail-**open** inside a fail-closed contract.
+  A missing or invalid `now` therefore makes the whole layer unavailable with
+  status `NOW_REQUIRED` and `storedChanges: null`. An *empty* series still
+  reports `NO_HISTORY`: with nothing to date, the clock is irrelevant and
+  "no history" is the truthful reason.
 - The RSI is labelled **sampled** everywhere, because the points are collector
   samples at an irregular cadence, not candles.
 - A perfectly flat window is `FLAT_WINDOW`, **not** `FAIR`. A flat series has no
@@ -107,6 +143,8 @@ Confidence: `low` (momentum only, or the two layers disagree) · `medium`
 | situation | result |
 |---|---|
 | row carries no timeframe change and no history | `UNKNOWN`, `VALUATION_SCORE: null` — **never** `OVERSOLD` (which a reader could take as an invitation to act) and never `OVERBOUGHT` (a bearish label) |
+| single timeframe, unknown volatility | score compressed below the `DEEPLY` edge; `momentum.damped:true` + `rawScore` + a caveat |
+| `options.now` missing or invalid, with a series present | whole history layer unavailable, `NOW_REQUIRED`, `storedChanges: null` |
 | `null` / `undefined` / `''` change fields | treated as **absent**; a genuinely measured `0` stays a measurement (the `Number(null) === 0` trap) |
 | database unreachable / reader missing / query throws | momentum-only bands survive; `radar.valuationSummary.historyAvailable:false` carries the reason; `console.warn('[bot] RADAR valuation stored-history layer unavailable')` |
 | database reachable but empty | `historyAvailable:true`, `historySymbolsWithData:0`, per-symbol `NO_HISTORY` — a *different*, visible state from a failure |
@@ -122,7 +160,7 @@ Confidence: `low` (momentum only, or the two layers disagree) · `medium`
 | `netlify/functions/_radar-valuation-context.mjs` | loads the layers for the top **40** ranked candidates (60 points each) and merges them; writes `radar.valuationSummary`. Touches only `candidate.valuation`. |
 | `netlify/functions/bot.mjs` | calls the loader after RADAR evaluation *and* after the Telegram-eligibility restore, so it cannot influence either. Logs any failure. |
 | `apps/edge/public/js/price-history-signals-panel.js` | pure display models `radarValuationDisplayModel` / `radarValuationSummaryModel`, exposed on `window.__priceHistorySignalsPanel`. |
-| `apps/edge/public/js/terminal.js` | the `Value` column, the Oversold/Overbought filter chips, the Focus-card valuation panel, the coverage note. |
+| `apps/edge/public/js/terminal.js` | the `Value` column, the Oversold/Overbought filter chips, the Focus-card `Relative Value / Advisory` panel, the coverage note. |
 | `apps/edge/public/css/terminal.css` | `.radar-val-pill*` — cyan for oversold (attention), amber for overbought (caution), muted grey for UNKNOWN. Deliberately **not** the green/red of the pass/fail gate pills, so a band can never be mistaken for an approval. |
 
 ## Cost
@@ -134,7 +172,11 @@ otherwise have been up to 40 separate per-symbol reads.
 ## Tests
 
 - `tests/radar.valuation-bands.test.mjs` — layer maths, band edges, the
-  `Number(null)` trap, `FLAT_WINDOW`, disagreement, the honesty contract.
+  `Number(null)` trap, `FLAT_WINDOW`, disagreement, the honesty contract, the
+  uncorroborated-momentum damping (including that each of the three
+  corroborations independently unlocks `DEEPLY`), and `NOW_REQUIRED` — with
+  explicit coverage that stale stored changes are rejected when `now` IS given
+  and are never marked usable when it is not.
 - `tests/radar.valuation-context.test.mjs` — bounding, single batched read,
   DB-failure vs empty-DB, and a byte-identical assertion that **no** field other
   than `valuation` changes during enrichment.

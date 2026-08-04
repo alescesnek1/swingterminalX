@@ -145,7 +145,7 @@ test('Oversold and Overbought filter chips exist, are counted, and exclude UNKNO
 
 test('the Focus Candidate renders a valuation panel and the coverage note', () => {
   assert.match(terminalJs, /function _radarValuationFocusHtml/);
-  assert.match(terminalJs, /Valuation \(oversold \/ overbought\)/);
+  assert.match(terminalJs, /radar-tech-group__title">Relative Value \/ Advisory</);
   assert.match(terminalJs, /RELATIVE VALUE &middot; ADVISORY ONLY &middot; own recent range — not fundamental, not an entry signal/);
   assert.match(terminalJs, /-100 oversold &middot; 0 fair &middot; \+100 overbought/);
   assert.match(terminalJs, /radar-valuation-note/);

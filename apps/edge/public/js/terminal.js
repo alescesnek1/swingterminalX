@@ -10006,7 +10006,7 @@ function _renderTradingRadar(radar, esc) {
         </div>
       </div>
       </div>
-      <div class="radar-tech-group"><div class="radar-tech-group__title">Valuation (oversold / overbought)</div>
+      <div class="radar-tech-group"><div class="radar-tech-group__title">Relative Value / Advisory</div>
       ${_radarValuationFocusHtml(selected, esc)}
       </div>
       <div class="radar-tech-group"><div class="radar-tech-group__title">Price-history signal</div>

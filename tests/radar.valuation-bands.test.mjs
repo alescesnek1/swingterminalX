@@ -138,6 +138,90 @@ test('one extreme timeframe cannot dominate past the per-timeframe unit cap', ()
   assert.equal(contribution.units, -1.5);
 });
 
+// ── uncorroborated-momentum damping (review finding 1) ──────────────────────
+
+test('a lone timeframe with unknown volatility can never reach a DEEPLY band on its own', () => {
+  // The reported case: -12% in 24h with no ATR used to read DEEPLY_OVERSOLD.
+  const reported = buildValuationContext({ market: { change24hPct: -12 } });
+  assert.equal(reported.momentum.damped, true);
+  assert.equal(reported.VALUATION_BAND, VALUATION_BANDS.OVERSOLD);
+  assert.equal(reported.VALUATION_DIRECTION, VALUATION_DIRECTIONS.OVERSOLD);
+
+  // No single-timeframe move in either direction may escape the band, however
+  // extreme — including with the BTC nudge pushing the same way.
+  for (const c24 of [-8, -12, -18, -25, -40, -100, 8, 12, 18, 25, 40, 100]) {
+    for (const btcRel of [null, -50, 50]) {
+      const v = buildValuationContext({ market: { change24hPct: c24, btcRelativeChangePct: btcRel } });
+      assert.equal(v.momentum.damped, true, `expected damping for ${c24}%`);
+      assert.ok(
+        Math.abs(v.VALUATION_SCORE) < Math.abs(VALUATION_THRESHOLDS.deeplyOversold),
+        `single timeframe ${c24}% (btcRel ${btcRel}) reached |${v.VALUATION_SCORE}| >= 60`,
+      );
+      assert.ok(![VALUATION_BANDS.DEEPLY_OVERSOLD, VALUATION_BANDS.DEEPLY_OVERBOUGHT].includes(v.VALUATION_BAND));
+    }
+  }
+});
+
+test('damping is monotonic, leaves the FAIR boundary intact, and never inverts a sign', () => {
+  const scoreFor = (c24) => buildValuationContext({ market: { change24hPct: c24 } }).VALUATION_SCORE;
+  let previous = scoreFor(-100);
+  for (const c24 of [-60, -40, -25, -18, -12, -8, -5, -2, 0, 2, 5, 8, 12, 18, 25, 40, 60, 100]) {
+    const current = scoreFor(c24);
+    assert.ok(current >= previous, `score must not decrease as the move improves (${c24}%: ${current} < ${previous})`);
+    previous = current;
+  }
+  // A drop still scores negative and a rally still scores positive.
+  assert.ok(scoreFor(-8) < 0 && scoreFor(8) > 0);
+  // The FAIR <-> OVERSOLD boundary is untouched: values at or below the knee are
+  // returned unchanged, so no row moves between FAIR and OVERSOLD.
+  const belowKnee = computeMomentumValuation({ change24hPct: -4 });
+  assert.equal(belowKnee.damped, true);
+  assert.equal(belowKnee.score, belowKnee.rawScore, 'sub-knee scores must pass through undamped');
+});
+
+test('damping is reported, not silent: rawScore, dampReason, summary and a caveat all say so', () => {
+  const v = buildValuationContext({ market: { change24hPct: -30 } });
+  assert.equal(v.momentum.damped, true);
+  assert.equal(v.momentum.rawScore, -100, 'the undamped value stays traceable');
+  assert.match(v.momentum.dampReason, /single timeframe with unknown volatility/);
+  assert.match(v.VALUATION_SUMMARY, /momentum compressed from -100/);
+  assert.ok(v.VALUATION_BLOCKERS.some((b) => /cannot reach a DEEPLY reading/.test(b)));
+  // The damp caveat REPLACES the bare ATR caveat rather than duplicating it.
+  assert.ok(!v.VALUATION_BLOCKERS.some((b) => /not volatility-normalized/.test(b)));
+});
+
+test('each of the three corroborations independently unlocks a DEEPLY band', () => {
+  // (a) multiple aligned timeframes
+  const multi = buildValuationContext({ market: { change24hPct: -22, change12hPct: -15, change7dPct: -45 } });
+  assert.equal(multi.momentum.damped, false);
+  assert.equal(multi.VALUATION_BAND, VALUATION_BANDS.DEEPLY_OVERSOLD);
+
+  // (b) usable volatility normalization on a single timeframe
+  const withAtr = buildValuationContext({ market: { change24hPct: -30, atrPct: 5 } });
+  assert.equal(withAtr.momentum.damped, false);
+  assert.equal(withAtr.VALUATION_BAND, VALUATION_BANDS.DEEPLY_OVERSOLD);
+
+  // (c) stored-history corroboration lifts a damped single-timeframe momentum
+  const damped = buildValuationContext({ market: { change24hPct: -30 } });
+  assert.equal(damped.VALUATION_BAND, VALUATION_BANDS.OVERSOLD);
+  const merged = mergeValuationHistory(damped, computeHistoryValuation(points(ramp(100, 55, 40), { stepMs: HOUR }), { now: T0 }));
+  assert.equal(merged.momentum.damped, true, 'the momentum layer stays damped on its own merits');
+  assert.equal(merged.VALUATION_BAND, VALUATION_BANDS.DEEPLY_OVERSOLD, 'history corroboration may carry the combined score into DEEPLY');
+});
+
+test('damping never rescues UNKNOWN or invents a score', () => {
+  const unknown = buildValuationContext({ market: {} });
+  assert.equal(unknown.VALUATION_BAND, VALUATION_BANDS.UNKNOWN);
+  assert.equal(unknown.VALUATION_SCORE, null);
+  assert.equal(unknown.momentum.damped, false);
+  assert.equal(unknown.momentum.rawScore, null);
+  assert.equal(unknown.momentum.dampReason, null);
+  // A measured 0 is still a measurement, and 0 is unaffected by compression.
+  const zero = computeMomentumValuation({ change24hPct: 0 });
+  assert.equal(zero.score, 0);
+  assert.equal(zero.rawScore, 0);
+});
+
 test('valuationInputsFromMarket reads both row and diagnostics aliases without inventing values', () => {
   assert.deepEqual(valuationInputsFromMarket({ priceChangePercent: -5 }).change24hPct, -5);
   assert.deepEqual(valuationInputsFromMarket({ diagnostics: { change24hPct: -7 } }).change24hPct, -7);
@@ -156,20 +240,20 @@ test('no history and too-little history are distinct, named, unavailable states'
   assert.equal(none.status, 'NO_HISTORY');
   assert.equal(none.score, null);
 
-  const thin = computeHistoryValuation(points([10, 11, 12, 11]));
+  const thin = computeHistoryValuation(points([10, 11, 12, 11]), { now: T0 });
   assert.equal(thin.available, false);
   assert.equal(thin.status, 'INSUFFICIENT_HISTORY');
   assert.equal(thin.pointsUsed, 4);
   assert.match(thin.reason, /need >= 12 points/);
 
   // Enough points but a window far too short to mean anything.
-  const compressed = computeHistoryValuation(points(ramp(10, 9, 20), { stepMs: 1000 }));
+  const compressed = computeHistoryValuation(points(ramp(10, 9, 20), { stepMs: 1000 }), { now: T0 });
   assert.equal(compressed.available, false);
   assert.equal(compressed.status, 'INSUFFICIENT_HISTORY');
 });
 
 test('price at the bottom of the stored range reads oversold; at the top, overbought', () => {
-  const falling = computeHistoryValuation(points(ramp(100, 60, 30)));
+  const falling = computeHistoryValuation(points(ramp(100, 60, 30)), { now: T0 });
   assert.equal(falling.available, true);
   assert.equal(falling.status, 'OK');
   assert.equal(falling.rangePercentile, 0);
@@ -178,13 +262,13 @@ test('price at the bottom of the stored range reads oversold; at the top, overbo
   assert.ok(falling.meanDeviationPct < 0);
   assert.deepEqual(falling.componentsUsed.sort(), ['rangePercentile', 'sampledRsi', 'zScore']);
 
-  const rising = computeHistoryValuation(points(ramp(60, 100, 30)));
+  const rising = computeHistoryValuation(points(ramp(60, 100, 30)), { now: T0 });
   assert.equal(rising.rangePercentile, 100);
   assert.ok(rising.score > VALUATION_THRESHOLDS.overbought, `expected overbought, got ${rising.score}`);
 });
 
 test('a perfectly flat stored window is FLAT_WINDOW, not FAIR', () => {
-  const flat = computeHistoryValuation(points(new Array(30).fill(42)));
+  const flat = computeHistoryValuation(points(new Array(30).fill(42)), { now: T0 });
   assert.equal(flat.available, false);
   assert.equal(flat.status, 'FLAT_WINDOW');
   assert.equal(flat.score, null);
@@ -196,9 +280,61 @@ test('history layer parses pg numeric strings and drops unusable rows without th
   raw.push({ symbol: 'TEST', price_usd: null, sampled_at: null });
   raw.push({ symbol: 'TEST', price_usd: '0', sampled_at: new Date(T0).toISOString() });
   raw.push(null);
-  const result = computeHistoryValuation(raw);
+  const result = computeHistoryValuation(raw, { now: T0 });
   assert.equal(result.available, true);
   assert.equal(result.pointsUsed, 30, 'null/zero/garbage rows must be dropped, not scored');
+});
+
+// ── `now` is required, and its absence fails CLOSED (review finding 2) ──────
+
+test('a series with no valid `now` is unavailable with NOW_REQUIRED, never silently evaluated', () => {
+  const series = points(ramp(100, 60, 30));
+  for (const options of [undefined, {}, { now: null }, { now: '' }, { now: 'not-a-date' }, { now: NaN }, { now: {} }]) {
+    const result = options === undefined
+      ? computeHistoryValuation(series)
+      : computeHistoryValuation(series, options);
+    assert.equal(result.available, false, `expected unavailable for now=${JSON.stringify(options)}`);
+    assert.equal(result.status, 'NOW_REQUIRED');
+    assert.equal(result.score, null);
+    assert.equal(result.storedChanges, null);
+    assert.match(result.reason, /freshness cannot be verified/);
+    assert.equal(result.pointsUsed, 30, 'the points that WERE readable are still reported');
+  }
+  // The same series with a real clock evaluates normally — the guard is about
+  // the missing clock, not about the data.
+  assert.equal(computeHistoryValuation(series, { now: T0 }).status, 'OK');
+});
+
+test('no points at all still reports NO_HISTORY — the clock is irrelevant when there is nothing to date', () => {
+  for (const empty of [null, undefined, [], 'nope', [null, {}]]) {
+    const result = computeHistoryValuation(empty);
+    assert.equal(result.status, 'NO_HISTORY', 'an empty series must not be misreported as a caller error');
+    assert.equal(result.available, false);
+  }
+});
+
+test('a missing `now` cannot mark stale stored changes usable (the fail-open this closes)', () => {
+  // Newest sample is 10 hours older than the caller's clock — far past the
+  // 90-minute freshness bound for reusing stored 1h/24h/7d changes.
+  const staleSeries = points(ramp(100, 70, 30), { stepMs: HOUR, change1h: -1, change24h: -9, change7d: -20 });
+
+  // (a) stale data IS rejected when `now` is provided
+  const withNow = computeHistoryValuation(staleSeries, { now: T0 + (10 * HOUR) });
+  assert.equal(withNow.status, 'OK');
+  assert.equal(withNow.storedChanges.usable, false);
+  assert.equal(withNow.storedChanges.ageMs, 10 * HOUR);
+  const mergedWithNow = mergeValuationHistory(buildValuationContext({ market: {} }), withNow);
+  assert.deepEqual(mergedWithNow.momentum.filledFromHistory, [], 'stale stored changes must not fill momentum');
+
+  // (b) a missing `now` does NOT mark the stale data usable — previously it
+  // defaulted the clock to the newest sample, reporting ageMs 0 and usable:true.
+  const withoutNow = computeHistoryValuation(staleSeries);
+  assert.equal(withoutNow.status, 'NOW_REQUIRED');
+  assert.equal(withoutNow.storedChanges, null);
+  assert.notEqual(withoutNow.storedChanges?.usable, true);
+  const mergedWithoutNow = mergeValuationHistory(buildValuationContext({ market: {} }), withoutNow);
+  assert.deepEqual(mergedWithoutNow.momentum.filledFromHistory, []);
+  assert.equal(mergedWithoutNow.VALUATION_BAND, VALUATION_BANDS.UNKNOWN, 'no row data + unusable history = UNKNOWN');
 });
 
 test('stored 1h/24h/7d changes are only marked usable while fresh', () => {
@@ -242,7 +378,7 @@ test('a row with no usable input at all is UNKNOWN with a null score — never O
 
 test('merging a stored-history layer upgrades basis and confidence and keeps the contract', () => {
   const base = buildValuationContext({ market: { change24hPct: -18, change12hPct: -12, atrPct: 6 } });
-  const history = computeHistoryValuation(points(ramp(100, 62, 40), { stepMs: HOUR }));
+  const history = computeHistoryValuation(points(ramp(100, 62, 40), { stepMs: HOUR }), { now: T0 });
   const merged = mergeValuationHistory(base, history);
   assert.equal(merged.VALUATION_BASIS, 'momentum+history');
   assert.equal(merged.VALUATION_CONFIDENCE, 'high', 'agreeing layers over a deep window are high confidence');
@@ -258,7 +394,7 @@ test('merging a stored-history layer upgrades basis and confidence and keeps the
 
 test('disagreeing layers are reported and pull confidence down to low', () => {
   const base = buildValuationContext({ market: { change1hPct: 6, change4hPct: 12, change24hPct: 30 } });
-  const history = computeHistoryValuation(points(ramp(100, 55, 30)));
+  const history = computeHistoryValuation(points(ramp(100, 55, 30)), { now: T0 });
   const merged = mergeValuationHistory(base, history);
   assert.equal(merged.layersAgree, false);
   assert.equal(merged.VALUATION_CONFIDENCE, 'low');
@@ -300,7 +436,7 @@ test('merging a stale or unusable history layer degrades to the momentum-only re
 test('history-only rows are medium confidence, never high', () => {
   const merged = mergeValuationHistory(
     buildValuationContext({ market: {} }),
-    computeHistoryValuation(points(ramp(100, 60, 40), { stepMs: HOUR })),
+    computeHistoryValuation(points(ramp(100, 60, 40), { stepMs: HOUR }), { now: T0 }),
   );
   assert.equal(merged.VALUATION_BASIS, 'history_only');
   assert.equal(merged.VALUATION_CONFIDENCE, 'medium');

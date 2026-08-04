@@ -80,6 +80,41 @@ const VOLATILITY_REFERENCE_PCT = 5;
 const VOLATILITY_FACTOR_MIN = 0.5;
 const VOLATILITY_FACTOR_MAX = 3;
 
+// ── Uncorroborated-momentum damping ─────────────────────────────────────────
+// A single timeframe with UNKNOWN volatility is the weakest evidence this module
+// accepts (it is also the common case: the Fleet snapshot rows carry only a 24h
+// change). Undamped, the 18% 24h reference plus the ±1.5 unit cap meant a -12%
+// day already scored -67 and read DEEPLY_OVERSOLD — a routine crypto day
+// labelled as an extreme, which in a broad selloff paints the whole RADAR
+// DEEPLY_OVERSOLD and reads as a bug rather than as information.
+//
+// So a lone timeframe with no volatility context is COMPRESSED above the
+// OVERSOLD/OVERBOUGHT knee into the headroom below the DEEPLY edge. It can still
+// reach OVERSOLD/OVERBOUGHT; it can never reach DEEPLY_* on its own. A DEEPLY
+// reading now requires at least one of:
+//   (a) two or more contributing timeframes,
+//   (b) usable volatility normalization (atrPct present), or
+//   (c) stored-history corroboration (the history layer carries 55% of the
+//       combined score in assembleValuation, so it can lift the total past the
+//       DEEPLY edge).
+// Compression is monotonic and leaves the FAIR↔OVERSOLD boundary untouched, so
+// no row changes band except the suppressed DEEPLY escalation. The damping is
+// reported on the momentum layer (damped / dampReason / rawScore) and surfaced
+// as an operator-visible caveat — never applied silently.
+const MOMENTUM_DAMP_KNEE = 25;
+const MOMENTUM_DAMP_CAP = 55;
+
+// Monotonic soft-knee compression of |score| into [knee, cap]. Values at or
+// below the knee are returned unchanged.
+function dampUncorroboratedScore(score) {
+  const magnitude = Math.abs(score);
+  if (magnitude <= MOMENTUM_DAMP_KNEE) return score;
+  const headroom = MOMENTUM_DAMP_CAP - MOMENTUM_DAMP_KNEE;
+  const span = 100 - MOMENTUM_DAMP_KNEE;
+  const compressed = MOMENTUM_DAMP_KNEE + (Math.min(magnitude, 100) - MOMENTUM_DAMP_KNEE) / span * headroom;
+  return score < 0 ? -compressed : compressed;
+}
+
 // History layer bounds. Points are irregular samples of a collector, not
 // candles, so the RSI is labelled "sampled" and the window span is reported.
 const HISTORY_MIN_POINTS = 12;
@@ -191,11 +226,15 @@ export function computeMomentumValuation(inputs = {}) {
       btcRelativePoints: null,
       contributions: [],
       timeframesUsed: 0,
+      damped: false,
+      dampReason: null,
+      rawScore: null,
       missing,
       inputs: { ...src },
     };
   }
 
+  const volatilityKnown = atrPct !== null && atrPct > 0;
   let score = (weighted / weightSum) * 100;
 
   // Down harder than BTC = more dislocated. Bounded, and never the whole read.
@@ -207,14 +246,26 @@ export function computeMomentumValuation(inputs = {}) {
   } else {
     missing.push('btcRelativeChangePct');
   }
-  if (atrPct === null || !(atrPct > 0)) missing.push('atrPct');
+  if (!volatilityKnown) missing.push('atrPct');
+
+  // Damping runs LAST, on the score including the BTC nudge — otherwise that
+  // bounded ±12 could push a compressed reading back over the DEEPLY edge.
+  const rawScore = clamp(score, -100, 100);
+  const damped = contributions.length === 1 && !volatilityKnown;
+  const finalScore = damped ? dampUncorroboratedScore(rawScore) : rawScore;
 
   return {
     available: true,
     reason: null,
-    score: round(clamp(score, -100, 100), 1),
+    score: round(clamp(finalScore, -100, 100), 1),
+    // The undamped value is kept so a damped reading is fully traceable.
+    rawScore: round(rawScore, 1),
+    damped,
+    dampReason: damped
+      ? 'single timeframe with unknown volatility — compressed below the DEEPLY band'
+      : null,
     volatilityFactor: round(volatilityFactor, 3),
-    volatilityKnown: atrPct !== null && atrPct > 0,
+    volatilityKnown,
     btcRelativeChangePct: btcRel === null ? null : round(btcRel, 2),
     btcRelativePoints: btcRelativePoints === null ? null : round(btcRelativePoints, 1),
     contributions,
@@ -281,12 +332,23 @@ function sampledWilderRsi(prices, period) {
 /**
  * History layer over stored price points. Returns
  * { available:false, status, reason } when there is not enough usable history —
- * INSUFFICIENT_HISTORY and NO_HISTORY are distinct from a computed reading.
+ * NO_HISTORY, NOW_REQUIRED, INSUFFICIENT_HISTORY and FLAT_WINDOW are each
+ * distinct from a computed reading.
+ *
+ * `options.now` is REQUIRED whenever there is a series to evaluate. This module
+ * is deliberately clock-free (so it stays pure and testable), which means it
+ * cannot tell how old the newest sample is unless the caller says what "now"
+ * is. Defaulting to the newest sample's own timestamp would make every series
+ * look zero-seconds old and mark arbitrarily stale stored changes as fresh —
+ * a fail-OPEN in a module whose contract is fail-closed. So a missing or
+ * invalid `now` makes the whole layer unavailable with reason NOW_REQUIRED
+ * instead.
  */
 export function computeHistoryValuation(points, options = {}) {
   const minPoints = Number.isInteger(options.minPoints) && options.minPoints > 2
     ? options.minPoints
     : HISTORY_MIN_POINTS;
+  const nowMs = toMs(options.now);
   const series = normalizeHistoryPoints(points);
   const base = {
     available: false,
@@ -309,7 +371,19 @@ export function computeHistoryValuation(points, options = {}) {
     componentsUsed: [],
     source: 'price_history_db',
   };
+  // No points at all is answered accurately regardless of the clock — "no
+  // history" is the true reason, and demanding `now` first would misreport it.
   if (series.length === 0) return base;
+
+  // There IS a series, so freshness matters and an absent clock is fatal.
+  if (nowMs === null) {
+    return {
+      ...base,
+      status: 'NOW_REQUIRED',
+      reason: 'caller supplied no valid `now`, so sample freshness cannot be verified',
+      pointsUsed: series.length,
+    };
+  }
 
   const spanMs = series[series.length - 1].t - series[0].t;
   if (series.length < minPoints || spanMs < HISTORY_MIN_WINDOW_MS) {
@@ -356,8 +430,10 @@ export function computeHistoryValuation(points, options = {}) {
     componentsUsed.push('zScore');
   }
 
+  // nowMs is guaranteed non-null here — the NOW_REQUIRED guard above returned
+  // for a missing/invalid clock, so this age is always measured against a real
+  // caller-supplied instant, never against the sample's own timestamp.
   const newest = series[series.length - 1];
-  const nowMs = toMs(options.now) ?? newest.t;
   const latestPointAgeMs = Math.max(0, nowMs - newest.t);
   const storedChangesUsable = latestPointAgeMs <= HISTORY_CHANGES_MAX_AGE_MS;
   const storedChanges = {
@@ -459,6 +535,7 @@ function buildSummary({ band, score, momentum, history, confidence, layersAgree 
   if (momentum.available && momentum.timeframesUsed > 0) {
     parts.push(`${momentum.timeframesUsed} timeframe${momentum.timeframesUsed === 1 ? '' : 's'} of momentum`);
   }
+  if (momentum.damped === true) parts.push(`momentum compressed from ${momentum.rawScore} (single timeframe, unknown volatility)`);
   parts.push(`confidence ${confidence}`);
   if (layersAgree === false) parts.push('momentum and stored history disagree');
   return `${parts.join('; ')}.`;
@@ -469,7 +546,11 @@ function buildBlockers({ momentum, history, layersAgree }) {
   if (!momentum.available) blockers.push(momentum.reason || 'momentum layer unavailable');
   if (!history.available) blockers.push(history.reason || 'stored price history unavailable');
   if (layersAgree === false) blockers.push('momentum and stored-history layers disagree — treat the band as low conviction');
-  if (momentum.available && !momentum.volatilityKnown) {
+  // Exactly one of these two fires: the damp caveat states the CONSEQUENCE of
+  // the missing volatility, so printing both would say the same thing twice.
+  if (momentum.damped === true) {
+    blockers.push('single timeframe with unknown volatility — band compressed and cannot reach a DEEPLY reading without more timeframes, volatility, or stored history');
+  } else if (momentum.available && !momentum.volatilityKnown) {
     blockers.push('no volatility (ATR) on the row — momentum stretch is not volatility-normalized');
   }
   // Advisory only, stated without directional trading wording (the house rule for
