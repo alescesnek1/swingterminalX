@@ -720,3 +720,34 @@ export function summarizeValuationBands(candidates) {
   summary.overboughtTotal = summary.deeplyOverbought + summary.overbought;
   return summary;
 }
+
+/**
+ * The complete `radar.valuationSummary` block for a radar state whose
+ * candidates carry (at most) momentum-only valuation — i.e. no stored-history
+ * enrichment ran on this path. Shared by the evaluator and the canonical read
+ * so every producer emits the SAME shape the UI summary model consumes; the
+ * bot's stored-history enrichment overwrites it with the richer version.
+ *
+ * `reason` names WHY the stored-history layer is absent on this path (e.g.
+ * HISTORY_NOT_ENRICHED for the raw evaluator output, or
+ * CANONICAL_READ_MOMENTUM_ONLY for the canonical DB read). historyAvailable is
+ * always false here — this summary must never claim a history layer it did not
+ * have.
+ */
+export function buildMomentumOnlyValuationSummary(candidates, reason = 'HISTORY_NOT_ENRICHED') {
+  return {
+    ...summarizeValuationBands(candidates),
+    scope: 'relative_to_own_recent_range',
+    historyEnrichedCandidates: 0,
+    historySymbolsRequested: 0,
+    historySymbolsWithData: 0,
+    historyPointsPerSymbol: 0,
+    historyTopN: 0,
+    historyAvailable: false,
+    historyUnavailableReason: typeof reason === 'string' && reason ? reason : 'HISTORY_NOT_ENRICHED',
+    source: 'momentum_only',
+    isEntrySignal: false,
+    affectsGate: false,
+    affectsTelegram: false,
+  };
+}

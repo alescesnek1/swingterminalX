@@ -9960,7 +9960,12 @@ function _renderTradingRadar(radar, esc) {
       ${_radarGateChecklistHtml(selected, ctx)}
       ${_radarNextActionHtml(selected, ctx)}
       ${_radarKeyLevelsHtml(selected, ctx)}
-      <details class="radar-technical-details" data-toggle-map="_fleetTechDetailsExpanded" data-symbol="${esc(selected.symbol)}">
+      ${(() => { /* The toggle map RECORDED this section's open state but the render
+        never RESTORED it, so every fleet poll re-render (~seconds apart) snapped
+        "Technical details" shut and the operator had to keep reopening it. Same
+        map, same symbol key, now read back — matching the advanced-diagnostics
+        section below, which always did this. */ return ''; })()}
+      <details class="radar-technical-details" data-toggle-map="_fleetTechDetailsExpanded" data-symbol="${esc(selected.symbol)}" ${window._fleetTechDetailsExpanded && window._fleetTechDetailsExpanded[selected.symbol] ? 'open' : ''}>
         <summary class="radar-technical-details__summary">Technical details</summary>
         ${_radarMicrostructureStatusNote(radar)}
       <div class="radar-tech-group"><div class="radar-tech-group__title">Server gate / strict Absorb</div>
@@ -10469,6 +10474,23 @@ function renderTradingRadarPanel() {
         window[mapName][sym] = el.open;
       }
     });
+  });
+  // Panel-level <details> (Diagnostics & Logs, Telegram Alert Status, and the
+  // canonical Provider/Absorb panels) carry no data-toggle-map — every poll
+  // re-render reset them to their markup default, snapping an expanded section
+  // shut seconds after the operator opened it. Persist their open state keyed
+  // by summary text, restored here after each innerHTML swap. Done in JS, not
+  // by adding attributes to the markup, because _withCanonicalDiagnostics
+  // string-matches the exact "Diagnostics & Logs" details tag as its insertion
+  // anchor. Display-only.
+  root.querySelectorAll('details.radar-diagnostics').forEach(function (el) {
+    if (el.dataset.toggleMap) return; // symbol-keyed sections handled above
+    var summaryEl = el.querySelector('summary');
+    var key = summaryEl && summaryEl.textContent ? summaryEl.textContent.trim() : '';
+    if (!key) return;
+    var map = window._radarPanelDetailsExpanded = window._radarPanelDetailsExpanded || {};
+    if (Object.prototype.hasOwnProperty.call(map, key)) el.open = map[key] === true;
+    el.addEventListener('toggle', function () { map[key] = el.open; });
   });
   // Populate the admin price-history section that _renderTradingRadar just
   // emitted inside the Focus Candidate card. Cache-backed: fetches once per

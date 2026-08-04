@@ -100,6 +100,51 @@ test('a missing valuation summary reads as unavailable, not as zero oversold coi
   assert.match(m.text, /unavailable/i);
 });
 
+// Hotfix: production served canonical radars with candidate bands but no
+// summary, and the panel wrongly apologised for the whole valuation read.
+test('summary missing but candidates carrying bands → counts computed in browser, clearly labelled', () => {
+  const radar = {
+    candidates: [
+      { symbol: 'A', valuation: buildValuationContext({ market: { change24hPct: -14 } }) },
+      { symbol: 'B', valuation: buildValuationContext({ market: { change24hPct: 1 } }) },
+      { symbol: 'C', valuation: buildValuationContext({ market: {} }) },
+      { symbol: 'D' }, // no valuation block at all
+    ],
+  };
+  const m = radarValuationSummaryModel(radar);
+  assert.equal(m.present, true, 'bands exist, so the read is NOT unavailable');
+  assert.equal(m.computedInBrowser, true);
+  assert.equal(m.oversold, 1);
+  assert.equal(m.fair, 1);
+  assert.equal(m.unknown, 2, 'no-valuation and UNKNOWN-band rows both count as unknown');
+  assert.match(m.text, /computed in this browser/);
+  assert.match(m.text, /server sent no valuation summary/);
+  assert.equal(m.historyUnavailableReason, 'VALUATION_SUMMARY_MISSING');
+});
+
+test('summary missing AND no candidate bands → the backend-missing message stands', () => {
+  const m = radarValuationSummaryModel({ candidates: [{ symbol: 'A' }, { symbol: 'B' }] });
+  assert.equal(m.present, false);
+  assert.equal(m.computedInBrowser, false);
+  assert.match(m.text, /server sent no valuation summary/);
+});
+
+test('the evaluator itself always attaches radar.valuationSummary (momentum-only, honestly labelled)', () => {
+  const markets = [
+    { symbol: 'BTCUSDT', status: 'TRADING', lastPrice: 60000, quoteVolume24h: 900_000_000, priceChangePercent: -14, spreadPct: 0.02 },
+    { symbol: 'ETHUSDT', status: 'TRADING', lastPrice: 3000, quoteVolume24h: 400_000_000, priceChangePercent: 2, spreadPct: 0.03 },
+  ];
+  const state = evaluateTradingRadar({ markets, source: 'test', now: T0 });
+  const s = state.valuationSummary;
+  assert.ok(s && typeof s === 'object', 'every evaluator output must carry a summary');
+  assert.equal(s.total, state.candidates.length);
+  assert.equal(s.historyAvailable, false);
+  assert.equal(s.historyUnavailableReason, 'HISTORY_NOT_ENRICHED');
+  assert.equal(s.affectsGate, false);
+  assert.equal(s.affectsTelegram, false);
+  assert.ok(s.oversoldTotal >= 1, 'the -14% row must be counted as oversold');
+});
+
 test('the summary line states the counts and the stored-history coverage', () => {
   const m = radarValuationSummaryModel({
     valuationSummary: {
@@ -189,6 +234,29 @@ test('the asset cache-bust token was bumped so returning users get the new colum
   };
   const tokens = ['js/terminal\\.js', 'css/terminal\\.css', 'price-history-signals-panel\\.js'].map(tokenFor);
   assert.equal(new Set(tokens).size, 1, `valuation assets must share one token, got ${tokens.join(', ')}`);
+});
+
+// ── expanded-section persistence across poll re-renders (hotfix) ────────────
+
+test('Technical details RESTORES its recorded open state on re-render, matching advanced diagnostics', () => {
+  // The map recorded state but the render never read it back, so every fleet
+  // poll snapped the section shut. Both symbol-keyed sections now restore.
+  assert.match(terminalJs, /class="radar-technical-details" data-toggle-map="_fleetTechDetailsExpanded" data-symbol="\$\{esc\(selected\.symbol\)\}" \$\{window\._fleetTechDetailsExpanded && window\._fleetTechDetailsExpanded\[selected\.symbol\] \? 'open' : ''\}/);
+  assert.match(terminalJs, /window\._fleetAdvancedDiagExpanded && window\._fleetAdvancedDiagExpanded\[selected\.symbol\] \? 'open' : ''/);
+  // Still no hardcoded open — restore is purely conditional on the map.
+  assert.doesNotMatch(terminalJs, /class="radar-technical-details"[^>]*" open>/);
+});
+
+test('panel-level details (Diagnostics & Logs, Telegram) persist open state via the post-render pass', () => {
+  const block = terminalJs.slice(terminalJs.indexOf("root.querySelectorAll('details.radar-diagnostics')"));
+  assert.ok(block.length > 100, 'the panel-level persistence pass exists');
+  assert.match(block.slice(0, 700), /_radarPanelDetailsExpanded/);
+  assert.match(block.slice(0, 700), /el\.dataset\.toggleMap\) return/);
+  assert.match(block.slice(0, 700), /hasOwnProperty\.call\(map, key\)/);
+  assert.match(block.slice(0, 700), /el\.addEventListener\('toggle'/);
+  // Done in JS so the _withCanonicalDiagnostics string anchor stays byte-identical.
+  assert.match(terminalJs, /const anchor = '<details class="radar-diagnostics"><summary>Diagnostics & Logs<\/summary>';/);
+  assert.match(terminalJs, /<details class="radar-diagnostics"><summary>Diagnostics & Logs<\/summary>/);
 });
 
 // ── end-to-end shape ────────────────────────────────────────────────────────

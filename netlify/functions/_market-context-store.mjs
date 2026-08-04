@@ -1,4 +1,8 @@
 import { getDb } from './_db.mjs';
+// Pure, zero-dependency band maths (no env, DB, network, or clock reads) — safe
+// to import statically on the read path. Used ONLY by the read-time valuation
+// attach below; nothing else in this store touches it.
+import { buildMomentumOnlyValuationSummary, buildValuationContext } from '../../scripts/radar/valuation-bands.mjs';
 
 export const CONTEXT_SCOPE_ID = 'global';
 const RUN_BUCKET_MS = 3 * 60 * 1000;
@@ -739,6 +743,42 @@ export async function getRadarStateCoverage(db) {
 // READY, so a market run that has just been published but not yet scored serves the
 // previous verdicts, correctly labelled with their own computed_at, instead of
 // collapsing the terminal onto its legacy browser path.
+// Read-time valuation attach for the canonical RADAR read. Two jobs:
+//   1. BACKFILL: a state row written before the valuation feature shipped (or by
+//      a stalled publisher) has no `valuation` on its payload, which the UI must
+//      otherwise render as a wall of UNKNOWN. The candidate payload still
+//      carries its own momentum fields (diagnostics.change24hPct etc.), so the
+//      momentum-only band is computed here, at read time, from that row's OWN
+//      data — nothing is invented, and a payload with no momentum fields stays
+//      honestly UNKNOWN.
+//   2. SUMMARY: the run/state tables never persisted `valuationSummary` (it was
+//      only ever attached on the Fleet path), so the canonical radar told the
+//      UI "the server sent no valuation summary" forever. It is now computed
+//      from the exact candidate set being served.
+// Advisory only: touches nothing but `payload.valuation` and
+// `radar.valuationSummary`; every typed column, status, gate and alert field is
+// untouched. Never throws — a failure leaves the radar exactly as it was.
+function withReadTimeValuation(radar) {
+  try {
+    const rows = Array.isArray(radar?.candidates) ? radar.candidates : [];
+    const unwrapped = [];
+    for (const row of rows) {
+      const candidate = row && row.payload && typeof row.payload === 'object' && !Array.isArray(row.payload)
+        ? row.payload
+        : row;
+      if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+        && (!candidate.valuation || typeof candidate.valuation !== 'object')) {
+        candidate.valuation = buildValuationContext({ market: candidate });
+      }
+      unwrapped.push(candidate);
+    }
+    radar.valuationSummary = buildMomentumOnlyValuationSummary(unwrapped, 'CANONICAL_READ_MOMENTUM_ONLY');
+  } catch (error) {
+    console.warn('[ATOMIC_MARKET_STORE] radar_read_valuation_failed', { name: error?.name || 'Error' });
+  }
+  return radar;
+}
+
 async function readCanonicalRadar(db, options = {}) {
   const limit = Math.min(Math.max(Number(options.limit) || 1000, 1), 2000);
   const [stateRes, snapRes] = await Promise.all([
@@ -772,12 +812,12 @@ async function readCanonicalRadar(db, options = {}) {
     if (snap) {
       const legacy = await readRadarForRun(db, Number(snap.run_id));
       if (legacy.status === 'READY' && legacy.candidates.length) {
-        return { ...legacy, readSource: 'run_snapshot_fallback', stateBackfillPending: true, pendingReason: 'RADAR_STATE_EMPTY', ...meta, status: 'READY', computedAt: snap.computed_at };
+        return withReadTimeValuation({ ...legacy, readSource: 'run_snapshot_fallback', stateBackfillPending: true, pendingReason: 'RADAR_STATE_EMPTY', ...meta, status: 'READY', computedAt: snap.computed_at });
       }
     }
     // Nothing anywhere. Name which stage is missing so the UI can say whether the
     // collector or the publisher is the thing that is not running.
-    return { status: 'PENDING', candidates: [], readSource: 'atomized_state', pendingReason: snap ? 'RADAR_RESULT_EMPTY' : 'NO_RADAR_RESULT', ...meta };
+    return withReadTimeValuation({ status: 'PENDING', candidates: [], readSource: 'atomized_state', pendingReason: snap ? 'RADAR_RESULT_EMPTY' : 'NO_RADAR_RESULT', ...meta });
   }
   // Freshness of the set is its newest row; every row also carries its own
   // computed_at so a caller can judge any single coin independently.
@@ -785,7 +825,7 @@ async function readCanonicalRadar(db, options = {}) {
     const t = row.computed_at instanceof Date ? row.computed_at.getTime() : Date.parse(row.computed_at);
     return Number.isFinite(t) && t > max ? t : max;
   }, 0);
-  return {
+  return withReadTimeValuation({
     status: 'READY',
     readSource: 'atomized_state',
     computedAt: newest > 0 ? new Date(newest) : null,
@@ -793,7 +833,7 @@ async function readCanonicalRadar(db, options = {}) {
     entryReadyCount: rows.filter((row) => row.entry_ready === true).length,
     candidates: rows,
     ...meta,
-  };
+  });
 }
 
 async function readRadarForRun(db, runId) {

@@ -638,8 +638,43 @@ export function radarValuationSummaryModel(radarState) {
     return n === null ? 0 : Math.max(0, Math.trunc(n));
   };
   if (!s) {
+    // No server summary — but if the candidates themselves carry valuation
+    // blocks, counting their bands here is reporting, not inventing: the bands
+    // are the server's own. The line is explicitly labelled as browser-computed
+    // so a missing server summary is never silently papered over. Only when the
+    // candidates carry no valuation at all is "the server sent no valuation
+    // summary" the truthful message.
+    const candidates = Array.isArray(r.candidates) ? r.candidates : [];
+    const counts = { oversold: 0, fair: 0, overbought: 0, unknown: 0, withValuation: 0 };
+    for (const c of candidates) {
+      const v = c && typeof c === 'object' && c.valuation && typeof c.valuation === 'object' ? c.valuation : null;
+      if (!v) { counts.unknown += 1; continue; }
+      counts.withValuation += 1;
+      const band = typeof v.VALUATION_BAND === 'string' ? v.VALUATION_BAND : 'UNKNOWN';
+      if (band === 'DEEPLY_OVERSOLD' || band === 'OVERSOLD') counts.oversold += 1;
+      else if (band === 'DEEPLY_OVERBOUGHT' || band === 'OVERBOUGHT') counts.overbought += 1;
+      else if (band === 'FAIR') counts.fair += 1;
+      else counts.unknown += 1;
+    }
+    if (counts.withValuation > 0) {
+      return {
+        present: true,
+        computedInBrowser: true,
+        oversold: counts.oversold,
+        overbought: counts.overbought,
+        fair: counts.fair,
+        unknown: counts.unknown,
+        momentumOnly: 0,
+        historyBacked: 0,
+        historyAvailable: false,
+        historyUnavailableReason: 'VALUATION_SUMMARY_MISSING',
+        text: `Valuation: ${counts.oversold} oversold, ${counts.fair} fair, ${counts.overbought} overbought, ${counts.unknown} unknown — counts computed in this browser from the candidates' own bands (the server sent no valuation summary for this RADAR cycle).`,
+        note: VALUATION_NOT_A_SIGNAL,
+      };
+    }
     return {
       present: false,
+      computedInBrowser: false,
       oversold: 0,
       overbought: 0,
       fair: 0,

@@ -15,7 +15,7 @@ import { computePressureZones } from './pressure-zones.mjs';
 import { buildPositioningContext } from './positioning-context.mjs';
 import { getFreshRollingMicrostructureForSymbol, normalizeRollingMicrostructureSnapshot } from './rolling-microstructure-snapshot.mjs';
 import { normalizeLongShortSnapshot } from './long-short-snapshot.mjs';
-import { buildValuationContext } from './valuation-bands.mjs';
+import { buildMomentumOnlyValuationSummary, buildValuationContext } from './valuation-bands.mjs';
 const WEIRD_BASE_RE = /(UP|DOWN|BULL|BEAR)$|\d+(L|S)$/;
 const QUOTES = new Set(['USDC', 'USDT']);
 
@@ -2804,6 +2804,14 @@ export function evaluateTradingRadar({
     state.snapshotSymbolsIngested = markets.length;
     state.candidatesByStage = state.pipeline;
     state.candidates = candidates;
+    // Every evaluator output carries a valuation summary, so a consumer that
+    // renders this state directly (the canonical publisher path, tests, or any
+    // path that never reaches the bot's stored-history enrichment) still gets
+    // honest band counts instead of a missing block the UI must apologise for.
+    // The bot's applyValuationHistoryToRadar overwrites this with the
+    // history-enriched version on the Fleet path. Advisory only — read by no
+    // gate/score/Telegram path.
+    state.valuationSummary = buildMomentumOnlyValuationSummary(candidates, 'HISTORY_NOT_ENRICHED');
     state.watchlist = candidates.filter((c) => c.actionability !== 'ENTRY_READY').slice(0, 20);
     // entryReady is single-sourced from V1 actionability. A heuristic stage of
     // ENTRY_READY is NOT sufficient — this prevents the banner/count/status from

@@ -181,8 +181,11 @@ test('every versioned asset carries the same single bumped cache-bust token', ()
   // valuation display models in price-history-signals-panel.js, new pill styles in
   // terminal.css); 6k5 -> 6k6 for the valuation fail-closed hardening, which
   // renamed the Focus tech-group heading in terminal.js (the rule is one bump per
-  // JS/CSS change, whether or not the previous token has shipped yet).
-  assert.equal(tokens[0], '6k6', 'token was bumped for this JS change');
+  // JS/CSS change, whether or not the previous token has shipped yet); 6k6 -> 6k7
+  // for the valuation hotfix (canonical summary fallback in
+  // price-history-signals-panel.js; Technical-details open-state restore and
+  // panel-level details persistence in terminal.js).
+  assert.equal(tokens[0], '6k7', 'token was bumped for this JS change');
 });
 
 // The measurement budget targets the deepest drawdowns, and DISLOCATION is 20% of
