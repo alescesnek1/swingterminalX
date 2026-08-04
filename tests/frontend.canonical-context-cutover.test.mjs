@@ -184,8 +184,10 @@ test('every versioned asset carries the same single bumped cache-bust token', ()
   // JS/CSS change, whether or not the previous token has shipped yet); 6k6 -> 6k7
   // for the valuation hotfix (canonical summary fallback in
   // price-history-signals-panel.js; Technical-details open-state restore and
-  // panel-level details persistence in terminal.js).
-  assert.equal(tokens[0], '6k7', 'token was bumped for this JS change');
+  // panel-level details persistence in terminal.js); 6k7 -> 6k8 for the advisory
+  // Scanner Lead Score (new js/scanner-lead-score.js module, Lead Score column +
+  // venue-snapshot wiring in terminal.js, .lead-score styles in terminal.css).
+  assert.equal(tokens[0], '6k8', 'token was bumped for this JS change');
 });
 
 // The measurement budget targets the deepest drawdowns, and DISLOCATION is 20% of

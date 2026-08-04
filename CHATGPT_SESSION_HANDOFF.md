@@ -973,7 +973,10 @@ Doc map:
 
 Tabs rendered in `apps/edge/public/index.html` (function `sv(...)` switches views):
 
-- **SCANNER** — default view; market-wide scan / signals.
+- **SCANNER** — default view; market-wide scan / signals. Carries one
+  advisory-only column, **Lead Score** (0–100 + LOW/MED/HIGH/EXTREME/UNKNOWN),
+  reading how strongly futures/perp pressure looks to be leading the spot move.
+  Advisory context, never a gate — see §8.
 - **TRADING RADAR** — the actionable pipeline; `ENTRY_READY` candidates,
   positioning/pressure-zone/trade-readiness context panels.
 - **COCKPIT** — manual trade planning/review; imports a selected RADAR candidate
@@ -1532,6 +1535,26 @@ email allowlist (§9), not a billing tier.
 ## 11. Known completed work / recent milestones
 
 From current git history (most recent first, condensed — see `git log` for full):
+- **Advisory Scanner "Lead Score" (LOCAL, UNPUSHED, branch
+  `feat/scanner-lead-score`)** — one new Scanner column scoring 0–100 /
+  LOW·MED·HIGH·EXTREME·UNKNOWN for "is the futures side leading the spot move?".
+  Pure model in `apps/edge/public/js/scanner-lead-score.js` (no DOM, no fetch,
+  no globals but its own export bridge). Six optional components: futures/spot
+  premium, futures/spot 24h volume, futures-vs-spot 24h move, OI change,
+  funding, taker flow. **No new external fetch:** `/api/markets` already pulled
+  both the spot and futures Binance tickers and threw one away, and the
+  canonical `/api/context` feed already carried a row per venue that
+  `_dedupeCanonicalByBase` collapsed — both now keep the discarded side in an
+  additive `_leadVenue` snapshot. Fails closed: UNKNOWN without at least one
+  futures-vs-spot comparison, missing components are listed in the cell
+  tooltip, thin/conflicting evidence is damped and capped (one component can
+  never exceed MED; EXTREME needs ≥3 components, ≥2 of them strong, and no
+  contradiction). Funding comes only from the real `/api/funding-divergence`
+  feed — never the dead `_funding: 0` / `_takerRatio: 0.5` placeholders.
+  **Advisory only:** not sortable, not the default sort, and absent from
+  RADAR/`ENTRY_READY`/gates/Telegram/alerts/auto-trader/cockpit/order paths
+  (asserted in `tests/frontend.scanner-lead-score.test.mjs`).
+  `MARKETS_SCHEMA_VERSION` → `v7_2_venue_split`; asset token → `6k8`.
 - **Native auth backend, phase 2 (LOCAL, UNPUSHED, branch
   `feat/native-auth-foundation`: `98c958d` → `47c09b8` → `19eaf15`)** — auth
   moved off Supabase into the Netlify/Neon DB, **complete on the backend and

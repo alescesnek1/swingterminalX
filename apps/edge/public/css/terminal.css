@@ -199,6 +199,19 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
 .safety-danger{background:rgba(255,51,86,.12);color:var(--red);border-color:rgba(255,51,86,.35)}
 .safety-unknown{background:rgba(96,112,144,.12);color:var(--txt3);border-color:rgba(96,112,144,.25)}
 
+/* LEAD SCORE — advisory futures-pressure read.
+   Deliberately NEUTRAL: no green/red. This column is not an entry or gate
+   signal and must never be mistaken for one, so intensity is carried by
+   opacity/weight on the same muted hue rather than by a bullish/bearish
+   colour. Fixed min-width so a value flipping between "7 LOW" and
+   "100 EXTREME" on refresh does not reflow the row. */
+.lead-score{display:inline-flex;align-items:center;justify-content:flex-end;min-width:72px;padding:1px 5px;border-radius:2px;font-size:8px;font-weight:700;letter-spacing:.04em;font-variant-numeric:tabular-nums;cursor:help;border:1px solid var(--b2);background:rgba(96,112,144,.10);color:var(--txt3);white-space:nowrap}
+.lead-score--low{color:var(--txt3)}
+.lead-score--med{color:var(--txt2);border-color:rgba(96,112,144,.35)}
+.lead-score--high{color:var(--txt);border-color:rgba(168,85,247,.35);background:rgba(168,85,247,.08)}
+.lead-score--extreme{color:var(--pur);border-color:rgba(168,85,247,.55);background:rgba(168,85,247,.14)}
+.lead-score--unknown{color:var(--txt3);opacity:.7}
+
 /* DETAIL PANEL */
 .dhead{display:flex;justify-content:space-between;align-items:flex-start;padding:10px 12px 8px;border-bottom:1px solid var(--b1)}
 .dsym{font-size:20px;font-weight:600;color:var(--acc)}.dname{font-size:9px;color:var(--txt3);margin-top:2px}
@@ -1168,7 +1181,10 @@ body{font-family:var(--mono);background:var(--bg);color:var(--txt);font-size:11p
   .thdr > [data-col="c24"],    .trow > [data-col="c24"],
   .thdr > [data-col="c7d"],    .trow > [data-col="c7d"],
   .thdr > [data-col="qv"],     .trow > [data-col="qv"],
-  .thdr > [data-col="hot"],    .trow > [data-col="hot"]{display:none !important}
+  .thdr > [data-col="hot"],    .trow > [data-col="hot"],
+  /* Lead Score is advisory context, not one of the 5 mobile slots — it
+     lives in the expand row (.trow-expand) on narrow viewports. */
+  .thdr > [data-col="leadscore"], .trow > [data-col="leadscore"]{display:none !important}
   /* Force visible cells back into inline-block context */
   .thdr > [data-col="coin"],  .trow > [data-col="coin"],
   .thdr > [data-col="price"], .trow > [data-col="price"],
