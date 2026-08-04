@@ -84,7 +84,7 @@ const TOP_N = 1000;
 // alphaContractAddress / binanceAlphaListed) so the UI can build verified
 // /en/alpha/<chain>/<contract> deep links. Link-only fields; no change to
 // venue resolution, the exchange badge, or safety semantics.
-const MARKETS_SCHEMA_VERSION = 'v7_1_alpha_meta';
+const MARKETS_SCHEMA_VERSION = 'v7_2_venue_split';
 
 // V6.8 Sprint 1 (FIX-6): _responseCache now carries the parsed array AND
 // two pre-sliced JSON strings (free / pro). Tier filter is computed once
@@ -352,6 +352,18 @@ function safeNum(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+// Strict per-venue ticker reader. `Number(null)` is 0 and `Number('')` is 0,
+// so a missing Binance field would otherwise be published as a real reading of
+// zero. Reject the empty cases BEFORE Number() ever sees them.
+function venueNum(ticker, key) {
+  if (!ticker) return null;
+  const v = ticker[key];
+  if (v === null || v === undefined || typeof v === 'boolean') return null;
+  if (typeof v === 'string' && v.trim() === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 // ─────────────────────────────────────────────────────────────
 // V4 Premium / V5 HOTFIX-2: venue resolver — STRICT EQUALITY MODE
 // ─────────────────────────────────────────────────────────────
@@ -577,6 +589,17 @@ function shapeFromCoingecko(cg, spotTicker, spotMeta, futTicker, futMeta, liveFu
     futures_quote: futMeta ? futMeta.quote : null,
     spot_pair: spotMeta ? spotMeta.pair : null,
     exchange: exchangeBadge,                    // 'BIN' | 'ALPHA' | 'DEX'
+    // Per-venue readings kept SIDE BY SIDE. The venue picker above collapses
+    // spot/futures down to one driver for price/volume; these fields preserve
+    // the discarded side so the UI can compare the two (advisory Scanner Lead
+    // Score). Both tickers were already fetched for the venue gauntlet — this
+    // adds NO upstream call. `null` means "that venue did not resolve", never 0.
+    spot_last_price: venueNum(spotTicker, 'lastPrice'),
+    spot_quote_volume_24h: venueNum(spotTicker, 'quoteVolume'),
+    spot_change_24h_pct: venueNum(spotTicker, 'priceChangePercent'),
+    futures_last_price: venueNum(futTicker, 'lastPrice'),
+    futures_quote_volume_24h: venueNum(futTicker, 'quoteVolume'),
+    futures_change_24h_pct: venueNum(futTicker, 'priceChangePercent'),
     image: cg.image || null,
     current_price: price,
     price_change_percentage_24h: c24 ?? 0,
@@ -623,6 +646,14 @@ function _makeBinanceSpotRow(meta, ticker) {
     futures_quote: null,
     spot_pair: meta.pair,
     exchange: 'BIN',
+    // Spot-only listing: there is no futures counterpart to compare against,
+    // so the futures side stays null (UNKNOWN downstream), never 0.
+    spot_last_price: venueNum(ticker, 'lastPrice'),
+    spot_quote_volume_24h: venueNum(ticker, 'quoteVolume'),
+    spot_change_24h_pct: venueNum(ticker, 'priceChangePercent'),
+    futures_last_price: null,
+    futures_quote_volume_24h: null,
+    futures_change_24h_pct: null,
     image: null,
     current_price: parseFloat(ticker.lastPrice),
     price_change_percentage_24h: Number.isFinite(c24) ? c24 : 0,

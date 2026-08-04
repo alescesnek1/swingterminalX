@@ -1827,6 +1827,16 @@ function _mapCanonicalTicker(t) {
     current_price: n(t.last_price) ?? 0, price_change_percentage_24h: n(t.price_change_percent) ?? 0,
     total_volume: n(t.quote_volume) ?? 0, high_24h: n(t.high_price), low_24h: n(t.low_price),
     _funding: 0, _oi: 0, _oiDelta: 0,
+    // Advisory Lead Score input (see js/scanner-lead-score.js). The canonical
+    // feed carries a SEPARATE ticker row per venue for the same base, and
+    // _dedupeCanonicalByBase is about to throw one of them away — keep this
+    // row's own venue reading so the survivor can hold both sides. Purely
+    // additive; nothing else reads it.
+    _leadVenue: {
+      [t.market === 'futures' ? 'futures' : 'spot']: {
+        price: n(t.last_price), quoteVolume24h: n(t.quote_volume), change24hPct: n(t.price_change_percent),
+      },
+    },
   };
   const c1 = n(t.change_1h_pct); if (c1 != null) row._c1 = c1;
   const c4 = n(t.change_4h_pct); if (c4 != null) row._c4 = c4;
@@ -1843,14 +1853,34 @@ function _mapCanonicalTicker(t) {
 // order book); futures only fills bases spot does not list. Within one venue the
 // deeper pair wins.
 function _dedupeCanonicalByBase(rows) {
+  // Merge the loser's venue reading into the winner so the surviving row can
+  // still see BOTH sides of the same base. This is the only place the spot
+  // and futures observations of one coin are ever in scope together, and it
+  // costs no extra fetch. Advisory Lead Score input only — it never
+  // overwrites a side that is already populated and never touches the
+  // price/volume/signal fields the rest of the UI reads.
+  const _mergeLeadVenue = (target, source) => {
+    if (!target || !source || !source._leadVenue) return target;
+    if (!target._leadVenue || typeof target._leadVenue !== 'object') target._leadVenue = {};
+    for (const side of ['spot', 'futures']) {
+      if (source._leadVenue[side] && !target._leadVenue[side]) target._leadVenue[side] = source._leadVenue[side];
+    }
+    return target;
+  };
   const byBase = new Map();
   for (const row of rows) {
     const prev = byBase.get(row.symbol);
     if (!prev) { byBase.set(row.symbol, row); continue; }
     const prevSpot = prev.market === 'spot';
     const rowSpot = row.market === 'spot';
-    if (rowSpot !== prevSpot) { if (rowSpot) byBase.set(row.symbol, row); continue; }
-    if ((row.total_volume || 0) > (prev.total_volume || 0)) byBase.set(row.symbol, row);
+    if (rowSpot !== prevSpot) {
+      // Whichever row wins, the other one's venue reading is preserved.
+      if (rowSpot) byBase.set(row.symbol, _mergeLeadVenue(row, prev));
+      else _mergeLeadVenue(prev, row);
+      continue;
+    }
+    if ((row.total_volume || 0) > (prev.total_volume || 0)) byBase.set(row.symbol, _mergeLeadVenue(row, prev));
+    else _mergeLeadVenue(prev, row);
   }
   return Array.from(byBase.values());
 }
@@ -1994,6 +2024,23 @@ async function fetchData() {
         d._funding = d._funding || 0;
         d._oi = d._oi || 0;
         d._oiDelta = d._oiDelta || 0;
+        // Advisory Lead Score input. /api/markets publishes both venue
+        // readings side by side (markets.js `venueNum`); normalise them into
+        // the same `_leadVenue` shape the canonical /api/context path builds.
+        // `?? undefined` because a null here means "venue did not resolve" and
+        // the score module must see it as ABSENT, not as a number.
+        d._leadVenue = {
+          spot: {
+            price: d.spot_last_price ?? undefined,
+            quoteVolume24h: d.spot_quote_volume_24h ?? undefined,
+            change24hPct: d.spot_change_24h_pct ?? undefined,
+          },
+          futures: {
+            price: d.futures_last_price ?? undefined,
+            quoteVolume24h: d.futures_quote_volume_24h ?? undefined,
+            change24hPct: d.futures_change_24h_pct ?? undefined,
+          },
+        };
       });
     }
 
@@ -2157,6 +2204,9 @@ function _scannerDefaultCompare(a, b) {
   if (sa !== sb) return sb - sa;
   return (b.market_cap || 0) - (a.market_cap || 0);
 }
+// One-shot guard so a missing scanner-lead-score.js logs once, not once per row.
+let _leadScoreModuleWarned = false;
+
 function _scannerCompare(a, b, sortState = _scannerSort) {
   if (!sortState || sortState.key !== 'c24') return _scannerDefaultCompare(a, b);
   const av = _scannerC24Value(a);
@@ -2271,6 +2321,46 @@ function renderList() {
     const f = formatSafetyLabel(s.status, s.code, s.source, s.chain, s.contract, s.basis);
     return `<span class="safety-pill ${f.cssClass}" title="${_esc(f.tooltip)}">${_esc(f.labelShort)}</span>`;
   };
+  // ── Lead Score (advisory) ─────────────────────────────────
+  // Reads the pure js/scanner-lead-score.js module. Funding comes from the
+  // REAL divergence feed when this coin is in it — never `row._funding`,
+  // which is a hard-coded 0 placeholder and would fake a reading. Open
+  // interest and taker flow are not collected per scanner row, so they are
+  // left absent and reported in the cell's "Missing:" list.
+  // If the module failed to load, the cell says UNKNOWN and logs — it never
+  // renders a blank that could pass for real data.
+  const leadModel = (row, sym) => {
+    const api = typeof window !== 'undefined' ? window.__scannerLeadScore : null;
+    if (!api || typeof api.leadScoreForRow !== 'function') {
+      if (!_leadScoreModuleWarned) {
+        _leadScoreModuleWarned = true;
+        console.warn('[LEAD-SCORE] scanner-lead-score.js not loaded — Lead Score column renders UNKNOWN');
+      }
+      return null;
+    }
+    // Funding stays ABSENT unless the divergence feed carries a real reading
+    // for this base — the cell then lists it under "Missing:", it is never
+    // assumed to be 0. `funding_pct` may legitimately be a real 0.
+    let fundingPct;
+    const div = DIVERGENCE_MAP && typeof DIVERGENCE_MAP.get === 'function' ? DIVERGENCE_MAP.get(sym) : null;
+    if (div && div.funding_pct !== null && div.funding_pct !== undefined && Number.isFinite(Number(div.funding_pct))) {
+      fundingPct = Number(div.funding_pct);
+    }
+    try {
+      return api.leadScoreForRow(row, { fundingPct });
+    } catch (e) {
+      console.warn('[LEAD-SCORE] scoring failed for', sym, e && e.message);
+      return null;
+    }
+  };
+  const LEAD_UNAVAILABLE = {
+    display: 'UNKNOWN', scoreText: '--', label: 'UNKNOWN', cssClass: 'lead-score--unknown',
+    tooltip: 'Lead Score: UNKNOWN\nThe Lead Score module is unavailable in this session.\nadvisory only — does not affect RADAR entry gates',
+  };
+  const leadMarkup = (m) => {
+    const v = m || LEAD_UNAVAILABLE;
+    return `<span class="lead-score ${_esc(v.cssClass)}" title="${_esc(v.tooltip)}">${_esc(v.display)}</span>`;
+  };
   // V7.4.5 — defensive timeframe extractor. The upstream payload
   // shape varies depending on which build branch in markets.js
   // produced the row (CoinGecko-merged vs. Binance-only spot vs.
@@ -2346,9 +2436,11 @@ function renderList() {
       const v_c12 = _pct(d, 'c12');
       const v_c24 = _pct(d, 'c24');
       const v_c7d = _pct(d, 'c7d');
+      const lead = leadModel(d, sym);
       const expandRow = `<div class="trow-expand" data-coin-id="${idAttr}">
         <div class="te-cell"><span class="te-lbl">SIG</span><span class="te-val">${signalMarkup(s)}</span></div>
         <div class="te-cell"><span class="te-lbl">SAFETY</span><span class="te-val">${safetyMarkup(d)}</span></div>
+        <div class="te-cell"><span class="te-lbl">LEAD SCORE</span><span class="te-val">${leadMarkup(lead)}</span></div>
         <div class="te-cell"><span class="te-lbl">1H</span><span class="te-val">${tfCell(v_c1)}</span></div>
         <div class="te-cell"><span class="te-lbl">4H</span><span class="te-val">${tfCell(v_c4)}</span></div>
         <div class="te-cell"><span class="te-lbl">12H</span><span class="te-val">${tfCell(v_c12)}</span></div>
@@ -2392,6 +2484,9 @@ function renderList() {
         c7d:    `<span data-col="c7d" data-cell="c7d" class="tr" style="${cs('c7d')}">${tfCell(v_c7d)}</span>`,
         qv:     `<span data-col="qv"  data-cell="qv"  class="tr" style="${cs('qv')}">${safeMetric(qv, fmt)}</span>`,
         hot:    `<span data-col="hot" class="tr" style="${cs('hot')}color:${hot>60?'var(--red)':'var(--txt2)'}"><b>${hot}</b></span>`,
+        // Advisory only. Neutral styling on purpose — this is NOT an
+        // entry/gate signal and must not read as one.
+        leadscore: `<span data-col="leadscore" class="tr" style="${cs('leadscore')}">${leadMarkup(lead)}</span>`,
       };
       // Fallback: any key in _columnOrder that has no cellHTML entry
       // (e.g. a future column added mid-session) still gets its absolute
@@ -2410,6 +2505,9 @@ function renderList() {
           return `<div data-col="coin" class="coin-cell" style="${fcs}"><span class="csym">${_esc(String((d && d.symbol) || 'N/A'))}</span><span class="cnm">${_esc(String((d && d.name) || 'Malformed row'))}</span></div>`;
         }
         if (k === 'signal') return `<span data-col="signal" class="sig-cell" style="${fcs}">${emptySignal}</span>`;
+        // A row we could not render is missing data by definition — say
+        // UNKNOWN rather than a dash that reads like a scored LOW.
+        if (k === 'leadscore') return `<span data-col="leadscore" class="tr" style="${fcs}">${leadMarkup(null)}</span>`;
         return `<span data-col="${_esc(k)}" class="tr" style="${fcs}">${emptyData}</span>`;
       }).join('');
       htmls.push(`<div class="trow" data-coin-id="${fallbackId}">
@@ -12252,13 +12350,18 @@ const COLUMN_DEFS = {
   qv:     { label: '24H VOL', width: 90,     tip: '24h Quote Volume (USD)',                                                 align: 'right', dragOK: true  },
   hot:    { label: 'HOT',     width: 50,     tip: '',                                                                       align: 'right', dragOK: true,
             tooltip: 'Real-time attention and volatility tracking index based on immediate trading frequency spikes.' },
+  // Advisory futures-pressure read. Scored in js/scanner-lead-score.js; the
+  // label is exactly "Lead Score". Not sortable (only c24 is), never the
+  // default sort, and it feeds nothing but this one cell.
+  leadscore: { label: 'Lead Score', width: 84, tip: 'Advisory — futures pressure leading the spot move',                    align: 'right', dragOK: true,
+            tooltip: 'How strongly futures/perp pressure appears to be leading or amplifying the spot move. 0-100 with LOW / MED / HIGH / EXTREME, or UNKNOWN when the required data is missing. Hover a row cell for the evidence and missing-data list. Advisory only — does not affect RADAR entry gates.' },
   // V8 ABACUS — the `spacer` bead is gone. The grid that needed a 1fr
   // slack-absorber no longer exists; columns float on raw pixel
   // coordinates over the void, so there is nothing left to absorb.
 };
 // Default visual sequence. The mobile-only expand toggle is appended
 // AFTER this chain in DOM order and never participates in reorder.
-const DEFAULT_COLUMN_ORDER = ['rank','coin','signal','safety','score','panic','price','c1','c4','c12','c24','c7d','qv','hot'];
+const DEFAULT_COLUMN_ORDER = ['rank','coin','signal','safety','score','panic','price','c1','c4','c12','c24','c7d','qv','hot','leadscore'];
 const COLUMN_ORDER_STORAGE_KEY = 'swing_col_order_v73';
 const COLUMN_WIDTHS_STORAGE_KEY = 'swing_col_widths_v74';
 const MIN_COL_PX = 36;     // hard floor — narrower than this and the label gets ellipsised away.
