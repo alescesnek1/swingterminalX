@@ -175,10 +175,20 @@ test('valuation pills are styled apart from the pass/fail gate pills and UNKNOWN
 });
 
 test('the asset cache-bust token was bumped so returning users get the new column', () => {
-  assert.doesNotMatch(indexHtml, /\?v=6k4/);
-  assert.match(indexHtml, /js\/terminal\.js\?v=6k5/);
-  assert.match(indexHtml, /css\/terminal\.css\?v=6k5/);
-  assert.match(indexHtml, /price-history-signals-panel\.js\?v=6k5/);
+  // The three assets this feature actually changed must all be tokenised and
+  // carry the SAME token, and the pre-feature token must be gone.
+  //
+  // Deliberately token-agnostic: the exact literal is pinned in exactly ONE
+  // place (frontend.canonical-context-cutover.test.mjs), so a future bump has a
+  // single test to update instead of two that can silently drift apart.
+  assert.doesNotMatch(indexHtml, /\?v=6k4\b/, 'the pre-valuation token must be gone');
+  const tokenFor = (asset) => {
+    const match = indexHtml.match(new RegExp(`${asset}\\?v=([0-9a-z]+)`));
+    assert.ok(match, `${asset} must carry a cache-bust token`);
+    return match[1];
+  };
+  const tokens = ['js/terminal\\.js', 'css/terminal\\.css', 'price-history-signals-panel\\.js'].map(tokenFor);
+  assert.equal(new Set(tokens).size, 1, `valuation assets must share one token, got ${tokens.join(', ')}`);
 });
 
 // ── end-to-end shape ────────────────────────────────────────────────────────

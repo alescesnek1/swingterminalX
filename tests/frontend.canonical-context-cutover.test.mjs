@@ -179,8 +179,10 @@ test('every versioned asset carries the same single bumped cache-bust token', ()
   // token through AuthClient, auth-client.js announces the ended mode); 6k4 -> 6k5 for
   // the RADAR valuation band (oversold/overbought column + filters in terminal.js,
   // valuation display models in price-history-signals-panel.js, new pill styles in
-  // terminal.css).
-  assert.equal(tokens[0], '6k5', 'token was bumped for this JS change');
+  // terminal.css); 6k5 -> 6k6 for the valuation fail-closed hardening, which
+  // renamed the Focus tech-group heading in terminal.js (the rule is one bump per
+  // JS/CSS change, whether or not the previous token has shipped yet).
+  assert.equal(tokens[0], '6k6', 'token was bumped for this JS change');
 });
 
 // The measurement budget targets the deepest drawdowns, and DISLOCATION is 20% of
