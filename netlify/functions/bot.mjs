@@ -11,6 +11,7 @@ import { normalizeKlinesSnapshot } from '../../scripts/radar/klines-snapshot.mjs
 import { normalizeRollingMicrostructureSnapshot } from '../../scripts/radar/rolling-microstructure-snapshot.mjs';
 import { normalizeLongShortSnapshot } from '../../scripts/radar/long-short-snapshot.mjs';
 import { applyPriceHistoryContextsToRows, attachPriceHistoryContextsToRadarCandidates, loadPriceHistoryContextsForCandidates } from './_price-history-radar-context.mjs';
+import { applyValuationHistoryToRadar, loadValuationHistoryForCandidates } from './_radar-valuation-context.mjs';
 
 function safeRequestUrl(req, fallbackPath = '/') {
   if (!req) return new URL(fallbackPath, 'http://localhost');
@@ -2277,6 +2278,27 @@ async function refreshTradingRadarFromFleet(fleet, nowMs = Date.now()) {
     scoringSupportMax: 3,
     rankingPasses: priceHistoryContexts.size > 0 ? 2 : 1,
   };
+  // Oversold / overbought enrichment. Every candidate already carries a
+  // momentum-only `valuation` from the evaluator; this deepens the top-ranked
+  // slice with the stored price-history window in ONE batched read. It is
+  // strictly advisory: it can only replace `candidate.valuation`, never a score,
+  // gate, ENTRY_READY status, or Telegram eligibility. A DB failure keeps the
+  // momentum-only reading and stays visible in radar.valuationSummary.
+  let valuationHistory;
+  try {
+    const { listRecentPricePointsForSymbols } = await import('./_price-history.mjs');
+    valuationHistory = await loadValuationHistoryForCandidates(
+      radar.candidates,
+      listRecentPricePointsForSymbols,
+      { now: nowMs },
+    );
+  } catch {
+    valuationHistory = { ok: false, reason: 'PRICE_HISTORY_MODULE_UNAVAILABLE', layers: new Map() };
+  }
+  if (valuationHistory.ok !== true) {
+    console.warn('[bot] RADAR valuation stored-history layer unavailable', { reason: valuationHistory.reason });
+  }
+  applyValuationHistoryToRadar(radar, valuationHistory);
   if (!snapshot || !Array.isArray(snapshot.markets) || snapshot.markets.length === 0) {
     radar.missingSignals = Array.from(new Set([...(radar.missingSignals || []), 'public market snapshot'])).sort();
     radar.dataCompleteness = Math.min(Number(radar.dataCompleteness) || 0, 20);

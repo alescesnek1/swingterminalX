@@ -516,6 +516,164 @@ export function radarBackendPriceHistoryAdjustmentBreakdown(candidate) {
   return { adjustment: m.adjustment, usedForScoring: m.usedForScoring, present: m.present, parts, summary };
 }
 
+// ── RADAR valuation (oversold / overbought) display model ───────────────────
+// Pure presentation over the SERVER-computed `candidate.valuation` block
+// (scripts/radar/valuation-bands.mjs). It reinterprets nothing: the band,
+// score, confidence and blockers are the server's own. A candidate with no
+// valuation block renders explicitly UNKNOWN — never FAIR, and never a
+// directional label — so "not computed" can never read as a measured reading.
+//
+// The wording is deliberately non-directional: this is a position-in-own-range
+// read, not a fundamental valuation and not a trade instruction.
+const VALUATION_NOT_A_SIGNAL = 'Relative to this coin\'s own recent range and momentum — not a fundamental valuation, and not an entry signal.';
+
+const VALUATION_DISPLAY = {
+  DEEPLY_OVERSOLD: { labelShort: 'DEEP OVERSOLD', label: 'Deeply oversold', cls: 'radar-val-pill--oversold-deep' },
+  OVERSOLD: { labelShort: 'OVERSOLD', label: 'Oversold', cls: 'radar-val-pill--oversold' },
+  FAIR: { labelShort: 'FAIR', label: 'Fair range', cls: 'radar-val-pill--fair' },
+  OVERBOUGHT: { labelShort: 'OVERBOUGHT', label: 'Overbought', cls: 'radar-val-pill--overbought' },
+  DEEPLY_OVERBOUGHT: { labelShort: 'DEEP OVERBOUGHT', label: 'Deeply overbought', cls: 'radar-val-pill--overbought-deep' },
+  UNKNOWN: { labelShort: 'UNKNOWN', label: 'Unknown', cls: 'radar-val-pill--unknown' },
+};
+
+const VALUATION_BASIS_TEXT = {
+  'momentum+history': 'momentum + stored price history',
+  history_only: 'stored price history only',
+  momentum_only: 'momentum only (no stored history for this symbol)',
+  none: 'no usable inputs',
+};
+
+function _valFinite(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function _valSigned(value, suffix) {
+  const n = _valFinite(value);
+  if (n === null) return null;
+  return `${n > 0 ? '+' : ''}${n}${suffix || ''}`;
+}
+
+/**
+ * Normalized display model for a radar candidate's valuation band. Never throws.
+ */
+export function radarValuationDisplayModel(candidate) {
+  const c = candidate && typeof candidate === 'object' ? candidate : {};
+  const v = c.valuation && typeof c.valuation === 'object' ? c.valuation : null;
+  const band = v && VALUATION_DISPLAY[v.VALUATION_BAND] ? v.VALUATION_BAND : 'UNKNOWN';
+  const display = VALUATION_DISPLAY[band];
+  const score = v ? _valFinite(v.VALUATION_SCORE) : null;
+  const confidence = v && ['low', 'medium', 'high'].includes(v.VALUATION_CONFIDENCE) ? v.VALUATION_CONFIDENCE : 'unknown';
+  const basis = v && VALUATION_BASIS_TEXT[v.VALUATION_BASIS] ? v.VALUATION_BASIS : 'none';
+  const history = v && v.history && typeof v.history === 'object' ? v.history : {};
+  const momentum = v && v.momentum && typeof v.momentum === 'object' ? v.momentum : {};
+  const blockers = v && Array.isArray(v.VALUATION_BLOCKERS) ? v.VALUATION_BLOCKERS.slice(0, 6) : [];
+
+  const detail = [];
+  if (history.available === true) {
+    const pct = _valFinite(history.rangePercentile);
+    if (pct !== null) detail.push({ k: 'Range position', v: `${pct}% of stored ${_valFinite(history.windowHours)}h range` });
+    const rsi = _valFinite(history.sampledRsi);
+    if (rsi !== null) detail.push({ k: 'Sampled RSI', v: `${rsi} (period ${_valFinite(history.rsiPeriod) ?? '--'}, sampled points not candles)` });
+    const dev = _valSigned(history.meanDeviationPct, '%');
+    if (dev !== null) detail.push({ k: 'vs window mean', v: dev });
+    const z = _valSigned(history.zScore, 'σ');
+    if (z !== null) detail.push({ k: 'Z-score', v: z });
+    detail.push({ k: 'History points', v: String(_valFinite(history.pointsUsed) ?? 0) });
+  } else {
+    detail.push({ k: 'Stored history', v: typeof history.reason === 'string' && history.reason ? history.reason : 'unavailable' });
+  }
+  if (momentum.available === true) {
+    detail.push({ k: 'Momentum', v: `${_valFinite(momentum.timeframesUsed) ?? 0} timeframe(s), score ${_valFinite(momentum.score) ?? '--'}` });
+    if (momentum.volatilityKnown !== true) detail.push({ k: 'Volatility', v: 'unknown — stretch not volatility-normalized' });
+  } else {
+    detail.push({ k: 'Momentum', v: typeof momentum.reason === 'string' && momentum.reason ? momentum.reason : 'unavailable' });
+  }
+
+  const scoreText = band === 'UNKNOWN' || score === null ? '--' : `${score > 0 ? '+' : ''}${score}`;
+  const summary = v && typeof v.VALUATION_SUMMARY === 'string' && v.VALUATION_SUMMARY
+    ? v.VALUATION_SUMMARY
+    : 'Valuation unknown — not enough data to place this coin inside its own recent range.';
+  const tooltipParts = [
+    `${display.label} (score ${scoreText}, -100 oversold … +100 overbought)`,
+    `Basis: ${VALUATION_BASIS_TEXT[basis]}; confidence ${confidence}`,
+    summary,
+    VALUATION_NOT_A_SIGNAL,
+  ];
+  if (blockers.length) tooltipParts.push(`Caveats: ${blockers.join('; ')}`);
+
+  return {
+    present: !!v,
+    band,
+    direction: v && typeof v.VALUATION_DIRECTION === 'string' ? v.VALUATION_DIRECTION : 'UNKNOWN',
+    label: display.label,
+    labelShort: display.labelShort,
+    cssClass: `radar-val-pill ${display.cls}`,
+    score,
+    scoreText,
+    confidence,
+    basis,
+    basisText: VALUATION_BASIS_TEXT[basis],
+    summary,
+    detail,
+    blockers,
+    tooltip: tooltipParts.join(' | '),
+    historyAvailable: history.available === true,
+    isEntrySignal: false,
+    note: VALUATION_NOT_A_SIGNAL,
+  };
+}
+
+/**
+ * Header line for the RADAR valuation coverage note, from
+ * `radar.valuationSummary`. States the counts AND whether the stored-history
+ * layer was reachable, so a degraded read is never presented as full coverage.
+ */
+export function radarValuationSummaryModel(radarState) {
+  const r = radarState && typeof radarState === 'object' ? radarState : {};
+  const s = r.valuationSummary && typeof r.valuationSummary === 'object' ? r.valuationSummary : null;
+  const int = (value) => {
+    const n = _valFinite(value);
+    return n === null ? 0 : Math.max(0, Math.trunc(n));
+  };
+  if (!s) {
+    return {
+      present: false,
+      oversold: 0,
+      overbought: 0,
+      fair: 0,
+      unknown: 0,
+      historyAvailable: false,
+      historyUnavailableReason: 'VALUATION_SUMMARY_MISSING',
+      text: 'Valuation read unavailable — the server sent no valuation summary for this RADAR cycle.',
+      note: VALUATION_NOT_A_SIGNAL,
+    };
+  }
+  const oversold = int(s.oversoldTotal);
+  const overbought = int(s.overboughtTotal);
+  const fair = int(s.fair);
+  const unknown = int(s.unknown);
+  const historyAvailable = s.historyAvailable === true;
+  const reason = historyAvailable ? null : (typeof s.historyUnavailableReason === 'string' && s.historyUnavailableReason ? s.historyUnavailableReason : 'VALUATION_HISTORY_UNAVAILABLE');
+  const coverage = historyAvailable
+    ? `stored history deepened ${int(s.historySymbolsWithData)}/${int(s.historySymbolsRequested)} of the top ${int(s.historyTopN)} candidates`
+    : `stored-history layer unavailable (${reason}) — bands fall back to momentum only`;
+  return {
+    present: true,
+    oversold,
+    overbought,
+    fair,
+    unknown,
+    momentumOnly: int(s.momentumOnly),
+    historyBacked: int(s.historyBacked),
+    historyAvailable,
+    historyUnavailableReason: reason,
+    text: `Valuation: ${oversold} oversold, ${fair} fair, ${overbought} overbought, ${unknown} unknown — ${coverage}.`,
+    note: VALUATION_NOT_A_SIGNAL,
+  };
+}
+
 if (typeof window !== 'undefined') {
   window.__priceHistorySignalsPanel = {
     toRenderModel: priceHistorySignalRenderModel,
@@ -531,5 +689,7 @@ if (typeof window !== 'undefined') {
     readinessDecision: priceHistoryReadinessDecision,
     backendModel: radarBackendPriceHistoryModel,
     backendAdjustmentBreakdown: radarBackendPriceHistoryAdjustmentBreakdown,
+    valuationModel: radarValuationDisplayModel,
+    valuationSummaryModel: radarValuationSummaryModel,
   };
 }

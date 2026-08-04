@@ -371,6 +371,89 @@ export async function listRecentPricePoints(opts = {}, deps = {}) {
   }
 }
 
+// Bounds for listRecentPricePointsForSymbols. One statement covers the whole
+// symbol batch, so the caps are what keep a wide RADAR universe from turning
+// into an unbounded read: at most MAX_BATCH_SYMBOLS x MAX_BATCH_POINTS rows.
+const MAX_BATCH_SYMBOLS = 60;
+const MAX_BATCH_POINTS_PER_SYMBOL = 200;
+const DEFAULT_BATCH_POINTS_PER_SYMBOL = 60;
+
+/**
+ * Reads the most recent points for MANY symbols in ONE round-trip, newest
+ * first per symbol, via a per-symbol ROW_NUMBER window rather than one query
+ * per symbol. `raw_meta` is never included.
+ *
+ * Bounded by construction: at most MAX_BATCH_SYMBOLS symbols and
+ * MAX_BATCH_POINTS_PER_SYMBOL points each — extra symbols are dropped and
+ * reported in `symbolsDropped` so a truncated read is never silently presented
+ * as complete coverage. Returns
+ * { ok:true, bySymbol: Map<symbol, rows[]>, symbolsRequested, symbolsReturned,
+ *   symbolsDropped } or { ok:false, reason }. Never throws.
+ */
+export async function listRecentPricePointsForSymbols(opts = {}, deps = {}) {
+  const getDbImpl = deps.getDbImpl || getDb;
+  const requested = Array.isArray(opts.symbols) ? opts.symbols : null;
+  if (!requested) return { ok: false, reason: 'INVALID_SYMBOLS' };
+
+  const normalized = [];
+  const seen = new Set();
+  for (const raw of requested) {
+    const symbol = typeof raw === 'string' ? raw.trim().toUpperCase() : '';
+    if (!symbol || symbol.length > 32 || seen.has(symbol)) continue;
+    seen.add(symbol);
+    normalized.push(symbol);
+  }
+  if (normalized.length === 0) return { ok: false, reason: 'MISSING_SYMBOLS' };
+  const symbols = normalized.slice(0, MAX_BATCH_SYMBOLS);
+  const symbolsDropped = normalized.length - symbols.length;
+
+  const requestedLimit = toSafeInt(opts.pointsPerSymbol);
+  const pointsPerSymbol = requestedLimit !== null && requestedLimit > 0
+    ? Math.min(requestedLimit, MAX_BATCH_POINTS_PER_SYMBOL)
+    : DEFAULT_BATCH_POINTS_PER_SYMBOL;
+
+  let db;
+  try {
+    db = getDbImpl();
+  } catch {
+    return { ok: false, reason: 'DB_UNAVAILABLE' };
+  }
+
+  try {
+    const res = await db.pool.query(
+      `SELECT symbol, price_usd, change_1h_pct, change_24h_pct, change_7d_pct,
+              volume_24h_usd, market_cap_usd, sampled_at
+       FROM (
+         SELECT symbol, price_usd, change_1h_pct, change_24h_pct, change_7d_pct,
+                volume_24h_usd, market_cap_usd, sampled_at,
+                ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY sampled_at DESC) AS rn
+         FROM market_price_points
+         WHERE symbol = ANY($1::text[])
+       ) ranked
+       WHERE rn <= $2
+       ORDER BY symbol ASC, sampled_at DESC`,
+      [symbols, pointsPerSymbol],
+    );
+    const bySymbol = new Map();
+    for (const row of res.rows) {
+      const key = typeof row.symbol === 'string' ? row.symbol : String(row.symbol || '');
+      if (!bySymbol.has(key)) bySymbol.set(key, []);
+      bySymbol.get(key).push(row);
+    }
+    return {
+      ok: true,
+      bySymbol,
+      symbolsRequested: symbols.length,
+      symbolsReturned: bySymbol.size,
+      symbolsDropped,
+      pointsPerSymbol,
+    };
+  } catch (err) {
+    logFailure('listRecentPricePointsForSymbols', err);
+    return { ok: false, reason: 'DB_UNAVAILABLE' };
+  }
+}
+
 /**
  * Reads the most recent snapshot metadata rows, newest first. Returns
  * { ok:true, snapshots } or { ok:false, reason }.
