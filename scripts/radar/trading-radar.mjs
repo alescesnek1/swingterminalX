@@ -15,6 +15,7 @@ import { computePressureZones } from './pressure-zones.mjs';
 import { buildPositioningContext } from './positioning-context.mjs';
 import { getFreshRollingMicrostructureForSymbol, normalizeRollingMicrostructureSnapshot } from './rolling-microstructure-snapshot.mjs';
 import { normalizeLongShortSnapshot } from './long-short-snapshot.mjs';
+import { buildValuationContext } from './valuation-bands.mjs';
 const WEIRD_BASE_RE = /(UP|DOWN|BULL|BEAR)$|\d+(L|S)$/;
 const QUOTES = new Set(['USDC', 'USDT']);
 
@@ -2605,6 +2606,13 @@ export function evaluateTradingRadar({
       // and never fed back into it. Neither is read by any gate/Absorb/Reclaim/
       // ENTRY_READY/Telegram path.
       const pressureZones = computeRadarPressureZones(m, klinesSnapshot, now);
+      // Context-only oversold/overbought read, relative to the coin's OWN recent
+      // range and momentum — never a fundamental valuation and never an entry
+      // signal. Momentum-only here (no database in this pure evaluator); the
+      // stored-history layer is merged in afterwards by
+      // netlify/functions/_radar-valuation-context.mjs. Feeds no gate/score/
+      // Absorb/Reclaim/ENTRY_READY/Telegram path.
+      const valuation = buildValuationContext({ market: m });
       // Context-only OI/positioning read-model over real rolling OI delta plus
       // optional compact long/short ratios from the operator-local producer.
       const longShortContext = longShortContextForMarket(m, longShortSnapshot, now);
@@ -2663,6 +2671,10 @@ export function evaluateTradingRadar({
         // Context-only operator readiness SUMMARY (additive display block; mirrors
         // existing status, introduces no new gate; never read by any gate path).
         tradeReadiness,
+        // Context-only oversold/overbought band (additive display block; relative
+        // to the coin's own recent range, not a fundamental valuation, not an
+        // entry signal; never read by any gate/score/Telegram path).
+        valuation,
         ...attentionMetadata,
         stage: stageInfo.stage,
         actionability: effectiveActionability,

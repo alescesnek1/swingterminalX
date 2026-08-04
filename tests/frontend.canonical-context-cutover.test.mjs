@@ -176,8 +176,13 @@ test('every versioned asset carries the same single bumped cache-bust token', ()
   // admin-users-panel.js added, terminal.js auth wiring changed); 6k2 -> 6k3 for the
   // Cockpit miss diagnosis (terminal.js renders a publisher outage distinctly from a
   // coverage gap); 6k3 -> 6k4 for the native-account AI fix (ai-analysis.js resolves its
-  // token through AuthClient, auth-client.js announces the ended mode).
-  assert.equal(tokens[0], '6k4', 'token was bumped for this JS change');
+  // token through AuthClient, auth-client.js announces the ended mode); 6k4 -> 6k5 for
+  // the RADAR valuation band (oversold/overbought column + filters in terminal.js,
+  // valuation display models in price-history-signals-panel.js, new pill styles in
+  // terminal.css); 6k5 -> 6k6 for the valuation fail-closed hardening, which
+  // renamed the Focus tech-group heading in terminal.js (the rule is one bump per
+  // JS/CSS change, whether or not the previous token has shipped yet).
+  assert.equal(tokens[0], '6k6', 'token was bumped for this JS change');
 });
 
 // The measurement budget targets the deepest drawdowns, and DISLOCATION is 20% of

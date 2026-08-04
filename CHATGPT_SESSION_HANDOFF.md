@@ -1405,6 +1405,37 @@ email allowlist (§9), not a billing tier.
       `PRICE_HISTORY_WRITE_ENABLED === 'true'` to persist — so both flags
       must be on for a real write. `/api/markets` stays Deno Edge and
       untouched; `bot.mjs` remains off-limits as a wiring point.
+    - **RADAR valuation bands — oversold / overbought (LOCAL, implemented,
+      advisory-only).** New pure engine `scripts/radar/valuation-bands.mjs`
+      answers "is this coin stretched cheap or stretched expensive **relative to
+      its own recent behaviour**". Two independently-scored layers:
+      (a) *momentum* — weighted 1h/4h/12h/24h/7d stretch, volatility-normalized
+      by `atrPct` when known, plus a bounded ±12-point BTC-relative nudge;
+      attached by `trading-radar.mjs` to **every** candidate as the context-only
+      `candidate.valuation`, alongside `pressureZones` / `positioningContext` /
+      `tradeReadiness`. (b) *stored history* — from `market_price_points`: range
+      percentile (0.45), sampled Wilder RSI (0.35), z-score (0.20), merged for
+      the top **40** ranked candidates by
+      `netlify/functions/_radar-valuation-context.mjs` using **one** batched read
+      (`listRecentPricePointsForSymbols`, `ROW_NUMBER() OVER (PARTITION BY
+      symbol …)`, hard-capped 60 symbols × 200 points). Score runs **−100
+      oversold … 0 fair … +100 overbought**; bands `DEEPLY_OVERSOLD` /
+      `OVERSOLD` / `FAIR` / `OVERBOUGHT` / `DEEPLY_OVERBOUGHT` / `UNKNOWN`.
+      **It is NOT a fundamental valuation and NOT an entry signal**: every block
+      carries `isEntrySignal:false` / `affectsGate:false` /
+      `affectsTelegram:false`, the enrichment provably touches only
+      `candidate.valuation`, and it runs AFTER the Telegram-eligibility restore
+      so it cannot reach any gate, score, Absorb, Reclaim, `ENTRY_READY`, or
+      alert path. Fail-closed: no usable input → `UNKNOWN` with a null score
+      (never `OVERSOLD`, which reads as "cheap, buy"); a flat window is
+      `FLAT_WINDOW` not `FAIR`; DB failure keeps the momentum-only band and is
+      visible in `radar.valuationSummary.historyUnavailableReason` + a
+      `console.warn`. UI: new **Value** column + Oversold/Overbought filter chips
+      + a Focus-card valuation panel + a coverage line in `terminal.js`, display
+      models in `price-history-signals-panel.js`, cyan/amber `.radar-val-pill*`
+      styles (deliberately not the green/red gate colours), asset token bumped
+      `6k4 → 6k5`. No new external fetch, no scheduler, no migration. Detail:
+      `docs/radar-valuation-bands.md`.
     - `netlify/functions/_price-history-signals.mjs` provides pure reclaim and
       absorption classification over stored points. `bot.mjs` uses a bounded
       two-pass RADAR refresh: rank without history, read only the first-pass top
@@ -1756,3 +1787,23 @@ ChatGPT-facing project memory, not a code dump.
 > referral kódy tu nejsou.
 
 > _Rolling producer candidate-load and empty-POST hardening (2026-07-23, local-only):_ `rolling-microstructure-producer.mjs` now takes explicit `--symbols` / `WORKER_RADAR_ROLLING_SYMBOLS` when supplied; otherwise it safely reads the existing worker-token-protected `GET /api/bot/radar-candidates` and accepts only valid futures targets (no Alpha-only or spot-only coercion). Candidate fetch failure, zero candidates, invalid/thin/untrusted rows, missing config, and public Binance 451 all fail closed and **do not POST**, so a valid stored rolling snapshot cannot be overwritten by an empty/untrusted result. A trusted row is still required before the existing POST; token values are never logged. GitHub-hosted Actions remains unsuitable because fapi egress can 451; no runner, scheduler, Telegram, trading, private endpoint, or deploy is added. A future runner must be local/VPS with verified egress, explicit enablement, and freshness monitoring.
+> _RADAR valuation bands — oversold / overbought (2026-08-04, local-only):_ the
+> RADAR now states, per coin, whether it is stretched **cheap or expensive
+> relative to its own recent range** — a new `Value` column with a signed −100…+100
+> score, Oversold/Overbought filter chips, and a Focus-card panel showing the
+> evidence (range percentile, sampled RSI, z-score, deviation from the window
+> mean, timeframes used). Two layers: a momentum read on every candidate
+> (volatility-normalized when `atrPct` is known) and a stored-history read from
+> `market_price_points` for the top 40 ranked candidates via **one** batched
+> Postgres statement. It is deliberately **not** a fundamental valuation and
+> **not** an entry signal: `isEntrySignal:false` / `affectsGate:false` /
+> `affectsTelegram:false` on every block, a test asserts enrichment leaves every
+> other candidate field byte-identical, and it runs after the Telegram-eligibility
+> restore. Fail-closed throughout — no usable data is `UNKNOWN` with a null score
+> (never `OVERSOLD`), a flat window is `FLAT_WINDOW` not `FAIR`, a flat series has
+> no RSI (`null`, not the conventional 50), and a DB outage keeps the momentum band
+> while surfacing its reason in `radar.valuationSummary` plus a `console.warn`.
+> No new external fetch, scheduler, cron, credential, migration, or trading path.
+> Asset cache-bust token `6k4 → 6k5`. Full suite green (2280 pass / 0 fail /
+> 26 skipped), `npm run lint` 0 errors. No push, no deploy. Detail:
+> `docs/radar-valuation-bands.md`.

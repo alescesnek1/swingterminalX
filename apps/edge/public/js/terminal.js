@@ -9535,6 +9535,78 @@ function _radarDataSourceMatrixHtml(c, radar, ctx) {
     </div>`;
 }
 
+// ── RADAR valuation (oversold / overbought) display glue ────────────────────
+// The display MODEL lives in the pure, unit-tested price-history-signals-panel
+// module; terminal.js only renders it. If that module failed to load we must not
+// silently show a blank or a fabricated band — we render an explicit UNKNOWN and
+// report the failure once to the central error log (per the repo's
+// error-observability contract).
+let _radarValuationHelperWarned = false;
+function _radarValuationModel(c) {
+  const h = _phsHelpers();
+  if (h && typeof h.valuationModel === 'function') return h.valuationModel(c);
+  if (!_radarValuationHelperWarned) {
+    _radarValuationHelperWarned = true;
+    console.warn('[radar] valuation display module unavailable', { module: 'price-history-signals-panel.js', effect: 'valuation column renders UNKNOWN' });
+    try {
+      if (window.ErrorLog && typeof window.ErrorLog.record === 'function') {
+        window.ErrorLog.record({
+          kind: 'radar_valuation_display_unavailable',
+          message: 'price-history-signals-panel.js did not load; RADAR valuation renders UNKNOWN',
+        });
+      }
+    } catch (err) {
+      console.warn('[radar] could not record valuation display failure', { name: err && err.name });
+    }
+  }
+  return {
+    present: false,
+    band: 'UNKNOWN',
+    direction: 'UNKNOWN',
+    label: 'Unknown',
+    labelShort: 'UNKNOWN',
+    cssClass: 'radar-val-pill radar-val-pill--unknown',
+    score: null,
+    scoreText: '--',
+    confidence: 'unknown',
+    basis: 'none',
+    basisText: 'display module unavailable',
+    summary: 'Valuation display module failed to load — this is a UI failure, not a market reading.',
+    detail: [],
+    blockers: ['valuation display module unavailable'],
+    tooltip: 'Valuation display module failed to load — this is a UI failure, not a market reading.',
+    historyAvailable: false,
+    isEntrySignal: false,
+  };
+}
+function _radarValuationSummary(radar) {
+  const h = _phsHelpers();
+  if (h && typeof h.valuationSummaryModel === 'function') return h.valuationSummaryModel(radar);
+  return null;
+}
+// Bands the Oversold / Overbought filter chips select.
+function _radarValuationDirection(c) {
+  return _radarValuationModel(c).direction;
+}
+// Focus-card valuation panel: the band, its score, the evidence behind it, and
+// the caveats. Display only — it changes no gate, score, or Telegram state, and
+// says so explicitly so an oversold reading is never read as an entry approval.
+function _radarValuationFocusHtml(c, esc) {
+  const v = _radarValuationModel(c);
+  const rows = (v.detail || []).map((d) => `
+        <div class="radar-microstructure__row"><span>${esc(d.k)}</span><b>${esc(d.v)}</b></div>`).join('');
+  const caveats = (v.blockers || []).map((b) => `<li>${esc(b)}</li>`).join('');
+  return `<div class="radar-microstructure radar-valuation">
+        <div class="radar-microstructure__title">RELATIVE VALUE &middot; ADVISORY ONLY &middot; own recent range — not fundamental, not an entry signal</div>
+        <div class="radar-microstructure__row"><span>Band</span><b><span class="${v.cssClass}">${esc(v.labelShort)}<b class="radar-val-pill__score">${esc(v.scoreText)}</b></span></b></div>
+        <div class="radar-microstructure__row"><span>Scale</span><b>-100 oversold &middot; 0 fair &middot; +100 overbought</b></div>
+        <div class="radar-microstructure__row"><span>Basis</span><b>${esc(v.basisText)} &middot; confidence ${esc(v.confidence)}</b></div>
+        ${rows}
+        <div class="radar-microstructure__row radar-valuation__summary"><span>Reading</span><b>${esc(v.summary)}</b></div>
+        ${caveats ? `<ul class="radar-valuation__caveats">${caveats}</ul>` : ''}
+      </div>`;
+}
+
 function _renderTradingRadar(radar, esc) {
   radar = radar || {};
   const allCandidates = Array.isArray(radar.candidates) ? radar.candidates : [];
@@ -9557,6 +9629,8 @@ function _renderTradingRadar(radar, esc) {
     STABILIZING: allCandidates.filter(c => c.actionability === 'NEEDS_STABILIZATION' || c.stage === 'STABILIZING').length,
     FLUSH_CONFIRMED: allCandidates.filter(c => c.stage === 'LONG_FLUSH_CONFIRMED').length,
     ENTRY_READY: allCandidates.filter(c => c.actionability === 'ENTRY_READY').length,
+    OVERSOLD: allCandidates.filter(c => _radarValuationDirection(c) === 'OVERSOLD').length,
+    OVERBOUGHT: allCandidates.filter(c => _radarValuationDirection(c) === 'OVERBOUGHT').length,
     REJECTED: rejectedRows.length,
   };
 
@@ -9567,6 +9641,15 @@ function _renderTradingRadar(radar, esc) {
   else if (activeFilter === 'STABILIZING') candidates = candidates.filter(c => c.actionability === 'NEEDS_STABILIZATION' || c.stage === 'STABILIZING');
   else if (activeFilter === 'FLUSH_CONFIRMED') candidates = candidates.filter(c => c.stage === 'LONG_FLUSH_CONFIRMED');
   else if (activeFilter === 'ENTRY_READY') candidates = candidates.filter(c => c.actionability === 'ENTRY_READY');
+  // Valuation filters sort by how stretched the coin is, most oversold (most
+  // negative score) or most overbought first. Rows with an UNKNOWN band are
+  // excluded rather than sorted to one end — an unmeasured coin is not "fair".
+  else if (activeFilter === 'OVERSOLD') candidates = candidates
+    .filter(c => _radarValuationDirection(c) === 'OVERSOLD')
+    .sort((a, b) => (_radarValuationModel(a).score ?? 0) - (_radarValuationModel(b).score ?? 0));
+  else if (activeFilter === 'OVERBOUGHT') candidates = candidates
+    .filter(c => _radarValuationDirection(c) === 'OVERBOUGHT')
+    .sort((a, b) => (_radarValuationModel(b).score ?? 0) - (_radarValuationModel(a).score ?? 0));
   else if (activeFilter === 'REJECTED') candidates = rejectedRows.map((r) => ({
     symbol: r.symbol || '--',
     stage: 'REJECTED',
@@ -9625,6 +9708,7 @@ function _renderTradingRadar(radar, esc) {
       <td><b>${esc(c.symbol)}</b></td>
       <td><span class="${_fleetRadarBadgeClass(v1Status)}">${esc(v1Status)}</span></td>
       <td>${(() => { const f = formatSafetyLabel(c.safetyStatus, c.safetyReason, c.safetySource, c.chain, c.contractAddress, c.safetyBasis); return `<span class="safety-pill ${f.cssClass}" title="${esc(f.tooltip)}">${esc(f.labelShort)}</span>`; })()}</td>
+      <td>${(() => { const v = _radarValuationModel(c); return `<span class="${v.cssClass}" title="${esc(v.tooltip)}">${esc(v.labelShort)}<b class="radar-val-pill__score">${esc(v.scoreText)}</b></span>`; })()}</td>
       <td>${esc(_fleetFmtRadarValue(c.distanceToEntryReadyScore, 0))}</td>
       <td><b class="${_fleetRadarScoreClass(c.SETUP_SCORE ?? c.setupQualityScore)}">${esc(_fleetFmtRadarValue(c.SETUP_SCORE ?? c.setupQualityScore, 0))}</b>${(() => { const h = _phsHelpers(); if (!h || typeof h.backendAdjustmentBreakdown !== 'function') return ''; const b = h.backendAdjustmentBreakdown(c); return b.adjustment > 0 ? ` <span class="radar-ph-setup-tag" title="${esc(b.summary)}">+${b.adjustment} PH</span>` : ''; })()}</td>
       <td><b>${esc(_fleetFmtRadarValue(c.EXECUTION_SCORE, 0))}</b></td>
@@ -9641,7 +9725,7 @@ function _renderTradingRadar(radar, esc) {
       <td class="radar-blocked-by">${esc(v1BlockedBy)}</td>
       <td class="radar-telegram-td">${c.telegramEligible ? '<span class="radar-telegram-ready">ready</span>' : '<span class="radar-telegram-no">no</span>'}</td>
     </tr>`;
-  }).join('') : `<tr><td colspan="18" class="fleet-empty">No candidates match current filter.</td></tr>`;
+  }).join('') : `<tr><td colspan="19" class="fleet-empty">No candidates match current filter.</td></tr>`;
 
   const filterButton = (key, label, count) =>
     `<button type="button" onclick="window._radarFilter='${key}'; renderTradingRadarPanel()" class="radar-filter-chip ${activeFilter===key?'radar-filter-chip--active':''}">${label} <b>${count}</b></button>`;
@@ -9654,6 +9738,8 @@ function _renderTradingRadar(radar, esc) {
     ${filterButton('STABILIZING', 'Stabilizing', filtersCount.STABILIZING)}
     ${filterButton('FLUSH_CONFIRMED', 'Flush Confirmed', filtersCount.FLUSH_CONFIRMED)}
     ${filterButton('ENTRY_READY', 'Entry Ready', filtersCount.ENTRY_READY)}
+    ${filterButton('OVERSOLD', 'Oversold', filtersCount.OVERSOLD)}
+    ${filterButton('OVERBOUGHT', 'Overbought', filtersCount.OVERBOUGHT)}
     ${filterButton('REJECTED', 'Rejected', filtersCount.REJECTED)}
     <select class="radar-limit-select" onchange="window._radarFilterLimit=this.value; renderTradingRadarPanel()">
       <option value="20" ${rowLimitStr==='20'?'selected':''}>Show 20</option>
@@ -9682,10 +9768,19 @@ function _renderTradingRadar(radar, esc) {
       : 'Rows without it read STRICT N/A: not measured, which is neither a confirmed nor a rejected absorption.'}
   </div>`;
 
-  const matrixTableHtml = coverageHtml + `<div class="radar-matrix-wrap"><table class="radar-matrix">
+  // Valuation coverage, stated rather than inferred: how many candidates read
+  // oversold / fair / overbought, and whether the stored-history layer was
+  // reachable at all. A momentum-only fallback must never look like full data.
+  const _valSummary = _radarValuationSummary(radar);
+  const valuationCoverageHtml = _valSummary ? `<div class="radar-valuation-note ${_valSummary.historyAvailable ? '' : 'radar-valuation-note--degraded'}">
+    ${esc(_valSummary.text)}
+    <span class="radar-valuation-note__caveat">${esc(_valSummary.note)}</span>
+  </div>` : '';
+
+  const matrixTableHtml = coverageHtml + valuationCoverageHtml + `<div class="radar-matrix-wrap"><table class="radar-matrix">
     <thead>
       <tr>
-        <th>Symbol</th><th>Status</th><th>Safety</th><th>Dist</th><th>Setup</th><th>Exec</th><th>Conf</th>
+        <th>Symbol</th><th>Status</th><th>Safety</th><th title="Oversold / overbought relative to this coin's own recent range and momentum (stored price history + multi-timeframe stretch). NOT a fundamental valuation and NOT an entry signal.">Value</th><th>Dist</th><th>Setup</th><th>Exec</th><th>Conf</th>
         <th>Dump</th><th>Flush</th><th>Stabil.</th><th title="Server-side strict rolling absorption gate. DATA OFF = rolling producer not running (not a confirmed or rejected absorption).">Strict Absorb Gate</th><th title="Market structural reclaim. Not Started = price has not reclaimed the zone yet.">Reclaim</th><th>Regime</th>
         <th>Entry</th><th>Zone</th><th>Stop</th><th>Blocked By</th><th>Telegram</th>
       </tr>
@@ -9910,6 +10005,9 @@ function _renderTradingRadar(radar, esc) {
           </div>
         </div>
       </div>
+      </div>
+      <div class="radar-tech-group"><div class="radar-tech-group__title">Relative Value / Advisory</div>
+      ${_radarValuationFocusHtml(selected, esc)}
       </div>
       <div class="radar-tech-group"><div class="radar-tech-group__title">Price-history signal</div>
       ${_radarBackendPriceHistoryHtml(selected)}
