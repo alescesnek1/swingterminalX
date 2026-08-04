@@ -186,8 +186,11 @@ test('every versioned asset carries the same single bumped cache-bust token', ()
   // price-history-signals-panel.js; Technical-details open-state restore and
   // panel-level details persistence in terminal.js); 6k7 -> 6k8 for the advisory
   // Scanner Lead Score (new js/scanner-lead-score.js module, Lead Score column +
-  // venue-snapshot wiring in terminal.js, .lead-score styles in terminal.css).
-  assert.equal(tokens[0], '6k8', 'token was bumped for this JS change');
+  // venue-snapshot wiring in terminal.js, .lead-score styles in terminal.css);
+  // 6k8 -> 6k9 for the Lead Score degraded-basis hotfix (FUTURES_ONLY /
+  // SPOT_ONLY scoring paths so the column stops reading UNKNOWN on every
+  // unpaired row; basis surfaced in the cell tooltip + .lead-score--degraded).
+  assert.equal(tokens[0], '6k9', 'token was bumped for this JS change');
 });
 
 // The measurement budget targets the deepest drawdowns, and DISLOCATION is 20% of

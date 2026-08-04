@@ -47,6 +47,24 @@ export const LEAD_SCORE_WEIGHTS = Object.freeze({
   flow: 0.10,         // taker buy/sell imbalance
 });
 
+// Degraded basis used when the row has no matched spot leg. Same machinery,
+// different evidence: this describes the PERP's own pressure, which is why it
+// carries its own weights, an honesty discount, and a hard label ceiling.
+export const FUTURES_ONLY_WEIGHTS = Object.freeze({
+  futuresTurnover: 0.25, // absolute 24h perp turnover (log-scaled)
+  futuresMove: 0.30,     // 24h move strength on the perp
+  funding: 0.20,
+  oi: 0.15,
+  flow: 0.10,
+});
+// A futures-only read cannot see spot, so it can never be as informative as a
+// paired one. Discount it rather than let it compete on equal terms.
+const FUTURES_ONLY_DAMP = 0.85;
+const FUTURES_ONLY_NOTE = 'No matched spot leg found — score uses futures pressure only.';
+const SPOT_ONLY_NOTE = 'No futures venue found for this asset — nothing futures-side can be leading it here.';
+// Perp turnover below this is not a pressure signal at any scale.
+const FUTURES_TURNOVER_FLOOR_USD = 5e6;
+
 // Saturation points — the reading at which a component is "fully" strong.
 const SAT = Object.freeze({
   premiumPct: 0.60,     // 0.60 % basis is already a loud perp premium
@@ -59,6 +77,8 @@ const SAT = Object.freeze({
   oiChangePct: 12,
   fundingPct: 0.05,     // 0.05 % per 8h funding is extreme
   flowImbalance: 0.20,  // taker buy ratio 0.70 / 0.30
+  futuresTurnoverUsd: 5e9, // $5B/24h perp turnover saturates the size read
+  futuresMovePct: 15,      // a 15 % 24h perp move is a full-strength push
 });
 // Futures turnover at or below this multiple of spot is ordinary market
 // structure and contributes nothing.
@@ -74,6 +94,7 @@ const DIRECTION_FLOOR = Object.freeze({
   // perp with no lean. Anything inside that band is not directional evidence.
   fundingPct: 0.015,
   flowImbalance: 0.04,
+  futuresMovePct: 1.5,
 });
 
 // Label thresholds. Deliberately conservative at the top end.
@@ -95,7 +116,18 @@ const COMPONENT_LABELS = Object.freeze({
   oi: 'open interest change',
   funding: 'funding rate',
   flow: 'taker buy/sell flow',
+  futuresTurnover: 'futures 24h turnover',
+  futuresMove: 'futures 24h move',
 });
+
+// Every basis the score can report, so callers can switch on a closed set.
+export const LEAD_SCORE_BASES = Object.freeze([
+  'FULL_SPOT_FUTURES', // both legs, real futures-vs-spot comparison
+  'FUTURES_ONLY',      // perp pressure only, no matched spot leg
+  'SPOT_ONLY',         // spot listing with no futures venue
+  'NO_VENUE_PAIR',     // venue data present but nothing comparable
+  'NO_USABLE_DATA',    // nothing readable at all
+]);
 
 // "The pair comparisons". At least one of these must be present, because
 // they are the only components that actually compare the futures side to
@@ -231,6 +263,41 @@ function componentFlow(i) {
   };
 }
 
+// ── futures-only components ──────────────────────────────────
+// Used when the row has NO matched spot leg. These describe the perp's own
+// pressure; they cannot claim it is leading spot, and the basis says so.
+function componentFuturesTurnover(i) {
+  if (i.futuresQuoteVolume24h === null) return null;
+  // Log-scaled: perp turnover spans orders of magnitude ($1M .. $20B), so a
+  // linear scale would read every non-major as zero.
+  const decades = (Math.log10(i.futuresQuoteVolume24h) - Math.log10(FUTURES_TURNOVER_FLOOR_USD))
+    / (Math.log10(SAT.futuresTurnoverUsd) - Math.log10(FUTURES_TURNOVER_FLOOR_USD));
+  return {
+    strength: clamp01(decades),
+    vote: 'neutral', // turnover has size, not a side
+    detail: `futures 24h turnover $${compactUsd(i.futuresQuoteVolume24h)}`,
+  };
+}
+
+function componentFuturesMove(i) {
+  if (i.futuresChange24hPct === null) return null;
+  const vote = Math.abs(i.futuresChange24hPct) < DIRECTION_FLOOR.futuresMovePct
+    ? 'neutral'
+    : (i.futuresChange24hPct > 0 ? 'up' : 'down');
+  return {
+    strength: sat(i.futuresChange24hPct, SAT.futuresMovePct),
+    vote,
+    detail: `futures 24h move ${i.futuresChange24hPct >= 0 ? '+' : ''}${round(i.futuresChange24hPct, 2)}%`,
+  };
+}
+
+function compactUsd(v) {
+  if (v >= 1e9) return `${round(v / 1e9, 2)}B`;
+  if (v >= 1e6) return `${round(v / 1e6, 1)}M`;
+  if (v >= 1e3) return `${round(v / 1e3, 1)}K`;
+  return String(round(v, 2));
+}
+
 const COMPONENT_FNS = Object.freeze({
   premium: componentPremium,
   volumeRatio: componentVolumeRatio,
@@ -238,11 +305,110 @@ const COMPONENT_FNS = Object.freeze({
   oi: componentOi,
   funding: componentFunding,
   flow: componentFlow,
+  futuresTurnover: componentFuturesTurnover,
+  futuresMove: componentFuturesMove,
 });
 
 function bandFor(score) {
   for (const b of LABEL_BANDS) if (score < b.max) return b.label;
   return 'EXTREME';
+}
+
+// Run one weight table over the input and collect everything the caller needs
+// to score it. Shared by the full and the futures-only paths so the two can
+// never drift apart on damping, conflict handling, or the missing-data list.
+function tally(input, weights) {
+  const present = [];
+  const missing = [];
+  const evidence = [];
+  let presentWeight = 0;
+  let weighted = 0;
+  let strongCount = 0;
+  let upVotes = 0;
+  let downVotes = 0;
+
+  for (const key of Object.keys(weights)) {
+    const part = COMPONENT_FNS[key](input);
+    if (!part || !Number.isFinite(part.strength)) {
+      missing.push(COMPONENT_LABELS[key]);
+      continue;
+    }
+    present.push(key);
+    evidence.push(part.detail);
+    const w = weights[key];
+    presentWeight += w;
+    weighted += w * part.strength;
+    if (part.strength >= STRONG_COMPONENT) strongCount += 1;
+    if (part.vote === 'up') upVotes += 1;
+    else if (part.vote === 'down') downVotes += 1;
+  }
+  return { present, missing, evidence, presentWeight, weighted, strongCount, upVotes, downVotes };
+}
+
+// Turn a tally into the scored result. `extraDamp` (<=1) is the honesty
+// discount applied to a degraded basis; `ceiling` is a hard label cap.
+function scoreFromTally(t, { extraDamp = 1, ceiling = 100 } = {}) {
+  const coverage = clamp01(t.presentWeight);
+  const base = (t.weighted / t.presentWeight) * 100;
+  let score = base * (0.55 + 0.45 * coverage) * extraDamp;
+
+  const conflict = t.upVotes > 0 && t.downVotes > 0;
+  if (conflict) score *= 0.6;
+
+  // Caps — each is a "we do not know enough to shout this loudly" rule.
+  //   • a single component, however loud, tops out at MED;
+  //   • EXTREME needs >=3 components, >=2 of them individually strong,
+  //     and no contradiction between them.
+  if (t.present.length < 2) score = Math.min(score, MED_CEILING);
+  if (conflict || t.present.length < 3 || t.strongCount < 2) score = Math.min(score, HIGH_CEILING);
+  score = Math.min(score, ceiling);
+  score = Math.max(0, Math.min(100, Math.round(score)));
+
+  let direction;
+  if (conflict) direction = 'mixed';
+  else if (t.upVotes > 0) direction = 'futures-led up';
+  else if (t.downVotes > 0) direction = 'futures-led down';
+  else direction = 'unknown';
+
+  let confidence;
+  if (t.present.length >= 4 && coverage >= 0.6 && !conflict) confidence = 'high';
+  else if (t.present.length >= 2) confidence = conflict ? 'low' : 'medium';
+  else confidence = 'low';
+
+  return {
+    score,
+    label: bandFor(score),
+    direction,
+    confidence,
+    coverage: round(coverage, 2),
+    present: t.present.slice(),
+    missing: t.missing,
+    evidence: t.evidence,
+    conflict,
+    advisory: LEAD_SCORE_ADVISORY_NOTE,
+  };
+}
+
+function unknownResult(basis, missing, note) {
+  return {
+    score: null,
+    label: 'UNKNOWN',
+    basis,
+    basisNote: note,
+    direction: 'unknown',
+    confidence: 'none',
+    coverage: 0,
+    present: [],
+    missing,
+    evidence: [],
+    conflict: false,
+    advisory: LEAD_SCORE_ADVISORY_NOTE,
+  };
+}
+
+// Is there anything readable on this venue at all?
+function venueUsable(price, volume, change) {
+  return price !== null || volume !== null || change !== null;
 }
 
 /**
@@ -257,92 +423,77 @@ function bandFor(score) {
  */
 export function computeLeadScore(raw) {
   const input = normalizeLeadScoreInput(raw);
+  const hasSpot = venueUsable(input.spotPrice, input.spotQuoteVolume24h, input.spotChange24hPct);
+  const hasFutures = venueUsable(input.futuresPrice, input.futuresQuoteVolume24h, input.futuresChange24hPct);
 
-  const present = [];
-  const missing = [];
-  const evidence = [];
-  let presentWeight = 0;
-  let weighted = 0;
-  let strongCount = 0;
-  let upVotes = 0;
-  let downVotes = 0;
-
-  for (const key of Object.keys(LEAD_SCORE_WEIGHTS)) {
-    const part = COMPONENT_FNS[key](input);
-    if (!part || !Number.isFinite(part.strength)) {
-      missing.push(COMPONENT_LABELS[key]);
-      continue;
+  // ── 1. FULL: both legs present and at least one real comparison ──
+  // Unchanged from the original model — this is still the only basis that
+  // can actually claim futures are leading SPOT, because it is the only one
+  // that measures the two against each other.
+  if (hasSpot && hasFutures) {
+    const t = tally(input, LEAD_SCORE_WEIGHTS);
+    if (CORE_COMPONENTS.some((k) => t.present.includes(k))) {
+      return {
+        ...scoreFromTally(t),
+        basis: 'FULL_SPOT_FUTURES',
+        basisNote: 'Spot and futures both available — full futures-vs-spot comparison.',
+      };
     }
-    present.push(key);
-    evidence.push(part.detail);
-    const w = LEAD_SCORE_WEIGHTS[key];
-    presentWeight += w;
-    weighted += w * part.strength;
-    if (part.strength >= STRONG_COMPONENT) strongCount += 1;
-    if (part.vote === 'up') upVotes += 1;
-    else if (part.vote === 'down') downVotes += 1;
   }
 
-  const hasCore = CORE_COMPONENTS.some((k) => present.includes(k));
+  // ── 2. FUTURES_ONLY: degraded futures-pressure read ──
+  // No matched spot leg (or nothing comparable across the two). We can still
+  // describe how hard the PERP is being pushed — but not that it is leading
+  // spot, so the result is damped, capped, and labelled FUTURES_ONLY.
+  if (hasFutures) {
+    const t = tally(input, FUTURES_ONLY_WEIGHTS);
+    // Needs a real pressure reading, not just a lone funding/OI number.
+    if (t.present.includes('futuresTurnover') || t.present.includes('futuresMove')) {
+      // EXTREME requires >=3 individually strong components; otherwise HIGH is
+      // the ceiling — a futures-only read is never allowed to top the scale on
+      // thin evidence.
+      const ceiling = t.strongCount >= 3 ? 100 : HIGH_CEILING;
+      const scored = scoreFromTally(t, { extraDamp: FUTURES_ONLY_DAMP, ceiling });
+      return {
+        ...scored,
+        basis: 'FUTURES_ONLY',
+        basisNote: FUTURES_ONLY_NOTE,
+        // Direction on this basis is the perp's OWN push, not a lead over spot.
+        direction: scored.direction === 'futures-led up' ? 'futures pressure up'
+          : scored.direction === 'futures-led down' ? 'futures pressure down'
+            : scored.direction,
+      };
+    }
+  }
 
-  // Fail closed. Without a futures-vs-spot comparison there is nothing
-  // here about futures LEADING spot, whatever else happens to be present.
-  if (!present.length || !hasCore) {
+  // ── 3. SPOT_ONLY: a real spot listing with no futures venue ──
+  // There is no perp for this asset in our universe, so within this system's
+  // data nothing futures-side can be driving it. That is a genuine LOW, not
+  // an absence of information — but the basis says exactly why.
+  if (hasSpot) {
+    const missing = [...CORE_COMPONENTS, 'oi', 'funding', 'flow'].map((k) => COMPONENT_LABELS[k]);
     return {
-      score: null,
-      label: 'UNKNOWN',
+      score: 0,
+      label: 'LOW',
+      basis: 'SPOT_ONLY',
+      basisNote: SPOT_ONLY_NOTE,
       direction: 'unknown',
-      confidence: 'none',
+      confidence: 'low',
       coverage: 0,
-      present: present.slice(),
+      present: [],
       missing,
-      evidence,
+      evidence: ['spot venue only — no Binance futures leg for this asset'],
       conflict: false,
       advisory: LEAD_SCORE_ADVISORY_NOTE,
     };
   }
 
-  const coverage = clamp01(presentWeight);
-  // Average over what is PRESENT, then damp by how much of the model we
-  // actually observed. Thin evidence cannot reach a loud score.
-  const base = (weighted / presentWeight) * 100;
-  let score = base * (0.55 + 0.45 * coverage);
-
-  const conflict = upVotes > 0 && downVotes > 0;
-  if (conflict) score *= 0.6;
-
-  // Caps — each is a "we do not know enough to shout this loudly" rule.
-  //   • a single component, however loud, tops out at MED;
-  //   • EXTREME needs >=3 components, >=2 of them individually strong,
-  //     and no contradiction between them.
-  if (present.length < 2) score = Math.min(score, MED_CEILING);
-  if (conflict || present.length < 3 || strongCount < 2) score = Math.min(score, HIGH_CEILING);
-
-  score = Math.max(0, Math.min(100, Math.round(score)));
-
-  let direction;
-  if (conflict) direction = 'mixed';
-  else if (upVotes > 0) direction = 'futures-led up';
-  else if (downVotes > 0) direction = 'futures-led down';
-  else direction = 'unknown';
-
-  let confidence;
-  if (present.length >= 4 && coverage >= 0.6 && !conflict) confidence = 'high';
-  else if (present.length >= 2) confidence = conflict ? 'low' : 'medium';
-  else confidence = 'low';
-
-  return {
-    score,
-    label: bandFor(score),
-    direction,
-    confidence,
-    coverage: round(coverage, 2),
-    present: present.slice(),
-    missing,
-    evidence,
-    conflict,
-    advisory: LEAD_SCORE_ADVISORY_NOTE,
-  };
+  // ── 4. Nothing usable ──
+  const allMissing = Object.keys(COMPONENT_LABELS).map((k) => COMPONENT_LABELS[k]);
+  const bothVenuesSeen = input.spotPrice !== null || input.futuresPrice !== null;
+  return bothVenuesSeen
+    ? unknownResult('NO_VENUE_PAIR', allMissing, 'Venue data present but nothing comparable could be read.')
+    : unknownResult('NO_USABLE_DATA', allMissing, 'No usable spot or futures market data for this row.');
 }
 
 /**
@@ -355,9 +506,13 @@ export function buildLeadScoreDisplay(raw) {
   const scoreText = unknown ? '--' : String(r.score);
   const display = unknown ? 'UNKNOWN' : `${scoreText} ${r.label}`;
 
+  const basis = LEAD_SCORE_BASES.includes(r.basis) ? r.basis : 'NO_USABLE_DATA';
+  const basisNote = typeof r.basisNote === 'string' && r.basisNote ? r.basisNote : 'Basis unavailable.';
+
   const lines = [
     `Lead Score: ${unknown ? 'UNKNOWN' : `${scoreText} / 100 · ${r.label}`}`,
     `Futures pressure on the spot move · direction: ${r.direction}`,
+    `Basis: ${basis} — ${basisNote}`,
     `Confidence: ${r.confidence} · evidence coverage ${Math.round(r.coverage * 100)}%`,
     r.evidence.length ? `Evidence: ${r.evidence.join(' · ')}` : 'Evidence: none',
     r.missing.length ? `Missing: ${r.missing.join(' · ')}` : 'Missing: none',
@@ -370,6 +525,8 @@ export function buildLeadScoreDisplay(raw) {
     scoreText,
     label: r.label,
     display,
+    basis,
+    basisNote,
     direction: r.direction,
     confidence: r.confidence,
     evidence: r.evidence,
@@ -377,6 +534,10 @@ export function buildLeadScoreDisplay(raw) {
     conflict: r.conflict,
     advisory: LEAD_SCORE_ADVISORY_NOTE,
     cssClass: `lead-score--${r.label.toLowerCase()}`,
+    // Degraded bases get a muted marker so a FUTURES_ONLY 70 never looks
+    // like a fully-evidenced 70 at a glance.
+    basisClass: `lead-basis--${basis.toLowerCase().replace(/_/g, '-')}`,
+    degraded: basis !== 'FULL_SPOT_FUTURES',
     tooltip: lines.join('\n'),
   };
 }

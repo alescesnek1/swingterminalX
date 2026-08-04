@@ -2355,11 +2355,16 @@ function renderList() {
   };
   const LEAD_UNAVAILABLE = {
     display: 'UNKNOWN', scoreText: '--', label: 'UNKNOWN', cssClass: 'lead-score--unknown',
-    tooltip: 'Lead Score: UNKNOWN\nThe Lead Score module is unavailable in this session.\nadvisory only — does not affect RADAR entry gates',
+    basis: 'NO_USABLE_DATA', basisClass: 'lead-basis--no-usable-data', degraded: true,
+    tooltip: 'Lead Score: UNKNOWN\nBasis: NO_USABLE_DATA — the Lead Score module is unavailable in this session.\nadvisory only — does not affect RADAR entry gates',
   };
+  // `degraded` marks a FUTURES_ONLY / SPOT_ONLY read so a partially-evidenced
+  // score never looks as solid as a full spot+futures one. The basis is always
+  // spelled out in the tooltip.
   const leadMarkup = (m) => {
     const v = m || LEAD_UNAVAILABLE;
-    return `<span class="lead-score ${_esc(v.cssClass)}" title="${_esc(v.tooltip)}">${_esc(v.display)}</span>`;
+    const cls = `lead-score ${v.cssClass || 'lead-score--unknown'} ${v.basisClass || ''}${v.degraded ? ' lead-score--degraded' : ''}`;
+    return `<span class="${_esc(cls.trim())}" title="${_esc(v.tooltip)}">${_esc(v.display)}</span>`;
   };
   // V7.4.5 — defensive timeframe extractor. The upstream payload
   // shape varies depending on which build branch in markets.js
@@ -12354,7 +12359,7 @@ const COLUMN_DEFS = {
   // label is exactly "Lead Score". Not sortable (only c24 is), never the
   // default sort, and it feeds nothing but this one cell.
   leadscore: { label: 'Lead Score', width: 84, tip: 'Advisory — futures pressure leading the spot move',                    align: 'right', dragOK: true,
-            tooltip: 'How strongly futures/perp pressure appears to be leading or amplifying the spot move. 0-100 with LOW / MED / HIGH / EXTREME, or UNKNOWN when the required data is missing. Hover a row cell for the evidence and missing-data list. Advisory only — does not affect RADAR entry gates.' },
+            tooltip: 'How strongly futures/perp pressure appears to be leading or amplifying the spot move. 0-100 with LOW / MED / HIGH / EXTREME, or UNKNOWN when the required data is missing. Hover a row cell for the basis, evidence and missing-data list. Basis is FULL_SPOT_FUTURES, FUTURES_ONLY (no matched spot leg), SPOT_ONLY (no futures venue), or UNKNOWN when nothing usable could be read. Advisory only — does not affect RADAR entry gates.' },
   // V8 ABACUS — the `spacer` bead is gone. The grid that needed a 1fr
   // slack-absorber no longer exists; columns float on raw pixel
   // coordinates over the void, so there is nothing left to absorb.
