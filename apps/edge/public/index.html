@@ -11,7 +11,7 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◈</text></svg>">
   <title>Swing Terminal Version X</title>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/terminal.css?v=6k9">
+  <link rel="stylesheet" href="css/terminal.css?v=6l1">
   
   <!-- Supabase CDN -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
@@ -148,20 +148,30 @@
 
     <!-- TABS -->
     <div id="tabs">
-      <div class="tab on" onclick="sv('scanner',this)">SCANNER</div>
-      <div class="tab" onclick="sv('radar',this)" data-target="view-radar">TRADING RADAR</div>
-      <div class="tab" onclick="sv('cockpit',this)" data-target="view-cockpit">COCKPIT</div>
-      <div class="tab" onclick="sv('charts',this)">TOP CHARTS</div>
-      <div class="tab" onclick="sv('bubbles',this)">BUBBLES</div>
-      <div class="tab" onclick="sv('heatmap',this)">HEATMAP</div>
-      <div class="tab" onclick="sv('movers',this)">MOVERS</div>
-      <div class="tab" onclick="sv('calendar',this)">CALENDAR</div>
-      <div class="tab" onclick="sv('bot',this)" data-target="view-bot" title="Paper Trading Sandbox - read-only safety mode">BOT FEED <span class="cnt pb-tab-pip" id="pb-tab-pip"></span></div>
-      <div class="tab" onclick="sv('alerts',this)">ALERTS <span class="cnt" id="abadge"></span></div>
-      <div class="tab" onclick="sv('livefeed',this)">LIVE FEED <span class="lf-tab-badge" id="lf-unread"></span></div>
-      <div class="tab" onclick="sv('regime',this)">REGIME</div>
-      <div class="tab" onclick="sv('gecko',this)">GECKO</div>
-      <div class="tab" data-tab="manual" onclick="sv('manual',this)" title="Interactive Manual — ELI5 explainer for every signal">MANUAL</div>
+      <div class="tab on" data-view="scanner" onclick="sv('scanner',this)">SCANNER</div>
+      <div class="tab" data-view="radar" onclick="sv('radar',this)" data-target="view-radar">TRADING RADAR</div>
+      <div class="tab" data-view="cockpit" onclick="sv('cockpit',this)" data-target="view-cockpit">COCKPIT</div>
+      <div class="tab" data-view="charts" onclick="sv('charts',this)">TOP CHARTS</div>
+      <div class="tab" data-view="bubbles" onclick="sv('bubbles',this)">BUBBLES</div>
+      <div class="tab" data-view="heatmap" onclick="sv('heatmap',this)">HEATMAP</div>
+      <div class="tab" data-view="movers" onclick="sv('movers',this)">MOVERS</div>
+      <div class="tab" data-view="calendar" onclick="sv('calendar',this)">CALENDAR</div>
+      <div class="tab" data-view="bot" onclick="sv('bot',this)" data-target="view-bot" title="Paper Trading Sandbox - read-only safety mode">BOT FEED <span class="cnt pb-tab-pip" id="pb-tab-pip"></span></div>
+      <div class="tab" data-view="alerts" onclick="sv('alerts',this)">ALERTS <span class="cnt" id="abadge"></span></div>
+      <div class="tab" data-view="livefeed" onclick="sv('livefeed',this)">LIVE FEED <span class="lf-tab-badge" id="lf-unread"></span></div>
+      <div class="tab" data-view="regime" onclick="sv('regime',this)">REGIME</div>
+      <div class="tab" data-view="gecko" onclick="sv('gecko',this)">GECKO</div>
+      <div class="tab" data-tab="manual" data-view="manual" onclick="sv('manual',this)" title="Interactive Manual — ELI5 explainer for every signal">MANUAL</div>
+      <!-- Tab personalization. Lives INSIDE #tabs (sticky to the right edge so
+           it survives horizontal scroll) but carries no data-view, so the
+           reorder engine never treats it as a tab. Order only — it creates no
+           view and switches nothing. -->
+      <div class="tab-tools" id="tab-tools">
+        <button type="button" class="tab-tools__btn" id="tab-reorder-toggle"
+                aria-pressed="false" title="Reorder the main tabs — order is saved in this browser only">⇄ TABS</button>
+        <button type="button" class="tab-tools__btn tab-tools__btn--reset" id="tab-reorder-reset"
+                hidden title="Restore the default tab order">RESET</button>
+      </div>
     </div>
 
     <!-- SCANNER -->
@@ -954,21 +964,22 @@
        that records every non-OK response and network failure, so it has to be
        in place before any other script issues a request. Type errors() in
        devtools for the full list of failures with reasons. -->
-  <script src="js/error-log.js?v=6k9"></script>
-  <script src="js/toast.js?v=6k9"></script>
+  <script src="js/error-log.js?v=6l1"></script>
+  <script src="js/toast.js?v=6l1"></script>
   <!-- auth-client.js must precede terminal.js: terminal.js calls
        window.AuthClient at load to restore a stored native session. -->
-  <script src="js/auth-client.js?v=6k9"></script>
-  <script src="js/admin-users-panel.js?v=6k9"></script>
-  <script type="module" src="/js/ai-analysis.js?v=6k9"></script>
-  <script type="module" src="/js/freshness-badge.js?v=6k9"></script>
-  <script type="module" src="/js/url-safety.js?v=6k9"></script>
-  <script type="module" src="/js/gecko-layout.js?v=6k9"></script>
-  <script type="module" src="/js/change-digest.js?v=6k9"></script>
-  <script type="module" src="/js/scanner-lead-score.js?v=6k9"></script>
-  <script type="module" src="/js/personal-watch.js?v=6k9"></script>
-  <script type="module" src="/js/price-history-signals-panel.js?v=6k9"></script>
-  <script type="module" src="/js/price-history-orderbook.js?v=6k9"></script>
-  <script src="js/terminal.js?v=6k9"></script>
+  <script src="js/auth-client.js?v=6l1"></script>
+  <script src="js/admin-users-panel.js?v=6l1"></script>
+  <script type="module" src="/js/ai-analysis.js?v=6l1"></script>
+  <script type="module" src="/js/freshness-badge.js?v=6l1"></script>
+  <script type="module" src="/js/url-safety.js?v=6l1"></script>
+  <script type="module" src="/js/gecko-layout.js?v=6l1"></script>
+  <script type="module" src="/js/change-digest.js?v=6l1"></script>
+  <script type="module" src="/js/scanner-lead-score.js?v=6l1"></script>
+  <script type="module" src="/js/tab-order.js?v=6l1"></script>
+  <script type="module" src="/js/personal-watch.js?v=6l1"></script>
+  <script type="module" src="/js/price-history-signals-panel.js?v=6l1"></script>
+  <script type="module" src="/js/price-history-orderbook.js?v=6l1"></script>
+  <script src="js/terminal.js?v=6l1"></script>
 </body>
 </html>
