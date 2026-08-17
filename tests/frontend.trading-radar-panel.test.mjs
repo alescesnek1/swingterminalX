@@ -448,9 +448,14 @@ test('Phase C.3: summary sections render BEFORE the raw Advanced block; detailed
 
 test('UI renders heatmap/data before Live Feed so operator sees market context earlier', () => {
   assert.ok(indexHtml.indexOf("sv('heatmap'") < indexHtml.indexOf("sv('livefeed'"));
-  const refreshBody = terminalJs.slice(terminalJs.indexOf('async function doRefresh()'));
+  // doRefresh() is now a thin in-flight-dedupe wrapper (Netlify cost control);
+  // the refresh body it guards lives in _doRefreshCore(). The ordering rule is
+  // unchanged — only the function holding it moved.
+  const coreStart = terminalJs.indexOf('async function _doRefreshCore()');
+  assert.ok(coreStart > 0, 'the refresh body is where the test expects it');
+  const refreshBody = terminalJs.slice(coreStart);
   const htmlOrder = refreshBody.indexOf('renderHeatmap()') < refreshBody.indexOf('LiveFeed.push');
-  assert.ok(htmlOrder, 'renderHeatmap must occur before LiveFeed.push in doRefresh');
+  assert.ok(htmlOrder, 'renderHeatmap must occur before LiveFeed.push in the refresh body');
 });
 
 test('Phase D1b: UI renders CoinGecko attention chip correctly based on metadata', () => {
