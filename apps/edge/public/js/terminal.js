@@ -154,6 +154,71 @@ document.addEventListener('click', (e) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────
+// POLL COST GOVERNOR
+//
+// Every recurring network poll in this file used to keep running at full
+// cadence while the browser tab was in the background. A terminal left open
+// overnight therefore kept hammering /api/context (a Postgres read),
+// /api/markets, /api/bot/fleet and /api/orderbook for hours with nobody
+// looking — which is what drains Netlify database + function credits.
+//
+// This gate is the single place that decides whether a *recurring* tick may
+// spend a request. It NEVER blocks a user-initiated or boot-time fetch, and
+// it NEVER changes what a fetch returns — a skipped tick is a deferred tick,
+// not a silent failure, and the counters below make the skipping visible
+// instead of leaving the operator guessing why the data stopped moving.
+// ─────────────────────────────────────────────────────────────
+
+// True when the page is being looked at. Non-browser contexts (tests) count
+// as active so extracting and calling these functions never blocks.
+function _pageIsActive() {
+  if (typeof document === 'undefined' || !document) return true;
+  // Only the explicit 'hidden' state defers a tick. Any other value — including
+  // an environment that does not report one at all — counts as active, so an
+  // unexpected Page Visibility quirk can only ever cost us a request, never
+  // silently freeze the terminal. No try/catch: neither read can throw.
+  return document.visibilityState !== 'hidden';
+}
+
+// Per-poll skip/run counters, exposed for the diagnostics panel and for
+// answering "why did the terminal stop updating while I was on another tab?".
+window.__pollGovernor = { skipped: {}, ran: {}, lastSkipAt: null, lastResumeAt: null };
+
+// Wraps one recurring tick. Returns true when the tick may run.
+// `name` is the poll's stable id, used for the counters and for the log line.
+function _pollTickAllowed(name) {
+  const gov = window.__pollGovernor;
+  if (_pageIsActive()) {
+    gov.ran[name] = (gov.ran[name] || 0) + 1;
+    return true;
+  }
+  gov.skipped[name] = (gov.skipped[name] || 0) + 1;
+  gov.lastSkipAt = Date.now();
+  // Log the first skip of a hidden stretch only — a per-tick log would be
+  // its own kind of noise, but a totally silent pause is worse.
+  if (gov.skipped[name] === 1 || gov.skipped[name] % 100 === 0) {
+    console.warn('[POLL_GOVERNOR] tab hidden — deferring poll', { poll: name, skipped: gov.skipped[name] });
+  }
+  return false;
+}
+
+// When the tab comes back, the deferred data is by definition stale, so the
+// market view is refreshed once immediately rather than waiting out the rest
+// of the current interval. Registered once; safe if the handler never fires.
+function _installPollGovernorVisibilityHook() {
+  if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return;
+  document.addEventListener('visibilitychange', () => {
+    if (!_pageIsActive()) return;
+    window.__pollGovernor.lastResumeAt = Date.now();
+    // Catch-up refresh for the market view only. Fleet / order book resume on
+    // their own next tick — they are panel-scoped and cheap to wait for.
+    if (typeof doRefresh === 'function') {
+      Promise.resolve(doRefresh()).catch((e) => console.warn('[POLL_GOVERNOR] resume refresh failed:', e && e.message));
+    }
+  });
+}
+
 // ========== LIVE FEED V4.1 — FULL TAB + NEWS INTEGRATION ==========
 const LiveFeed = {
   _events: [],
@@ -606,7 +671,10 @@ const LiveFeed = {
   startNewsLoop() {
     this.fetchNews();
     if (this._newsTimer) clearInterval(this._newsTimer);
-    this._newsTimer = setInterval(() => this.fetchNews(), this._newsFetchInterval);
+    this._newsTimer = setInterval(() => {
+      if (!_pollTickAllowed('news')) return;
+      this.fetchNews();
+    }, this._newsFetchInterval);
   },
 };
 window.LiveFeed = LiveFeed;
@@ -2940,6 +3008,8 @@ function _startOrderbookLive(d) {
   if (!onBinance) return;
   _obPollTimer = setInterval(() => {
     if (SEL !== d.id || !document.getElementById('orderbook-' + d.id)) { _stopOrderbookLive(); return; }
+    // A 1.5s book poll is only worth its cost while somebody is watching it.
+    if (!_pollTickAllowed('orderbook')) return;
     loadOrderbook(d, getBinanceLink(d), { silent: true });
   }, OB_POLL_MS);
 }
@@ -4065,6 +4135,15 @@ function sv(v, el) {
   // container once the tab becomes visible. Re-pack after reveal.
   if (activeViewName === 'bubbles') requestAnimationFrame(() => { try { renderBubbles(); } catch(e){} });
   if (activeViewName === 'manual') requestAnimationFrame(() => { try { initManual(); } catch(e){} });
+  // The 4s fleet poll belongs to the BOT and RADAR views. It used to be started
+  // on entering either view and never stopped, so a single visit left
+  // /api/bot/fleet being polled every 4s for the rest of the session from
+  // whatever view the operator moved on to. Stop it whenever neither view is
+  // showing; entering the view starts it again and refreshes immediately, so no
+  // data the operator can see is lost.
+  if (activeViewName !== 'bot' && activeViewName !== 'radar') {
+    try { _stopFleetPoll(); } catch (e) { console.warn('[Fleet] poll stop failed:', e && e.message); }
+  }
   if (activeViewName === 'bot') requestAnimationFrame(() => {
     try { refreshFleet(); _startFleetPoll(); } catch (e) { console.warn('[Fleet] init failed:', e && e.message); }
   });
@@ -4642,7 +4721,23 @@ function setAlertFilter(f, el) {
 
 document.addEventListener('refresh_now', () => { doRefresh(); });
 
-async function doRefresh() {
+// In-flight dedupe. Several independent triggers can land on the same refresh
+// (steady-state REST tick, 5-minute safety net, visibility resume, view switch,
+// manual refresh). Without this they each open their own /api/context +
+// /api/markets + /api/regime round trip, so one user action could cost three
+// Postgres reads. Callers still get a promise that resolves when the data is
+// live — they just share the one already running.
+let _refreshInFlight = null;
+function doRefresh() {
+  if (_refreshInFlight) {
+    window.__pollGovernor.dedupedRefreshes = (window.__pollGovernor.dedupedRefreshes || 0) + 1;
+    return _refreshInFlight;
+  }
+  _refreshInFlight = _doRefreshCore().finally(() => { _refreshInFlight = null; });
+  return _refreshInFlight;
+}
+
+async function _doRefreshCore() {
   document.getElementById('sts').textContent = 'FETCHING...';
   const live = await fetchData();
   if (live && live.length) {
@@ -8164,7 +8259,12 @@ async function _fleetFetch(method, path, body) {
 
 function _startFleetPoll() {
   if (Fleet.pollTimer) return;
-  Fleet.pollTimer = setInterval(refreshFleet, 4000);
+  // Only the RECURRING tick is gated — direct refreshFleet() calls from a view
+  // switch or an operator action always run.
+  Fleet.pollTimer = setInterval(() => {
+    if (!_pollTickAllowed('fleet')) return;
+    refreshFleet();
+  }, 4000);
 }
 function _stopFleetPoll() {
   if (Fleet.pollTimer) clearInterval(Fleet.pollTimer);
@@ -11974,7 +12074,10 @@ async function connectStream() {
     _paperbotControlRequest('state').catch((err) => {
       console.warn('[PaperBot] Dry-run control state unavailable:', err.message);
     });
-    _enableAggressivePoll();
+    // Steady state, NOT the 10s emergency cadence: the WebSocket is disabled by
+    // design in this build, so there is no outage to poll our way out of. See
+    // STREAM_REST_POLL_DEFAULT_MS for the cost bug this replaces.
+    _enableRestPoll();
     return;
   }
   if (window.STREAM_DISABLED) return;
@@ -12079,6 +12182,7 @@ function _scheduleReconnect() {
 // V7.4.7 — also pushes a synthetic detail-panel sync so the right-
 // hand pane updates even when no WS frame is arriving.
 async function _fallbackPollTick() {
+  if (!_pollTickAllowed('markets-fallback')) return;
   try { await doRefresh(); _rebuildSymbolIndex(); _syncDetailFromPoll(); }
   catch (e) { console.warn('[STREAM] fallback poll failed:', e && e.message); }
 }
@@ -12094,6 +12198,32 @@ async function _fallbackPollTick() {
 // resumes the long cadence.
 // ─────────────────────────────────────────────────────────────
 const STREAM_AGGRESSIVE_POLL_MS = 10 * 1000;
+// Steady-state REST cadence for the build where the legacy Fly.io WebSocket is
+// permanently disabled (LEGACY_FLY_STREAM_ENABLED === false).
+//
+// COST BUG THIS FIXES: connectStream() took the dead-infra branch and called
+// _enableAggressivePoll(), so the 10s *emergency* cadence became the permanent
+// steady state. _disableAggressivePoll() is only reached from the WS onopen
+// handler, which can never run in this build — so every open tab ran a full
+// doRefresh() every 10s forever. doRefresh() → /api/context (four Postgres
+// queries, up to 2000 ticker + 600 microstructure rows, Cache-Control:
+// no-store) plus /api/markets plus /api/regime. That is ~8,600 Postgres reads
+// per day per open tab, which is both the database-compute and the bandwidth
+// drain, and it kept the database from ever idling.
+//
+// 60s is the steady-state cadence: still a live terminal, 6× fewer reads, and
+// well inside the collector's own 3-minute publish cycle — the scanner cannot
+// miss a run at this cadence because no new run exists to miss. Overridable at
+// runtime via window.STREAM_REST_POLL_MS for a session that wants it faster.
+const STREAM_REST_POLL_DEFAULT_MS = 60 * 1000;
+function _streamRestPollMs() {
+  const override = Number(typeof window !== 'undefined' ? window.STREAM_REST_POLL_MS : NaN);
+  // Floor at the emergency cadence so an override can never be set to a value
+  // that reintroduces a hot loop.
+  if (Number.isFinite(override) && override >= STREAM_AGGRESSIVE_POLL_MS) return override;
+  return STREAM_REST_POLL_DEFAULT_MS;
+}
+let _restPollTimer = null;
 let _aggressivePollTimer = null;
 // V7.4.9 — cooldown so a sustained refresh outage doesn't log the same
 // aggressive-poll warning on every 10s tick (console-spam guard). We
@@ -12117,7 +12247,33 @@ function _syncDetailFromPoll() {
   _lastDetailSnapshot = { id, price: newPrice, panic: Number.isFinite(d._panic) ? d._panic : 0 };
 }
 
+// Steady-state REST tick for the WS-disabled build. Same work as the
+// aggressive tick, just on the slow cadence and skipped while the tab is
+// hidden (the governor logs the skip, so a paused terminal is visible).
+async function _restPollTick() {
+  if (!_pollTickAllowed('markets-rest')) return;
+  try { await doRefresh(); _rebuildSymbolIndex(); _syncDetailFromPoll(); }
+  catch (e) {
+    const now = Date.now();
+    if (now - _aggressivePollWarnAt >= STREAM_AGGRESSIVE_WARN_COOLDOWN_MS) {
+      _aggressivePollWarnAt = now;
+      console.warn('[STREAM] REST poll failed:', e && e.message);
+    }
+  }
+}
+
+function _enableRestPoll() {
+  if (_restPollTimer) return;
+  _restPollTimer = setInterval(_restPollTick, _streamRestPollMs());
+}
+
+function _disableRestPoll() {
+  if (_restPollTimer) clearInterval(_restPollTimer);
+  _restPollTimer = null;
+}
+
 async function _aggressivePollTick() {
+  if (!_pollTickAllowed('markets-aggressive')) return;
   // V7.4.8 — HARD guard: if the WS reconnected between the time the
   // close handler armed this timer and the time the tick fires, abort
   // immediately. A full doRefresh() blasts a fresh /api/markets payload
@@ -12160,6 +12316,7 @@ async function initTerminalApp() {
   if (_appRunning) return;
   _appRunning = true;
   loadTgConfig();
+  _installPollGovernorVisibilityHook();  // pause recurring polls while the tab is hidden
   initTabOrder();            // user-customized top tab order (personalization only)
   initColumnDnD();           // V7.3 — drag-to-reorder header
   initPanicManual();         // V7.3 — [?] info modal

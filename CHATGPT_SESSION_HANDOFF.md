@@ -1543,6 +1543,36 @@ email allowlist (§9), not a billing tier.
 ## 11. Known completed work / recent milestones
 
 From current git history (most recent first, condensed — see `git log` for full):
+- **Netlify credit-drain fix (LOCAL, UNPUSHED, branch `fix/netlify-credit-drain-audit`)**
+  — full audit in `docs/netlify-cost-audit.md`. Root cause: `connectStream()`
+  takes the dead-infra branch (`LEGACY_FLY_STREAM_ENABLED === false`, the Fly.io
+  WS is decommissioned) and called `_enableAggressivePoll()` — the **10s
+  emergency cadence** — whose only disable path is the WS `onopen` handler that
+  can never run in this build. So every open tab ran a full `doRefresh()` every
+  10 seconds forever, including in a hidden background tab: `/api/context`
+  (a Node function doing **four Postgres queries**, up to 2,000 ticker + 600
+  microstructure rows, `no-store`) plus `/api/markets` plus `/api/regime`.
+  ~8,600 Postgres reads/day/tab, which is the database-compute, functions-compute
+  and bandwidth bill at once, and it kept the database from ever idling.
+  Secondary: `_stopFleetPoll()` was **never called anywhere**, so one visit to
+  the BOT or RADAR view left `/api/bot/fleet` polled every 4s for the rest of
+  the session; and `/api/orderbook` polled every 1.5s in hidden tabs.
+  Fixes: a poll cost governor (`_pageIsActive()` / `_pollTickAllowed()`) that
+  defers every *recurring* tick while the tab is hidden, counts and logs the
+  skips on `window.__pollGovernor`, and does one catch-up refresh on
+  `visibilitychange`; a 60s steady-state cadence (`_enableRestPoll()`,
+  `STREAM_REST_POLL_DEFAULT_MS`, override floored at the emergency cadence)
+  replacing the 10s one; in-flight dedupe in `doRefresh()` (body moved to
+  `_doRefreshCore()`); and `_stopFleetPoll()` now actually called when neither
+  owning view is open. Backend: `/api/context` gained a 30s in-function read
+  memo (ceiling 180s, `CONTEXT_READ_CACHE_MS=0` disables) plus concurrent-read
+  coalescing — safe because the read takes **no identity input**, auth is still
+  enforced before the memo, `freshness` is **recomputed on every serve** so a
+  memo can never claim FRESH once stale, and failures are never memoized or
+  masked. Untouched on purpose: trading/order path, ENTRY_READY, Telegram,
+  `cron-alerts.mjs`, auth, every env var, every migration. Env/dashboard
+  recommendations are written up but **not applied** — the highest-value one is
+  verifying database scale-to-zero/autosuspend in the Netlify dashboard.
 - **Customizable top tab order (LOCAL, UNPUSHED, branch `feat/custom-tab-order`)**
   — the 14 main nav tabs can be reordered and the order persists per browser in
   `localStorage['terminalX.tabOrder.v1']`. Resolution lives in the pure

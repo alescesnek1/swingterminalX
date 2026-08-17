@@ -192,8 +192,14 @@ test('every versioned asset carries the same single bumped cache-bust token', ()
   // unpaired row; basis surfaced in the cell tooltip + .lead-score--degraded).
   // 6k9 -> 6l1 for the customizable top tab order (new js/tab-order.js,
   // data-view ids + reorder controls in index.html, .tab-tools / .tab-move
-  // styles in terminal.css).
-  assert.equal(tokens[0], '6l1', 'token was bumped for this JS change');
+  // styles in terminal.css); 6l1 -> 6l2 for the Netlify credit-drain fix
+  // (poll cost governor, 60s steady-state cadence replacing the permanent 10s
+  // emergency poll, refresh in-flight dedupe and fleet-poll lifecycle in
+  // terminal.js). This bump is load-bearing for that fix specifically: without
+  // it a returning user keeps serving the cached terminal.js for up to an hour
+  // (netlify.toml sets max-age=3600 on /*.js), so the tabs actually causing the
+  // drain would go on polling every 10s until a hard reload.
+  assert.equal(tokens[0], '6l2', 'token was bumped for this JS change');
 });
 
 // The measurement budget targets the deepest drawdowns, and DISLOCATION is 20% of
