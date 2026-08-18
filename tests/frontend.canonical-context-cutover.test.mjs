@@ -199,7 +199,10 @@ test('every versioned asset carries the same single bumped cache-bust token', ()
   // it a returning user keeps serving the cached terminal.js for up to an hour
   // (netlify.toml sets max-age=3600 on /*.js), so the tabs actually causing the
   // drain would go on polling every 10s until a hard reload.
-  assert.equal(tokens[0], '6l2', 'token was bumped for this JS change');
+  // 6l2 -> 6l3 for the disabled Arkham Intel skeleton (the advisory placeholder
+  // panel and its one manual status button in terminal.js, .arkham-intel styles
+  // in terminal.css).
+  assert.equal(tokens[0], '6l3', 'token was bumped for this JS change');
 });
 
 // The measurement budget targets the deepest drawdowns, and DISLOCATION is 20% of
