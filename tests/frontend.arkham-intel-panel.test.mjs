@@ -13,7 +13,10 @@ const indexHtml = fs.readFileSync(new URL('../apps/edge/public/index.html', impo
 const terminalCss = fs.readFileSync(new URL('../apps/edge/public/css/terminal.css', import.meta.url), 'utf8');
 
 test('the panel is mounted in the RADAR focus card, after the server verdict', () => {
-  assert.match(terminalJs, /\$\{_cpRadarStateSlotHtml\(f\.symbol\)\}\n\s*\$\{_arkhamIntelSlotHtml\(f\.symbol\)\}/);
+  // `\s*` rather than `\n\s*`: the checked-out working copy has CRLF line endings
+  // on Windows (repo autocrlf), and only whitespace can match between the two
+  // slots, so this still asserts the mount is immediately after the server verdict.
+  assert.match(terminalJs, /\$\{_cpRadarStateSlotHtml\(f\.symbol\)\}\s*\$\{_arkhamIntelSlotHtml\(f\.symbol\)\}/);
   assert.match(terminalJs, /function _arkhamIntelSlotHtml\(symbol\)/);
   assert.match(terminalJs, /id="cockpit-arkham-intel-slot"/);
 });
