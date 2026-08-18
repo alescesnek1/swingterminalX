@@ -1543,6 +1543,37 @@ email allowlist (§9), not a billing tier.
 ## 11. Known completed work / recent milestones
 
 From current git history (most recent first, condensed — see `git log` for full):
+- **Arkham Intel skeleton (LOCAL, UNPUSHED, branch `feat/arkham-intel-skeleton`)**
+  — advisory on-chain entity intelligence (Arkham, `api.arkm.com`), **disabled by
+  default and NOT deployed**. Full research + design in
+  `docs/arkham-intel-integration.md`: access is request/trial-based (not
+  self-serve); subscriptions are credit-based and publicly "start at $100" but no
+  per-tier or per-credit USD price is public; billing is per-call **and per-row**
+  (a loose `/transfers` query is an unbounded bill) and WebSocket v2 charges **2
+  credits per delivered transfer**, so no stream is used; heavy endpoints
+  (transfers, token data, search, counterparties, flow, batch) are capped at **1
+  req/s**, which rules out any fan-out over a coin list. Auth is an `API-Key:`
+  header. New: `netlify/functions/_arkham-client.mjs` (single-host allowlist,
+  bounded, **no retry**, per-instance credit guard, key never logged/returned) and
+  `netlify/functions/arkham-token-intel.mjs` → `/api/arkham-token-intel?symbol=…`,
+  auth-gated the same way as `/api/cockpit-radar-state`, answering HTTP 200
+  `DISABLED` / `NOT_CONFIGURED` / `COST_CAPPED` / `IDENTITY_UNRESOLVED` with **no
+  external call**. Defaults are all off: `ARKHAM_ENABLED=false`,
+  `ARKHAM_DAILY_CREDIT_CAP=0`, `ARKHAM_CACHE_TTL_HOURS=24`,
+  `ARKHAM_MAX_SYMBOLS_PER_REQUEST=1` — **none of these env vars has been set**.
+  UI: a disabled "Arkham Intel" placeholder card in the Cockpit RADAR focus panel
+  that never fetches on render; its only request is one manual "Check Arkham Intel
+  status" button. **Advisory only** — nothing touches RADAR, `ENTRY_READY`, strict
+  Absorb, Reclaim, Telegram, alerts, Scanner ranking/Lead Score/sorting,
+  valuation, the gate checklist, or any order path, and
+  `tests/arkham.safety.test.mjs` walks the source tree to keep it that way. No
+  scheduler, no cron, no background collector, no WebSocket, no new dependency, no
+  migration. Arkham's API Terms licence use to **internal business purposes** and
+  forbid redistribution to third parties, which is a second, independent reason
+  Arkham data may never reach Telegram or any public artifact. Blocking item
+  before it may ever be enabled: the in-memory credit guard counts per warm
+  instance, so it must be replaced by a durable Netlify Blobs counter first (see
+  the checklist in the doc).
 - **Netlify credit-drain fix (LOCAL, UNPUSHED, branch `fix/netlify-credit-drain-audit`)**
   — full audit in `docs/netlify-cost-audit.md`. Root cause: `connectStream()`
   takes the dead-infra branch (`LEGACY_FLY_STREAM_ENABLED === false`, the Fly.io

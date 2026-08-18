@@ -5705,10 +5705,154 @@ function _cpRadarFocusHtml() {
     </div>
     ${_cpRadarDataInsightHtml(f)}
     ${_cpRadarStateSlotHtml(f.symbol)}
+    ${_arkhamIntelSlotHtml(f.symbol)}
     ${_liveMicroSlotHtml('cockpit-live-microstructure-slot', _resolveLiveMicroTarget(f))}
     <button type="button" id="cockpit-import-radar" class="cockpit-primary-btn">Import this RADAR setup</button>
   </div>`;
 }
+// ── Cockpit: Arkham Intel (DISABLED PLACEHOLDER) ─────────────────────────────
+// Advisory on-chain entity intelligence (entity labels, holder concentration,
+// exchange netflow, whale transfers, counterparties, risk context) from Arkham.
+//
+// The backend route /api/arkham-token-intel is DISABLED BY DEFAULT and answers
+// `status: 'DISABLED'` without making any external call, so this panel paints a
+// static placeholder and NEVER fetches on render. The one and only network call
+// is the explicit "Check Arkham Intel status" button: one request, one coin, no
+// polling, no auto-refresh, no retry, no interval. That shape is deliberate —
+// this terminal just paid for a Netlify credit drain and Arkham itself bills per
+// credit, so nothing here may become a background reader.
+//
+// ADVISORY ONLY. Nothing in this block feeds ENTRY_READY, RADAR, strict Absorb,
+// Reclaim, Telegram, alerts, the Scanner Lead Score, the Scanner ranking or
+// default sort, the RADAR/Value valuation, the gate checklist, or any order
+// path. It renders text a human reads and nothing else.
+const ARKHAM_INTEL_TIMEOUT_MS = 6000;
+const ARKHAM_INTEL_DISABLED_MSG = 'Arkham Intel disabled — on-chain entity intelligence can be enabled after API access and cost caps are configured.';
+// Manual checks only: this map is a paint cache for the button result, not a
+// poll cache. Nothing reads it on a timer.
+const _arkhamIntelState = new Map();
+const _arkhamIntelInFlight = new Set();
+
+function _arkhamIntelSlotHtml(symbol) {
+  const sym = String(symbol || '').toUpperCase();
+  const model = (sym && _arkhamIntelState.get(sym)) || { state: 'placeholder' };
+  return `<div class="arkham-intel" id="cockpit-arkham-intel-slot" data-arkham-symbol="${_esc(sym)}">${_arkhamIntelInnerHtml(model, sym)}</div>`;
+}
+
+// The future panel structure, rendered now with every field UNKNOWN so the shape
+// is reviewable before any credit is ever spent. A field that was not read stays
+// UNKNOWN — never 0, never a directional claim.
+function _arkhamIntelFieldsHtml(intel) {
+  const i = intel || {};
+  const val = (v) => (v === null || v === undefined || v === '' ? 'UNKNOWN' : String(v));
+  const ent = i.entity || null;
+  const hc = i.holderConcentration || null;
+  const nf = i.exchangeNetflow || null;
+  const rf = i.riskFlags || null;
+  const tf = i.tokenFlowSummary || null;
+  return _cpRadarStateRow('Entity summary', ent ? `${val(ent.name)} · ${val(ent.type)}` : 'UNKNOWN')
+    + _cpRadarStateRow('Holder concentration', hc ? `top holders ${val(hc.topHoldersPct)}% · holders ${val(hc.holderCount)}` : 'UNKNOWN')
+    + _cpRadarStateRow('Exchange netflow', nf ? `net ${val(nf.netUsd)} USD (${val(nf.windowHours)}h)` : 'UNKNOWN')
+    + _cpRadarStateRow('Whale transfers', Array.isArray(i.whaleTransfers) && i.whaleTransfers.length ? `${i.whaleTransfers.length} in window` : 'UNKNOWN')
+    + _cpRadarStateRow('Top counterparties', Array.isArray(i.counterparties) && i.counterparties.length ? `${i.counterparties.length} labelled` : 'UNKNOWN')
+    + _cpRadarStateRow('Risk flags', rf ? `${val(rf.level)} (${val(rf.score)})` : 'UNKNOWN')
+    + _cpRadarStateRow('Token flow summary', tf ? `${val(tf.direction)} · net ${val(tf.netUsd)} USD` : 'UNKNOWN')
+    + _cpRadarStateRow('Last updated', val(i.lastUpdated));
+}
+
+function _arkhamIntelInnerHtml(model, symbol) {
+  const sym = String(symbol || (model && model.symbol) || '').toUpperCase();
+  const title = '<div class="cp-radar-insight__title">Arkham Intel <span class="cp-radar-insight__ctx">on-chain entity intelligence · advisory only</span></div>';
+  const advisory = '<div class="cp-radar-insight__row cp-radar-insight__note">Advisory only — does not affect ENTRY_READY, RADAR, strict Absorb, Reclaim, Telegram, alerts, Scanner ranking, or any order path. Not investment advice.</div>';
+  const button = `<button type="button" id="cockpit-arkham-check" class="arkham-intel__btn"${sym ? '' : ' disabled'}>Check Arkham Intel status</button>`;
+  const wrap = (inner) => `<div class="cp-radar-insight arkham-intel__card">${title}${inner}${advisory}${button}</div>`;
+
+  const state = (model && model.state) || 'placeholder';
+  // Default paint: no request has been made and none will be made on its own.
+  if (state === 'placeholder') {
+    return wrap(`<div class="cp-radar-insight__row cp-radar-insight__note">${_esc(ARKHAM_INTEL_DISABLED_MSG)}</div>`
+      + '<div class="cp-radar-insight__row cp-radar-insight__note">No request has been made. This panel never polls — use the button below for a single on-demand status read.</div>'
+      + _arkhamIntelFieldsHtml(null));
+  }
+  if (state === 'checking') {
+    return wrap('<div class="cp-radar-insight__row cp-radar-insight__note">Checking the Arkham Intel backend status…</div>' + _arkhamIntelFieldsHtml(null));
+  }
+  if (state === 'auth') {
+    return wrap('<div class="cp-radar-insight__row cp-radar-insight__note">Sign in to read the Arkham Intel backend status.</div>' + _arkhamIntelFieldsHtml(null));
+  }
+  // A failed status read is its own fact and must never look like "no on-chain activity".
+  if (state === 'error') {
+    return wrap(`<div class="cp-radar-insight__row cp-radar-insight__note"><b style="color:#ffaa00;">Arkham status read failed</b> — ${_esc((model && model.message) || 'unknown error')}. This is a failed read, not an absence of on-chain activity.</div>`
+      + _arkhamIntelFieldsHtml(null));
+  }
+  // Backend answered. DISABLED / NOT_CONFIGURED / COST_CAPPED / IDENTITY_UNRESOLVED
+  // are all deliberate off positions, and each names what the owner would change.
+  const body = model && model.body ? model.body : {};
+  const status = String(body.status || 'UNKNOWN').toUpperCase();
+  const offReason = status === 'DISABLED' ? ARKHAM_INTEL_DISABLED_MSG
+    : status === 'NOT_CONFIGURED' ? 'Arkham Intel is enabled but no API key is configured on the server — no request was made.'
+      : status === 'COST_CAPPED' ? 'Arkham Intel is enabled but its daily credit cap is 0, so no credits may be spent — no request was made.'
+        : status === 'IDENTITY_UNRESOLVED' ? 'This coin has no confirmed CoinGecko pricing ID, and Arkham token lookups are keyed by that id. A ticker alone is ambiguous across chains and is never guessed.'
+          : status === 'UPSTREAM_ERROR' ? `Arkham lookup failed (${_esc(body.reason || 'unknown reason')}). This is a failed read, not an absence of on-chain activity.`
+            : null;
+  const head = offReason
+    ? `<div class="cp-radar-insight__row cp-radar-insight__note"><b>${_esc(status)}</b> — ${offReason}</div>`
+    : `<div class="cp-radar-insight__row cp-radar-insight__note"><b class="cp-radar-insight__pos">${_esc(status)}</b> — advisory on-chain context for ${_esc(body.symbol || sym || '--')}.</div>`;
+  const missing = Array.isArray(body.missing) && body.missing.length
+    ? `<div class="cp-radar-insight__row cp-radar-insight__note">Missing data: ${_esc(body.missing.join(', '))}</div>`
+    : '';
+  return wrap(head + _arkhamIntelFieldsHtml(body.intel) + missing);
+}
+
+function _arkhamIntelPaint(symbol, model) {
+  if (symbol) _arkhamIntelState.set(symbol, { ...model, symbol });
+  const slot = document.getElementById('cockpit-arkham-intel-slot');
+  if (slot && (slot.getAttribute('data-arkham-symbol') || '') === String(symbol || '')) {
+    slot.innerHTML = _arkhamIntelInnerHtml(_arkhamIntelState.get(symbol) || model, symbol);
+  }
+}
+
+// ONE on-demand status read, triggered only by the button. No retry, no timer,
+// no follow-up call. Every failure is both rendered where the user is looking
+// and logged (console + central error log).
+async function _checkArkhamIntel(symbol) {
+  const sym = String(symbol || '').toUpperCase();
+  if (!sym) return;
+  if (_arkhamIntelInFlight.has(sym)) return;   // one in-flight check per coin
+  _arkhamIntelInFlight.add(sym);
+  _arkhamIntelPaint(sym, { state: 'checking' });
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ARKHAM_INTEL_TIMEOUT_MS);
+  try {
+    const authHeaders = await _getAuthHeaders();
+    if (!authHeaders.Authorization) { _arkhamIntelPaint(sym, { state: 'auth' }); return; }
+    const r = await fetch(`/api/arkham-token-intel?symbol=${encodeURIComponent(sym)}`, { signal: ctrl.signal, headers: { 'Accept': 'application/json', ...authHeaders } });
+    let body = null; try { body = await r.json(); } catch { /* fall back to the HTTP status as the reason */ }
+    if (!r.ok || !body || body.ok !== true) {
+      const reason = (body && body.reason) || `HTTP ${r.status}`;
+      console.warn('[ARKHAM-INTEL] status read rejected:', r.status, sym, reason);
+      window.ErrorLog?.record({
+        level: 'warn', kind: 'fetch', title: 'Arkham Intel status read rejected',
+        reason: String(reason), endpoint: '/api/arkham-token-intel',
+      });
+      _arkhamIntelPaint(sym, { state: 'error', message: String(reason) });
+      return;
+    }
+    _arkhamIntelPaint(sym, { state: 'answered', body });
+  } catch (e) {
+    const message = e && e.name === 'AbortError' ? `timed out after ${ARKHAM_INTEL_TIMEOUT_MS}ms` : (e && e.message) || 'network error';
+    console.warn('[ARKHAM-INTEL] status read failed:', sym, message);
+    window.ErrorLog?.record({
+      level: 'warn', kind: 'fetch', title: 'Arkham Intel status read failed',
+      reason: String(message), endpoint: '/api/arkham-token-intel',
+    });
+    _arkhamIntelPaint(sym, { state: 'error', message });
+  } finally {
+    clearTimeout(timer);
+    _arkhamIntelInFlight.delete(sym);
+  }
+}
+
 // Live scanner price for the "Track scanner coin" search box.
 function _cpUpdateScannerPrice() {
   const el = document.getElementById('cockpit-scanner-price');
@@ -6718,6 +6862,13 @@ function initCockpit() {
   document.getElementById('cockpit-radar-focus')?.addEventListener('click', (e) => {
     if (e.target.closest('#cockpit-open-radar')) {
       _cpOpenTradingRadar();
+      return;
+    }
+    // Arkham Intel: one explicit, on-demand status read. Never automatic.
+    if (e.target.closest('#cockpit-arkham-check')) {
+      const slot = document.getElementById('cockpit-arkham-intel-slot');
+      const sym = (slot && slot.getAttribute('data-arkham-symbol')) || '';
+      try { _checkArkhamIntel(sym); } catch (err) { console.warn('[ARKHAM-INTEL] check failed:', err && err.message); }
       return;
     }
     if (!e.target.closest('#cockpit-import-radar')) return;
