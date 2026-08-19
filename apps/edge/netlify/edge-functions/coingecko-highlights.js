@@ -45,6 +45,11 @@ const SECTION_VALUE_MODE = {
   trending_categories: 'category',
 };
 
+// Diagnostic token emitted when a row carries a 24h % magnitude but no trusted
+// direction signal. Exported so tests and callers can match on the token without
+// depending on the human-readable tail of the message.
+export const CHANGE_DIRECTION_UNKNOWN = 'CHANGE_DIRECTION_UNKNOWN';
+
 export function sectionValueMode(key) {
   return SECTION_VALUE_MODE[key] || 'unknown';
 }
@@ -58,7 +63,7 @@ export function parseCoinGeckoHighlights(html) {
       fetchedAt: new Date().toISOString(),
       stale: true,
       sections: [],
-      diagnostics: { parserVersion: 1, sectionCount: 0, itemCount: 0, warnings: ['HTML payload is empty or invalid'] }
+      diagnostics: { parserVersion: 2, sectionCount: 0, itemCount: 0, warnings: ['HTML payload is empty or invalid'] }
     };
   }
 
@@ -106,6 +111,7 @@ export function parseCoinGeckoHighlights(html) {
       const key = current.title.toLowerCase().replace(/ /g, '_');
       const priceCount = items.filter(i => i.priceText).length;
       const change24hCount = items.filter(i => i.change24hText).length;
+      const unknownDirectionCount = items.filter(i => i.change24hDirectionUnknown).length;
       sections.push({
         key,
         title: current.title,
@@ -117,10 +123,20 @@ export function parseCoinGeckoHighlights(html) {
           change24hCount,
           missingPriceCount: items.length - priceCount,
           missingChange24hCount: items.length - change24hCount,
+          // Rows that carried a % magnitude but no trusted direction markup.
+          // They are counted as missing change24h above - never as a gain.
+          unknownDirectionCount,
           valueMode: sectionValueMode(key)
         }
       });
       totalItems += items.length;
+      if (unknownDirectionCount > 0) {
+        warnings.push(
+          CHANGE_DIRECTION_UNKNOWN + ": section '" + current.title + "' had " +
+          unknownDirectionCount +
+          " row(s) with a 24h % value but no trusted direction markup; change24hPct left null."
+        );
+      }
     } else {
       warnings.push(`Section '${current.title}' found but no items extracted.`);
     }
@@ -134,7 +150,7 @@ export function parseCoinGeckoHighlights(html) {
     stale: false,
     sections,
     diagnostics: {
-      parserVersion: 1,
+      parserVersion: 2,
       sectionCount: sections.length,
       itemCount: totalItems,
       warnings
@@ -272,11 +288,18 @@ function parseRawTextIntoItem(item) {
   // Try to extract change
   let change24hPct = null;
   let change24hText = '';
+  // True only when the row DOES carry a % magnitude but its direction could not
+  // be established from a trusted signal. Drives the parser-level warning.
+  let change24hDirectionUnknown = false;
   const pctMatch = text.match(/([+-]?\s*[0-9,.]+)\s*%/);
   
   if (pctMatch) {
       let valStr = pctMatch[1].replace(/\s/g, '').replace(/,/g, '');
-      let sign = 1;
+      // Direction is resolved per branch below, with NO default on purpose.
+      // It must never fall back to +1: an unsigned "27%" whose colour markup we
+      // failed to recognise would then be published as a +27% gain when the real
+      // move was -27%. detectChangeDirection() returns 0 when it cannot tell.
+      let sign;
       if (valStr.startsWith('-')) {
           sign = -1;
           valStr = valStr.substring(1);
@@ -288,15 +311,26 @@ function parseRawTextIntoItem(item) {
           // CoinGecko's direction markup (color class / brand hex / arrow),
           // never from words like "red"/"down"/"fall" that can legitimately
           // appear inside a coin or category name.
-          const dir = detectChangeDirection(htmlStr);
-          if (dir < 0) sign = -1;
-          else if (dir > 0) sign = 1;
+          //
+          // The section heading ("Top Gainers" / "Top Losers") is deliberately
+          // NOT used as a direction source: this function has no section context,
+          // and a heading is a layout label rather than a per-row guarantee.
+          // Adding it would be a new trust assumption, not a fix.
+          sign = detectChangeDirection(htmlStr);
       }
       
       const num = parseFloat(valStr);
       if (!isNaN(num)) {
-          change24hPct = sign * num;
-          change24hText = (sign === 1 ? '+' : '-') + valStr + '%';
+          if (sign === 1 || sign === -1) {
+              change24hPct = sign * num;
+              change24hText = (sign === 1 ? '+' : '-') + valStr + '%';
+          } else {
+              // FAIL CLOSED: a magnitude with no trusted direction is UNKNOWN,
+              // not a gain. Leave the number null AND the display text empty so
+              // the UI renders a neutral dash instead of a green gain, and flag
+              // the row so the parser response carries a visible warning.
+              change24hDirectionUnknown = true;
+          }
       }
   }
   
@@ -342,6 +376,7 @@ function parseRawTextIntoItem(item) {
     priceText,
     change24hText,
     change24hPct,
+    change24hDirectionUnknown,
     href: item.href,
     rawText: text
   };
