@@ -50,6 +50,13 @@ const NO_FALLBACK_BRIDGE_REASONS = new Set([
   'INVALID_ORDERBOOK_PAIR',
 ]);
 
+import {
+  costGuardHeaders,
+  noteCostBreakerBlock,
+  priceHistoryReadsAllowed,
+  REASON_DB_HISTORY_READS_DISABLED,
+} from './_cost-breaker.mjs';
+
 async function loadAuth() { return await import('./_auth.mjs'); }
 async function loadPriceHistory() { return await import('./_price-history.mjs'); }
 async function loadOrderbookClient() { return await import('./_orderbook-client.mjs'); }
@@ -112,6 +119,23 @@ export async function runAdminPriceHistorySignals(req, deps = {}) {
   const confirmations = boundedInt(url.searchParams.get('confirmations'), 2, 1, 10);
   const pairParam = url.searchParams.get('pair');
   const marketParam = url.searchParams.get('market');
+
+  // Emergency cost breaker: after auth, before the storage module is imported.
+  // Reported as an explicit disabled state with UNKNOWN signals — never
+  // DB_UNAVAILABLE (the database is fine; we declined to read) and never a
+  // NO_ABSORPTION / NOT_CONFIRMED reading, which would be a bearish verdict
+  // invented out of missing data.
+  if (!priceHistoryReadsAllowed(deps.env || process.env)) {
+    noteCostBreakerBlock('admin_price_history_signals', REASON_DB_HISTORY_READS_DISABLED);
+    return new Response(JSON.stringify({
+      ok: true, disabled: true, symbol, status: 'HISTORY_DISABLED',
+      reason: REASON_DB_HISTORY_READS_DISABLED,
+      points: 0,
+      reclaim: { signal: 'UNKNOWN', status: 'UNKNOWN', reason: REASON_DB_HISTORY_READS_DISABLED },
+      absorption: { signal: 'UNKNOWN', status: 'UNKNOWN', reason: REASON_DB_HISTORY_READS_DISABLED },
+      orderbookMode: 'unavailable', orderbookReason: REASON_DB_HISTORY_READS_DISABLED,
+    }), { status: 200, headers: costGuardHeaders(REASON_DB_HISTORY_READS_DISABLED, headers(req)) });
+  }
 
   let reads = deps.reads;
   if (!reads) {

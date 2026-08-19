@@ -19,6 +19,19 @@
 //   - No trading, RADAR, reclaim/absorption, alert, or Telegram side effects
 //     of any kind live in this file.
 import { getDb } from './_db.mjs';
+// Emergency cost breaker. Every export below is a Postgres round trip, so the
+// gate lives HERE rather than only at the endpoints: a caller that forgets to
+// check the flag still cannot connect, fetch, read or write. See
+// _cost-breaker.mjs for why an under-5-minute cadence is what actually bills.
+import {
+  noteCostBreakerBlock,
+  priceHistoryMetaReadsAllowed,
+  priceHistoryPruneAllowed,
+  priceHistoryReadsAllowed,
+  priceHistoryWritesAllowed,
+  REASON_DB_HISTORY_READS_DISABLED,
+  REASON_PRICE_HISTORY_DISABLED,
+} from './_cost-breaker.mjs';
 
 export const ALLOWED_SNAPSHOT_STATUSES = Object.freeze(['ok', 'partial', 'failed']);
 const ALLOWED_SNAPSHOT_STATUSES_SET = new Set(ALLOWED_SNAPSHOT_STATUSES);
@@ -263,6 +276,12 @@ function buildBatchInsertQuery(rowCount) {
  * effects — this is a storage write only.
  */
 export async function writeMarketPriceSnapshot(input, deps = {}) {
+  // Cost breaker FIRST — before validation, before getDb(), before anything
+  // that could open a connection. PRICE_HISTORY_WRITE_ENABLED must be exactly
+  // 'true'; unset means no write can happen no matter what the caller passes.
+  if (!priceHistoryWritesAllowed(deps.env || process.env)) {
+    return { ...noteCostBreakerBlock('price_history_write', REASON_PRICE_HISTORY_DISABLED), written: false, inserted: 0, dropped: 0, duplicates: 0 };
+  }
   const getDbImpl = deps.getDbImpl || getDb;
   const { source, sampledAt, rows, metadata, storeRawMeta } = input && typeof input === 'object' ? input : {};
 
@@ -342,6 +361,12 @@ export async function writeMarketPriceSnapshot(input, deps = {}) {
  * { ok:false, reason }.
  */
 export async function listRecentPricePoints(opts = {}, deps = {}) {
+  // Non-critical historical read: a browser panel can drive this repeatedly, so
+  // it degrades to a named disabled reason (the caller renders UNKNOWN) rather
+  // than waking the database. Never a fabricated point and never a 500.
+  if (!priceHistoryReadsAllowed(deps.env || process.env)) {
+    return { ...noteCostBreakerBlock('price_history_points_read', REASON_DB_HISTORY_READS_DISABLED), points: [] };
+  }
   const getDbImpl = deps.getDbImpl || getDb;
   const rawSymbol = typeof opts.symbol === 'string' ? opts.symbol.trim().toUpperCase() : '';
   if (!rawSymbol) return { ok: false, reason: 'MISSING_SYMBOL' };
@@ -391,6 +416,9 @@ const DEFAULT_BATCH_POINTS_PER_SYMBOL = 60;
  *   symbolsDropped } or { ok:false, reason }. Never throws.
  */
 export async function listRecentPricePointsForSymbols(opts = {}, deps = {}) {
+  if (!priceHistoryReadsAllowed(deps.env || process.env)) {
+    return { ...noteCostBreakerBlock('price_history_batch_read', REASON_DB_HISTORY_READS_DISABLED), bySymbol: new Map(), symbolsRequested: 0, symbolsReturned: 0, symbolsDropped: 0 };
+  }
   const getDbImpl = deps.getDbImpl || getDb;
   const requested = Array.isArray(opts.symbols) ? opts.symbols : null;
   if (!requested) return { ok: false, reason: 'INVALID_SYMBOLS' };
@@ -459,6 +487,9 @@ export async function listRecentPricePointsForSymbols(opts = {}, deps = {}) {
  * { ok:true, snapshots } or { ok:false, reason }.
  */
 export async function listRecentSnapshots(opts = {}, deps = {}) {
+  if (!priceHistoryReadsAllowed(deps.env || process.env)) {
+    return { ...noteCostBreakerBlock('price_history_snapshots_read', REASON_DB_HISTORY_READS_DISABLED), snapshots: [] };
+  }
   const getDbImpl = deps.getDbImpl || getDb;
   const limit = Math.min(Math.max(1, Number.isFinite(opts.limit) ? Math.trunc(opts.limit) : 50), 200);
 
@@ -493,6 +524,12 @@ export async function listRecentSnapshots(opts = {}, deps = {}) {
  * source) or { ok:false, reason }. Never throws.
  */
 export async function getLatestSnapshotAt(opts = {}, deps = {}) {
+  // The collector's own min-spacing guard. Allowed whenever collection or
+  // history reads are on, so enabling collection never requires a second flag
+  // for the one read that stops it double-writing.
+  if (!priceHistoryMetaReadsAllowed(deps.env || process.env)) {
+    return { ...noteCostBreakerBlock('price_history_latest_read', REASON_DB_HISTORY_READS_DISABLED), sampledAt: null };
+  }
   const getDbImpl = deps.getDbImpl || getDb;
   const sourceTag = typeof opts.source === 'string' ? opts.source.trim() : '';
   if (!sourceTag) return { ok: false, reason: 'MISSING_SOURCE' };
@@ -528,6 +565,11 @@ export async function getLatestSnapshotAt(opts = {}, deps = {}) {
  * on DB failure. Never throws.
  */
 export async function pruneSnapshotsOlderThan(opts = {}, deps = {}) {
+  // Deletes rows, so it is gated before the retention value is even parsed.
+  // A disabled prune deletes nothing and says so.
+  if (!priceHistoryPruneAllowed(deps.env || process.env)) {
+    return { ...noteCostBreakerBlock('price_history_prune', REASON_PRICE_HISTORY_DISABLED), prunedSnapshots: 0 };
+  }
   const getDbImpl = deps.getDbImpl || getDb;
   const daysNum = Number(opts.days);
   if (!Number.isFinite(daysNum) || daysNum <= 0) {

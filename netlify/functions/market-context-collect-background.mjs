@@ -12,6 +12,12 @@
 import { timingSafeEqual } from 'node:crypto';
 import { runMarketContextCollector } from './_market-context-collector.mjs';
 import { runRadarContextPublisher } from './_radar-context-publisher.mjs';
+import {
+  costGuardHeaders,
+  marketContextCollectAllowed,
+  noteCostBreakerBlock,
+  REASON_MARKET_CONTEXT_COLLECT_DISABLED,
+} from './_cost-breaker.mjs';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' };
 
@@ -32,6 +38,19 @@ export default async function handler(req) {
   if (!tokenMatches(provided, expected)) {
     console.warn('[MARKET_CONTEXT_BG] unauthorized_invocation');
     return new Response(JSON.stringify({ ok: false, error: 'unauthorized: x-bot-worker-token required' }), { status: 401, headers: JSON_HEADERS });
+  }
+
+  // Emergency cost breaker, applied AFTER the worker-token check so an
+  // unauthenticated caller still learns nothing about configuration. A disabled
+  // cycle opens no Postgres connection and makes no upstream fetch.
+  if (!marketContextCollectAllowed(process.env)) {
+    noteCostBreakerBlock('market_context_collect_background', REASON_MARKET_CONTEXT_COLLECT_DISABLED);
+    return new Response(JSON.stringify({
+      endpoint: 'market_context_collect_background',
+      ok: true, skipped: true,
+      reason: 'COLLECT_DISABLED',
+      costGuard: REASON_MARKET_CONTEXT_COLLECT_DISABLED,
+    }), { status: 200, headers: costGuardHeaders(REASON_MARKET_CONTEXT_COLLECT_DISABLED, JSON_HEADERS) });
   }
 
   const startedMs = Date.now();

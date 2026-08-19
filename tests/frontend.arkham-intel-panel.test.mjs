@@ -55,8 +55,10 @@ test('the read is bounded, deduped, and every failure is both rendered and logge
 
 test('the asset cache-bust token was bumped so returning users get the new code', () => {
   assert.equal(indexHtml.includes('?v=6l2'), false, 'the old token must not survive a js/css change');
-  assert.match(indexHtml, /js\/terminal\.js\?v=6l3/);
-  assert.match(indexHtml, /css\/terminal\.css\?v=6l3/);
+  // 6l3 -> 6l4: the emergency Netlify cost breaker bumped the token again (see
+  // tests/frontend.canonical-context-cutover.test.mjs for the running log).
+  assert.match(indexHtml, /js\/terminal\.js\?v=6l4/);
+  assert.match(indexHtml, /css\/terminal\.css\?v=6l4/);
 });
 
 test('the panel styles exist and no unrelated CSS was disturbed', () => {

@@ -206,6 +206,43 @@ must always be able to tell that something broke and what broke.
   data, block the action or mark it unknown — never proceed as if the data
   were bearish, bullish, or otherwise actionable.
 
+## Netlify cost control (non-negotiable)
+
+Netlify **database compute is billed per GB-hour that the database is AWAKE**,
+not per query. Production sleeps the database after **5 minutes** of inactivity,
+so the cadence of the *cheapest* recurring touch matters more than the cost of
+the heaviest query: one trivial `SELECT` every three minutes bills the same
+awake-time as a thousand.
+
+- **Never add a recurring DB touch at a cadence under 5 minutes** — schedule,
+  cron, browser poll, or panel repaint — without an explicit cost review.
+- **Every DB-writing scheduled or background path must be OFF unless its env
+  flag is exactly the string `'true'`.** Route the gate through
+  `netlify/functions/_cost-breaker.mjs` so the master `DB_READS_ENABLED=false`
+  lever reaches it too.
+- **Disabled means nothing happens:** no `@netlify/database` import, no
+  `pool.connect()`, no upstream fetch, no write, no expensive read. Return a
+  **2xx** JSON body naming the reason — never a 5xx, which makes an unattended
+  scheduler retry-storm and pollutes the error rate.
+- **Put the write/read gate inside the storage module**, not only at the
+  endpoint, so a caller that forgets the flag still cannot touch the database.
+- **A disabled read is not a failed read.** Report `DB_HISTORY_READS_DISABLED` /
+  `HISTORY_DISABLED`, never `DB_UNAVAILABLE` — and never a value. Missing data
+  is `UNKNOWN`; a read that never happened can never report `FAIR`, `NO_ABSORPTION`
+  or any other verdict.
+- **A browser panel may only spend a DB read when the tab is visible AND the
+  panel is on screen** (`_dbPanelReadAllowed` in `terminal.js`). A repaint driven
+  by a poll tick is not a user asking for fresh data. A deferred panel must say
+  *deferred*, never spin forever.
+- Surface `X-Cost-Guard` / `X-DB-Read-Guard` on disabled paths, carrying only the
+  fixed reason codes — never a secret, id, email, or connection detail.
+- The breaker may only ever **subtract** work. It must never be imported by, or
+  able to alter, a trading, order, signing, Telegram, ENTRY_READY, RADAR-gate or
+  auth path.
+
+Full cost map and the current production env recommendation:
+**`docs/netlify-cost-breaker.md`**.
+
 ## Git / deploy
 
 - **No push, no deploy** (Netlify or Fly.io) without explicit owner approval. A

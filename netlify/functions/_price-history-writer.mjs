@@ -34,16 +34,20 @@
 //   - No trading, RADAR, reclaim/absorption, alert, or Telegram side
 //     effects of any kind live in this file.
 
-export const PRICE_HISTORY_WRITE_ENV_FLAG = 'PRICE_HISTORY_WRITE_ENABLED';
+import { priceHistoryWritesAllowed, PRICE_HISTORY_WRITE_ENV_FLAG } from './_cost-breaker.mjs';
+
+export { PRICE_HISTORY_WRITE_ENV_FLAG };
 export const DEFAULT_PRICE_HISTORY_SOURCE = 'cockpit_market_universe';
 
 async function loadPriceHistory() {
   return await import('./_price-history.mjs');
 }
 
+// Delegated to the emergency cost breaker so the master DB_READS_ENABLED=false
+// lever turns this off too, not just the per-feature flag.
 function isWriteEnabled(deps) {
   const env = deps.env || (typeof process !== 'undefined' ? process.env : null);
-  return !!env && env[PRICE_HISTORY_WRITE_ENV_FLAG] === 'true';
+  return !!env && priceHistoryWritesAllowed(env);
 }
 
 function logFailure(err) {

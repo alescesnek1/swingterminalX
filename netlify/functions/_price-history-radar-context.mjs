@@ -1,6 +1,7 @@
 // Bounded, fail-closed price-history context for backend RADAR candidates.
 // It supplies only bounded setup corroboration; it never supplies strict absorption, Flow/OI/Funding, or Telegram eligibility.
 
+import { REASON_DB_HISTORY_READS_DISABLED } from './_cost-breaker.mjs';
 import { analyzeAbsorptionFromPointsAndOrderbook, analyzeReclaimFromPoints } from './_price-history-signals.mjs';
 
 export const RADAR_PRICE_HISTORY_TOP_N = 5;
@@ -46,6 +47,14 @@ function historyConfidence(result) {
 }
 
 export function buildPriceHistoryContext(symbol, history) {
+  // The emergency cost breaker declining to read is NOT the database being
+  // unavailable, and mislabelling it would send the operator hunting a Postgres
+  // outage that does not exist. Both cases produce the SAME fail-closed context
+  // — UNKNOWN reclaim, UNKNOWN absorption, affectsServerGate:false — so the
+  // scoring outcome is identical and only the reported reason differs.
+  if (history && history.ok !== true && history.reason === REASON_DB_HISTORY_READS_DISABLED) {
+    return unknownContext(symbol, 'HISTORY_DISABLED', 'price-history reads disabled by the cost guard');
+  }
   if (!history || history.ok !== true || !Array.isArray(history.points)) {
     return unknownContext(symbol, 'DB_UNAVAILABLE', 'price-history database unavailable');
   }
