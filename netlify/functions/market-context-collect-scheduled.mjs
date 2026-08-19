@@ -1,5 +1,11 @@
 import { runMarketContextCollector } from './_market-context-collector.mjs';
 import { runRadarContextPublisher } from './_radar-context-publisher.mjs';
+import {
+  costGuardHeaders,
+  marketContextCollectAllowed,
+  noteCostBreakerBlock,
+  REASON_MARKET_CONTEXT_COLLECT_DISABLED,
+} from './_cost-breaker.mjs';
 
 export const MARKET_CONTEXT_BACKGROUND_ENV_FLAG = 'MARKET_CONTEXT_BACKGROUND_ENABLED';
 
@@ -64,6 +70,39 @@ async function refuseIfCycleCannotFit(env) {
 }
 
 export default async function handler() {
+  // ── EMERGENCY COST BREAKER — the first thing this function does ────────────
+  //
+  // Netlify invokes this on its own '*/3 * * * *' schedule, which is BELOW the
+  // database's 5-minute sleep-on-inactivity threshold. While collection is
+  // enabled the database can therefore never sleep, and awake time is what
+  // Netlify bills (920.63 GB-hours of database compute on the current bill).
+  //
+  // This gate has to sit ahead of BOTH downstream paths, not inside the
+  // collector: the background branch below dispatched an HTTP call to the
+  // background function before the collector's own flag was ever consulted, so
+  // a disabled collector still burned a second function invocation every three
+  // minutes; and the inline branch dynamically imports the Binance source
+  // module just to size the cycle. Returning here means no dispatch, no module
+  // import, no fetch, and no Postgres connection.
+  //
+  // 200 (not 503) on purpose: Netlify retries a failed scheduled invocation,
+  // and a retry loop is the opposite of what an emergency breaker is for.
+  if (!marketContextCollectAllowed(process.env)) {
+    noteCostBreakerBlock('market_context_collect_scheduled', REASON_MARKET_CONTEXT_COLLECT_DISABLED);
+    return new Response(JSON.stringify({
+      endpoint: 'market_context_collect_scheduled',
+      ok: true, skipped: true,
+      reason: 'COLLECT_DISABLED',
+      costGuard: REASON_MARKET_CONTEXT_COLLECT_DISABLED,
+      dispatchedToBackground: false,
+    }), {
+      status: 200,
+      headers: costGuardHeaders(REASON_MARKET_CONTEXT_COLLECT_DISABLED, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+      }),
+    });
+  }
   if (process.env[MARKET_CONTEXT_BACKGROUND_ENV_FLAG] === 'true') {
     const dispatched = await dispatchBackgroundCollection();
     return response({ endpoint: 'market_context_collect_scheduled', ok: dispatched.ok, dispatchedToBackground: true, reason: dispatched.reason ?? null }, dispatched.ok ? 202 : 503);

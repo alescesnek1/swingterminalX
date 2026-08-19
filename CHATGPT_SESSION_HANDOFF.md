@@ -13,6 +13,76 @@
 > `/reply` or `/admin_summary` support system** here. If you find yourself
 > reasoning about any of those, you have the wrong project — stop and ask.
 >
+> _**Emergency Netlify cost breaker** (2026-08-19, branch `fix/netlify-emergency-cost-breaker`,
+> committed locally, **NOT pushed, NOT deployed, NO env var changed**):_ Netlify
+> credits kept draining after the earlier polling hotfix. Bill: 16,462.6 total,
+> of which **database compute 9,206.3 credits / 920.63 GB-hours** — the largest
+> single line. The database dashboard shows "sleep after 5 minutes" configured
+> yet "recent activity" present, so it never sleeps.
+>
+> **The reframe that matters:** database compute is billed per GB-hour AWAKE, not
+> per query. A trivial `SELECT` every three minutes bills the same awake-time as
+> a thousand queries. So the cadence of the cheapest recurring touch, not the
+> weight of the heaviest query, is the cost driver.
+>
+> **Root causes, ranked.** (1) `market-context-collect-scheduled` runs on a
+> Netlify **native** `*/3` schedule — a full write cycle every three minutes
+> against a five-minute sleep timer; it can never sleep, and this is also the
+> heaviest DB work in the repo. (2) `/api/bot/fleet` is polled every **4 s** while
+> the Bot or RADAR view is open; `shouldRefreshTradingRadar` throttles the rebuild
+> to once a minute, but that is still ~6 Postgres queries a minute per open tab,
+> also under the sleep threshold. (3) `cron-alerts` and
+> `personal-watch-triggers`, both native `*/5`, one cheap read each landing
+> exactly on the boundary. (4) `/api/context` memo was 30 s against a collector
+> that publishes every 3 min. (5) GitHub Actions `price-history-collect` `*/30`,
+> up to a 2,000-row write.
+>
+> **What was built.** New `netlify/functions/_cost-breaker.mjs` — one decision
+> point, imports nothing, reads no env at import, opens no connection, holds no
+> trading/order/signing/Telegram/ENTRY_READY/RADAR-gate/auth logic, and can only
+> ever subtract work. Every gate needs the env var to be exactly `'true'`;
+> `PRICE_HISTORY_{SCHEDULE,COLLECT,WRITE,PRUNE,READS}_ENABLED` and
+> `MARKET_CONTEXT_COLLECT_ENABLED` all default **off**, plus a master
+> `DB_READS_ENABLED=false` panic lever (only the exact string `'false'` engages
+> it). Disabled means *nothing happens* — no `@netlify/database` import, no
+> `pool.connect()`, no fetch, no write — and answers **2xx** with a named reason,
+> never 5xx (an emergency breaker must not create a retry storm). The
+> write/prune/read gates sit **inside `_price-history.mjs`**, so a caller holding
+> a working pool still cannot touch the DB.
+>
+> The scheduled market-context entrypoint now returns before it can even dispatch
+> the background function — previously a disabled collector still burned a second
+> function invocation every three minutes. `/api/context` memo default 30 s →
+> **180 s** (the collector's publish interval, so no data is missed; `freshness`
+> is still recomputed per serve). Browser: `_dbPanelReadAllowed` spends a DB read
+> only when the tab is visible AND the panel is on screen, guarding poll-driven
+> repaints too; deferred panels say *deferred*, never spin. Asset token 6l3 → 6l4.
+>
+> **Honesty.** A disabled read reports `DB_HISTORY_READS_DISABLED` /
+> `HISTORY_DISABLED` — never `DB_UNAVAILABLE` (no phantom outage to hunt) and
+> never a value. The advisory valuation layer leaves each candidate's
+> momentum-only band alone: nothing invents `FAIR` from a read that never
+> happened. The RADAR price-history corroboration degrades to UNKNOWN /
+> UNKNOWN with `affectsServerGate:false`, so it can only ever **withhold** setup
+> support, never grant it — fail-closed, and not a rejection either.
+>
+> **Deliberately NOT touched:** `cron-alerts`, `telegram`, `personal-alerts`,
+> `_personal-watch-*`, `bot.mjs`, `trading-radar`, `_radar-context-publisher`,
+> `_market-context-absorb`, `_market-context-store`, every auth module,
+> `netlify.toml`, `package.json`, the migrations, and all GitHub workflows —
+> asserted by tests. No new scheduler or cron.
+>
+> Tests: `tests/cost.breaker.test.mjs` (24) + `tests/cost.breaker-frontend.test.mjs`
+> (18). Full suite 2,517 pass / 5 fail — all five are the pre-existing
+> uncommitted **Arkham** WIP on this branch, unrelated. Lint 0 errors / 163
+> warnings, identical to `main`.
+>
+> **Owner action needed:** the recommended emergency production env is listed in
+> `docs/netlify-cost-breaker.md` and has **not** been applied. Highest-value
+> single change beyond the flags: the `*/3` native schedule in
+> `market-context-collect-scheduled.mjs` — while `MARKET_CONTEXT_COLLECT_ENABLED`
+> is off it is now a pure no-op, but the schedule itself still exists.
+>
 > _Briefing suggested coins the desk cannot buy — fixed (2026-08-02, local,
 > uncommitted, NOT deployed):_ Owner asked for the 2026-08-02 briefing to be
 > verified. Its NUMBERS were checked against live Binance data and are correct:

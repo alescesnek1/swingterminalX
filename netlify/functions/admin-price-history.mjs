@@ -10,6 +10,18 @@
 // Auth: same shared Supabase-JWT identity as admin-observability.mjs
 // (_auth.mjs's getIdentity/isAdmin) — admin access always requires a
 // cryptographically VERIFIED token, never decode-only.
+// Emergency cost breaker (see _cost-breaker.mjs). Checked AFTER auth, so the
+// endpoint's access rules are unchanged, and before the storage module is
+// imported so a disabled read opens no Postgres connection. "We chose not to
+// read" is a different fact from "the database is down" and must not be
+// reported as DB_UNAVAILABLE.
+import {
+  costGuardHeaders,
+  noteCostBreakerBlock,
+  priceHistoryReadsAllowed,
+  REASON_DB_HISTORY_READS_DISABLED,
+} from './_cost-breaker.mjs';
+
 async function loadAuth() {
   return await import('./_auth.mjs');
 }
@@ -81,6 +93,14 @@ export async function runAdminPriceHistory(req, deps = {}) {
   }
   if (identity.verified !== true || !admin) {
     return json(req, { ok: false, reason: 'FORBIDDEN' }, 403);
+  }
+
+  if (!priceHistoryReadsAllowed(deps.env || process.env)) {
+    noteCostBreakerBlock('admin_price_history', REASON_DB_HISTORY_READS_DISABLED);
+    return new Response(JSON.stringify({
+      ok: true, disabled: true, reason: REASON_DB_HISTORY_READS_DISABLED,
+      snapshots: [], points: [], symbolFilter: null,
+    }), { status: 200, headers: costGuardHeaders(REASON_DB_HISTORY_READS_DISABLED, headers(req)) });
   }
 
   let reads = deps.reads;

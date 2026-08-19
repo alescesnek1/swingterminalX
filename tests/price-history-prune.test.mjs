@@ -6,6 +6,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+// The emergency cost breaker (netlify/functions/_cost-breaker.mjs) gates every
+// export of _price-history.mjs on process.env, defaulting to OFF. These suites
+// exercise the storage behaviour BEHIND that gate, so they enable it explicitly.
+// node --test gives each file its own process, so this leaks into no other
+// suite, and the breaker's own default-off behaviour is asserted separately in
+// tests/cost.breaker.test.mjs.
+process.env.PRICE_HISTORY_READS_ENABLED = 'true';
+process.env.PRICE_HISTORY_WRITE_ENABLED = 'true';
+process.env.PRICE_HISTORY_PRUNE_ENABLED = 'true';
+
 import {
   runPriceHistoryPruneScheduled,
 } from '../netlify/functions/price-history-prune-scheduled.mjs';
@@ -78,7 +88,9 @@ test('PRUNE_ENABLED flag disabled deletes nothing and returns 200 PRUNE_DISABLED
     const deps = baseDeps({ env, pruneSnapshotsOlderThan: async () => { pruneCalled = true; return { ok: true, prunedSnapshots: 5 }; } });
     const res = await call('POST', deps);
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { ok: true, skipped: true, pruned: false, prunedSnapshots: 0, reason: 'PRUNE_DISABLED' });
+    assert.deepEqual(await res.json(), { ok: true, skipped: true, pruned: false, prunedSnapshots: 0, reason: 'PRUNE_DISABLED', costGuard: 'PRICE_HISTORY_DISABLED' });
+    assert.equal(res.headers.get('X-Cost-Guard'), 'engaged');
+    assert.equal(res.headers.get('X-DB-Read-Guard'), 'PRICE_HISTORY_DISABLED');
     assert.equal(pruneCalled, false);
   }
 });

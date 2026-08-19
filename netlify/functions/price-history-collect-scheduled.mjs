@@ -37,6 +37,14 @@
 //
 // No RADAR/ENTRY_READY/trading/alert/Telegram side effects of any kind.
 import { timingSafeEqual } from 'node:crypto';
+import {
+  costGuardHeaders,
+  noteCostBreakerBlock,
+  priceHistoryCollectAllowed,
+  priceHistoryScheduleAllowed,
+  priceHistoryWritesAllowed,
+  REASON_PRICE_HISTORY_DISABLED,
+} from './_cost-breaker.mjs';
 
 async function loadPriceHistory() {
   return await import('./_price-history.mjs');
@@ -71,6 +79,17 @@ function headers(req) {
 
 function json(req, body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: headers(req) });
+}
+
+// A breaker-disabled answer: normal 200 so the unattended GitHub Actions job
+// stays green and does not retry-storm, plus the X-Cost-Guard / X-DB-Read-Guard
+// headers so the reason is visible from curl without parsing the body.
+function disabled(req, body) {
+  noteCostBreakerBlock('price_history_collect_scheduled', REASON_PRICE_HISTORY_DISABLED);
+  return new Response(JSON.stringify({ ...body, costGuard: REASON_PRICE_HISTORY_DISABLED }), {
+    status: 200,
+    headers: costGuardHeaders(REASON_PRICE_HISTORY_DISABLED, headers(req)),
+  });
 }
 
 /**
@@ -127,11 +146,15 @@ export async function runPriceHistoryCollectScheduled(req, deps = {}) {
     return json(req, { ok: false, reason: 'SCHEDULER_UNAUTHENTICATED' }, 401);
   }
 
-  if (env[PRICE_HISTORY_SCHEDULE_ENV_FLAG] !== 'true') {
-    return json(req, { ok: true, skipped: true, collected: false, reason: 'SCHEDULE_DISABLED' });
+  // Cost breaker. Both gates return BEFORE the price-history module is even
+  // imported, so a disabled run opens no Postgres connection and makes no
+  // CoinGecko call. Routed through the breaker so DB_READS_ENABLED=false
+  // switches them off as well.
+  if (!priceHistoryScheduleAllowed(env)) {
+    return disabled(req, { ok: true, skipped: true, collected: false, reason: 'SCHEDULE_DISABLED' });
   }
-  if (env[PRICE_HISTORY_COLLECT_ENV_FLAG] !== 'true') {
-    return json(req, { ok: true, skipped: true, collected: false, reason: 'COLLECT_DISABLED' });
+  if (!priceHistoryCollectAllowed(env)) {
+    return disabled(req, { ok: true, skipped: true, collected: false, reason: 'COLLECT_DISABLED' });
   }
 
   let getLatestSnapshotAt = deps.getLatestSnapshotAt;
@@ -207,7 +230,7 @@ export async function runPriceHistoryCollectScheduled(req, deps = {}) {
     return json(req, { ok: false, collected: false, reason: 'NO_MARKET_ROWS' }, 502);
   }
 
-  const writeEnabled = env[PRICE_HISTORY_WRITE_ENV_FLAG] === 'true';
+  const writeEnabled = priceHistoryWritesAllowed(env);
   if (!writeEnabled) {
     return json(req, {
       ok: true,

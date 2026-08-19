@@ -13,6 +13,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+// The emergency cost breaker (netlify/functions/_cost-breaker.mjs) gates every
+// export of _price-history.mjs on process.env, defaulting to OFF. These suites
+// exercise the storage behaviour BEHIND that gate, so they enable it explicitly.
+// node --test gives each file its own process, so this leaks into no other
+// suite, and the breaker's own default-off behaviour is asserted separately in
+// tests/cost.breaker.test.mjs.
+process.env.PRICE_HISTORY_READS_ENABLED = 'true';
+process.env.PRICE_HISTORY_WRITE_ENABLED = 'true';
+process.env.PRICE_HISTORY_PRUNE_ENABLED = 'true';
+
 import { getDb, closeDbForTests } from '../netlify/functions/_db.mjs';
 import {
   normalizePricePoint,

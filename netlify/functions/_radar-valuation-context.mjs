@@ -18,6 +18,7 @@
 //     can distinguish "no history" from "database unavailable". Nothing is
 //     invented and no failure is swallowed.
 
+import { REASON_DB_HISTORY_READS_DISABLED } from './_cost-breaker.mjs';
 import { radarPriceHistoryBaseSymbol } from './_price-history-radar-context.mjs';
 import {
   computeHistoryValuation,
@@ -146,9 +147,17 @@ export function applyValuationHistoryToRadar(radar, loaded) {
     historySymbolsWithData: Number.isInteger(result.symbolsWithHistory) ? result.symbolsWithHistory : 0,
     historyPointsPerSymbol: Number.isInteger(result.pointsPerSymbol) ? result.pointsPerSymbol : RADAR_VALUATION_POINTS_PER_SYMBOL,
     historyTopN: RADAR_VALUATION_TOP_N,
-    // The two failure shapes stay distinguishable in the payload the UI reads.
+    // The failure shapes stay distinguishable in the payload the UI reads. The
+    // emergency cost breaker is its own third case: the database is healthy and
+    // we deliberately did not read it, which must read as HISTORY_DISABLED. In
+    // every case the stored-history band stays absent — a candidate keeps its
+    // momentum-only reading and NOTHING synthesises a FAIR band out of a read
+    // that never happened.
     historyAvailable: result.ok === true,
-    historyUnavailableReason: result.ok === true ? null : (result.reason || 'VALUATION_HISTORY_UNAVAILABLE'),
+    historyDisabled: result.reason === REASON_DB_HISTORY_READS_DISABLED,
+    historyUnavailableReason: result.ok === true
+      ? null
+      : (result.reason === REASON_DB_HISTORY_READS_DISABLED ? 'HISTORY_DISABLED' : (result.reason || 'VALUATION_HISTORY_UNAVAILABLE')),
     source: 'price_history_db',
     isEntrySignal: false,
     affectsGate: false,

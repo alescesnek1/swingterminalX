@@ -125,7 +125,9 @@ test('SCHEDULE flag disabled returns 200 SCHEDULE_DISABLED without touching DB o
     });
     const res = await call('POST', deps);
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { ok: true, skipped: true, collected: false, reason: 'SCHEDULE_DISABLED' });
+    assert.deepEqual(await res.json(), { ok: true, skipped: true, collected: false, reason: 'SCHEDULE_DISABLED', costGuard: 'PRICE_HISTORY_DISABLED' });
+    assert.equal(res.headers.get('X-Cost-Guard'), 'engaged');
+    assert.equal(res.headers.get('X-DB-Read-Guard'), 'PRICE_HISTORY_DISABLED');
     assert.equal(dbCalled, false);
     assert.equal(fetchCalled, false);
   }
@@ -140,7 +142,9 @@ test('COLLECT flag disabled returns 200 COLLECT_DISABLED without touching DB or 
   });
   const res = await call('POST', deps);
   assert.equal(res.status, 200);
-  assert.deepEqual(await res.json(), { ok: true, skipped: true, collected: false, reason: 'COLLECT_DISABLED' });
+  assert.deepEqual(await res.json(), { ok: true, skipped: true, collected: false, reason: 'COLLECT_DISABLED', costGuard: 'PRICE_HISTORY_DISABLED' });
+  assert.equal(res.headers.get('X-Cost-Guard'), 'engaged');
+  assert.equal(res.headers.get('X-DB-Read-Guard'), 'PRICE_HISTORY_DISABLED');
   assert.equal(dbCalled, false);
   assert.equal(fetchCalled, false);
 });

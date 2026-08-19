@@ -1,4 +1,5 @@
 import { makeRunKey, withContextTransaction } from './_market-context-store.mjs';
+import { marketContextCollectAllowed, noteCostBreakerBlock, REASON_MARKET_CONTEXT_COLLECT_DISABLED } from './_cost-breaker.mjs';
 
 export const MARKET_CONTEXT_COLLECT_ENV_FLAG = 'MARKET_CONTEXT_COLLECT_ENABLED';
 export const MARKET_CONTEXT_FUTURES_ENV_FLAG = 'MARKET_CONTEXT_FUTURES_ENABLED';
@@ -31,7 +32,13 @@ function outcome(status, body) { return { status, body: { endpoint: 'market_cont
 // every persisted market value is an atomic time-addressable database row.
 export async function runMarketContextCollector(deps = {}) {
   const env = deps.env || process.env;
-  if (env[MARKET_CONTEXT_COLLECT_ENV_FLAG] !== 'true') return outcome(200, { ok: true, skipped: true, reason: 'COLLECT_DISABLED' });
+  // Emergency cost breaker — returns before the store module is imported, so no
+  // @netlify/database load and no pool.connect(). Routed through the shared
+  // breaker so the master DB_READS_ENABLED=false lever disables this too.
+  if (!marketContextCollectAllowed(env)) {
+    noteCostBreakerBlock('market_context_collector', REASON_MARKET_CONTEXT_COLLECT_DISABLED);
+    return outcome(200, { ok: true, skipped: true, reason: 'COLLECT_DISABLED', costGuard: REASON_MARKET_CONTEXT_COLLECT_DISABLED });
+  }
   let store; try { store = deps.store || await (deps.loadStore || loadStore)(); } catch { return outcome(503, { ok: false, reason: 'DB_UNAVAILABLE' }); }
   const observedAt = typeof deps.now === 'function' ? new Date(deps.now()) : new Date();
   const runKey = store.makeRunKey ? store.makeRunKey(observedAt) : makeRunKey(observedAt);

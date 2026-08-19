@@ -60,8 +60,11 @@ test('a repeat read inside the TTL costs no database query', async () => {
 
 test('the memo expires — data can never be pinned past the TTL', async () => {
   const store = countingStore();
+  // Derived from the constant, not a hard-coded 30s: the emergency cost breaker
+  // raised the default memo to 180s (the collector's own publish interval), and
+  // what this test pins down is that expiry HAPPENS, at whatever the default is.
   await read({ store, now: () => 1_000_000, env: {} });
-  await read({ store, now: () => 1_031_000, env: {} });                  // +31s, TTL 30s
+  await read({ store, now: () => 1_000_000 + CONTEXT_CACHE_DEFAULT_MS + 1_000, env: {} });
   assert.equal(store.calls, 2, 'an expired memo re-reads');
 });
 
@@ -120,7 +123,7 @@ test('a failed read is surfaced, never memoized, and never masked by a good one'
   assert.equal(good.status, 200);
 
   store.mode = 'fail';
-  const failed = await read({ store, now: () => 1_100_000, env: {} });   // memo expired
+  const failed = await read({ store, now: () => 1_000_000 + CONTEXT_CACHE_DEFAULT_MS + 1_000, env: {} });   // memo expired
   assert.equal(failed.status, 503, 'the failure reaches the user');
   assert.equal((await failed.json()).reason, 'DB_UNAVAILABLE');
   assert.equal(failed.headers.get('X-Context-Cache'), 'miss', 'a failure is never labelled a cache hit');
@@ -128,7 +131,7 @@ test('a failed read is surfaced, never memoized, and never masked by a good one'
 
   // The failure must not have been stored — the next read tries the database again.
   const before = store.calls;
-  const retry = await read({ store, now: () => 1_100_100, env: {} });
+  const retry = await read({ store, now: () => 1_000_000 + CONTEXT_CACHE_DEFAULT_MS + 2_000, env: {} });
   assert.ok(store.calls > before, 'a failed read is not cached');
   assert.equal(retry.status, 503);
 });

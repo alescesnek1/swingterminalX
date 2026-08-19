@@ -185,6 +185,40 @@ function _pageIsActive() {
 // answering "why did the terminal stop updating while I was on another tab?".
 window.__pollGovernor = { skipped: {}, ran: {}, lastSkipAt: null, lastResumeAt: null };
 
+// ── DB-BACKED PANEL GATE ────────────────────────────────────────────────────
+//
+// A stricter rule than _pollTickAllowed, for the handful of panels whose fetch
+// reaches Netlify Postgres (price-history signals, the server RADAR verdict).
+// Those reads are what keep the database awake, and an awake database is what
+// Netlify bills — so they are only spent when the panel is actually on screen
+// AND the tab is actually being looked at.
+//
+// Unlike the poll governor this also guards NON-recurring calls: a panel repaint
+// triggered by a view switch or a poll tick is not a user asking for fresh
+// history, so it must not silently re-open a Postgres connection. `slotId` is
+// the panel's own DOM node — absent or hidden means nobody can see the result,
+// so the read is pure cost.
+function _dbPanelReadAllowed(name, slotId) {
+  if (!_pageIsActive()) {
+    const gov = window.__pollGovernor;
+    gov.skipped[name] = (gov.skipped[name] || 0) + 1;
+    gov.lastSkipAt = Date.now();
+    return false;
+  }
+  if (typeof document === 'undefined' || !document || !slotId) return true;
+  const el = document.getElementById(slotId);
+  // No node at all means the panel is not rendered, so nobody can see the
+  // result. A node that IS in the document only counts as off-screen when the
+  // browser gives it neither a positioned ancestor nor any layout box — the
+  // standard display:none test. A DOM that does not implement offset* at all
+  // (jsdom, our tests) reports undefined, which fails `=== null` and therefore
+  // counts as VISIBLE: this gate can only ever err toward spending a request,
+  // never toward silently starving a panel the operator is looking at.
+  if (!el) return false;
+  if (el.offsetParent === null && !el.offsetWidth && !el.offsetHeight) return false;
+  return true;
+}
+
 // Wraps one recurring tick. Returns true when the tick may run.
 // `name` is the poll's stable id, used for the counters and for the log line.
 function _pollTickAllowed(name) {
@@ -5577,6 +5611,11 @@ function _cpRadarStateInnerHtml(model) {
   const wrap = (inner) => `<div class="cp-radar-insight">${title}${inner}</div>`;
   if (!model || model.state === 'waiting') return wrap('<div class="cp-radar-insight__row cp-radar-insight__note">Select a coin to read its server RADAR verdict.</div>');
   if (model.state === 'loading') return wrap('<div class="cp-radar-insight__row cp-radar-insight__note">Loading the server verdict…</div>');
+  // Deferred is neither loading nor failed: the read is a database round trip and
+  // this panel is not on screen, so it has not been spent. Saying "loading" here
+  // would leave a box spinning forever, which is exactly what the observability
+  // rules forbid.
+  if (model.state === 'deferred') return wrap('<div class="cp-radar-insight__row cp-radar-insight__note">Server verdict not loaded — this panel is not visible, so the database read was deferred (cost guard). It loads as soon as the panel is on screen.</div>');
   if (model.state === 'auth') return wrap('<div class="cp-radar-insight__row cp-radar-insight__note">Sign in to read the server RADAR verdict.</div>');
   // "Never scored" and "the read failed" are different facts and must not share a
   // rendering — a blank/absent verdict may never stand in for an error.
@@ -5632,9 +5671,19 @@ async function _refreshCockpitRadarState() {
   const slot = document.getElementById('cockpit-radar-state-slot');
   if (!slot) return;
   const symbol = (slot.getAttribute('data-state-symbol') || '').toUpperCase();
+  // No selected coin: paint the waiting state, spend nothing. This already had
+  // to hold before the cost breaker, and it is restated here because "no
+  // selected coin" is one of the cases that must never reach Postgres.
   if (!symbol) { slot.innerHTML = _cpRadarStateInnerHtml({ state: 'waiting' }); return; }
   const cached = _cpRadarStateCache.get(symbol);
   if (cached && (Date.now() - cached.at) < CP_RADAR_STATE_TTL_MS) { slot.innerHTML = _cpRadarStateInnerHtml(cached.model); return; }
+  // Cost breaker: this fetch is a Postgres read. Repaint from whatever is
+  // cached when the tab is hidden or the panel is off screen — never open a new
+  // read for a panel nobody is looking at.
+  if (!_dbPanelReadAllowed('cockpit-radar-state', 'cockpit-radar-state-slot')) {
+    slot.innerHTML = _cpRadarStateInnerHtml(cached ? cached.model : { state: 'deferred', symbol });
+    return;
+  }
   if (_cpRadarStateInFlight.has(symbol)) return; // one in-flight read per coin
   _cpRadarStateInFlight.add(symbol);
   slot.innerHTML = _cpRadarStateInnerHtml(cached ? cached.model : { state: 'loading' });
@@ -6319,6 +6368,12 @@ async function copyPersonalWatchDiagnosticTarget() {
 // authoritative and shown honestly, never silently hidden.
 function _phsHelpers() { return window.__priceHistorySignalsPanel || null; }
 
+// Repeat-visit memo for the admin price-history card. Entering the Cockpit view
+// used to fire one Postgres read per symbol EVERY time, so tab-switching alone
+// could hold the database awake. Painting from this memo costs nothing.
+const ADMIN_PRICE_HISTORY_TTL_MS = 5 * 60 * 1000;
+let _adminPriceHistoryMemo = null; // { at, html }
+
 function _renderAdminPriceHistoryRow(model) {
   const helpers = _phsHelpers();
   const m = model || (helpers ? helpers.errorModel('No data.') : null);
@@ -6344,6 +6399,17 @@ async function refreshAdminPriceHistorySignals() {
   const body = document.getElementById('cockpit-admin-price-history-body');
   if (!helpers || !card || !body) return;
   card.hidden = false;
+  // Cost breaker: one Postgres read PER SYMBOL, so repaint from the memo unless
+  // it has actually expired, and never read at all while the tab is hidden or
+  // the card is off screen.
+  if (_adminPriceHistoryMemo && (Date.now() - _adminPriceHistoryMemo.at) < ADMIN_PRICE_HISTORY_TTL_MS) {
+    body.innerHTML = _adminPriceHistoryMemo.html;
+    return;
+  }
+  if (!_dbPanelReadAllowed('admin-price-history', 'cockpit-admin-price-history-body')) {
+    if (_adminPriceHistoryMemo) body.innerHTML = _adminPriceHistoryMemo.html;
+    return;
+  }
   try {
     const authHeaders = await _getAuthHeaders();
     if (!authHeaders.Authorization) {
@@ -6379,6 +6445,7 @@ async function refreshAdminPriceHistorySignals() {
       }
     }
     body.innerHTML = rows.join('');
+    _adminPriceHistoryMemo = { at: Date.now(), html: body.innerHTML };
   } catch (err) {
     console.warn('[Cockpit] price-history diagnostics refresh failed:', err && err.name ? err.name : 'network error');
     body.innerHTML = _renderAdminPriceHistoryRow(helpers.errorModel('Could not load price-history diagnostics.', 'FETCH_ERROR'));
@@ -6679,6 +6746,22 @@ async function _refreshRadarPriceHistorySignals() {
     return;
   }
   if (_radarPhCache.loadingBase === base) return;
+  // Cost breaker: a Postgres read for the focused candidate. The RADAR panel
+  // repaints on every 4s Fleet poll tick, so a hidden tab or an off-screen slot
+  // must not be able to open one.
+  if (!_dbPanelReadAllowed('radar-price-history', 'radar-ph-signals-slot')) {
+    if (_radarPhCache.base === base && _radarPhCache.model) {
+      slot.setAttribute('data-ph-status', _radarPhStatusFromModel(_radarPhCache.model));
+      slot.innerHTML = _radarPhInnerHtml(base);
+      return;
+    }
+    // Never leave a "loading" box that will never resolve — say what happened.
+    slot.setAttribute('data-ph-status', 'deferred');
+    slot.innerHTML = _RADAR_PH_LABEL
+      + '<div style="font-size:12px; color:#f6f7fb; margin-top:5px;"><b>Focused:</b> ' + _esc(base) + '</div>'
+      + '<div style="font-size:12px; color:#ffd166; margin-top:2px;"><b>Status:</b> deferred — panel not visible, database read not spent (cost guard)</div>';
+    return;
+  }
   const helpers = _phsHelpers();
   if (!helpers) {
     slot.setAttribute('data-ph-status', 'error');

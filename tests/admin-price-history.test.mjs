@@ -34,11 +34,17 @@ function makeReq(method, { origin, query } = {}) {
   return new Request(url, { method, headers });
 }
 
+// The emergency cost breaker (netlify/functions/_cost-breaker.mjs) gates the
+// non-critical history reads and defaults to OFF, so a suite that asserts the
+// READ behaviour has to enable it explicitly. The disabled path has its own
+// test below.
+const READS_ON = { PRICE_HISTORY_READS_ENABLED: 'true' };
+
 function call(method, {
   identity = ADMIN, origin, query, reads, getIdentity, isAdmin, loadAuth, loadPriceHistory,
-  injectAuth = true, injectReads = true,
+  injectAuth = true, injectReads = true, env = READS_ON,
 } = {}) {
-  const deps = {};
+  const deps = { env };
   if (getIdentity) deps.getIdentity = getIdentity;
   else if (injectAuth) deps.getIdentity = async () => identity;
   if (isAdmin) deps.isAdmin = isAdmin;
@@ -52,6 +58,35 @@ function call(method, {
 
 test('handler module imports without Netlify auth or database context', () => {
   assert.equal(typeof runAdminPriceHistory, 'function');
+});
+
+// ── Emergency cost breaker ──────────────────────────────────────────────────
+
+test('history reads disabled: verified admin gets an honest disabled 200 and the DB is never touched', async () => {
+  let dbTouched = false;
+  const res = await call('GET', {
+    env: {},   // PRICE_HISTORY_READS_ENABLED unset — the emergency default
+    reads: {
+      listRecentSnapshots: async () => { dbTouched = true; return FAKE_SNAPSHOTS; },
+      listRecentPricePoints: async () => { dbTouched = true; return FAKE_POINTS; },
+    },
+  });
+  assert.equal(res.status, 200, 'a deliberate degradation is not a server fault');
+  assert.equal(dbTouched, false, 'no read was issued');
+  const body = await res.json();
+  assert.equal(body.disabled, true);
+  assert.equal(body.reason, 'DB_HISTORY_READS_DISABLED');
+  assert.deepEqual(body.snapshots, []);
+  assert.deepEqual(body.points, []);
+  assert.notEqual(body.reason, 'DB_UNAVAILABLE', 'declining to read is not the database being down');
+  assert.equal(res.headers.get('X-Cost-Guard'), 'engaged');
+  assert.equal(res.headers.get('X-DB-Read-Guard'), 'DB_HISTORY_READS_DISABLED');
+});
+
+test('the breaker never weakens auth: an unauthenticated caller still gets 401, not a disabled body', async () => {
+  const res = await call('GET', { env: {}, identity: ANON });
+  assert.equal(res.status, 401);
+  assert.equal((await res.json()).reason, 'UNAUTHENTICATED');
 });
 
 test('OPTIONS preflight returns 204 with GET-only CORS methods', async () => {

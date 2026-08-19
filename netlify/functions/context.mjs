@@ -1,4 +1,11 @@
 // Authenticated, read-only API over canonical atomized PostgreSQL records.
+import {
+  costGuardHeaders,
+  masterKillSwitchEngaged,
+  noteCostBreakerBlock,
+  REASON_COST_BREAKER_DISABLED_PATH,
+} from './_cost-breaker.mjs';
+
 async function loadAuth() { return await import('./_auth.mjs'); }
 async function loadSafety() { return await import('../../scripts/safety/chain-safety.mjs'); }
 
@@ -47,7 +54,13 @@ async function loadDb() { return await import('./_db.mjs'); }
 // Only successful reads are memoized; a DB failure is never cached and never
 // masked by a previous good response.
 export const CONTEXT_CACHE_ENV_FLAG = 'CONTEXT_READ_CACHE_MS';
-export const CONTEXT_CACHE_DEFAULT_MS = 30_000;
+// EMERGENCY DEFAULT: 180s, not 30s. The publishing collector writes a new run
+// at most every three minutes, so a memo shorter than that spends extra
+// Postgres round trips on a run that provably cannot have changed. `freshness`
+// is still recomputed per serve (see refreshFreshness), so a longer memo can
+// never make a stale run claim to be FRESH. 6x fewer database reads per open
+// tab, no data missed.
+export const CONTEXT_CACHE_DEFAULT_MS = 180_000;
 // Matches the store's own FRESH/STALE boundary in getAtomizedMarketContext.
 const FRESHNESS_MAX_AGE_MS = 6 * 60 * 1000;
 // Ceiling: never memoize longer than the collector's publish interval, or the
@@ -96,6 +109,26 @@ export async function runContextRead(req, deps = {}) {
   let getIdentity = deps.getIdentity; if (!getIdentity) { try { getIdentity = (await (deps.loadAuth || loadAuth)()).getIdentity; } catch { return json(req, { ok: false, reason: 'UNAUTHENTICATED' }, 401); } }
   let identity; try { identity = await getIdentity(req); } catch { return json(req, { ok: false, reason: 'UNAUTHENTICATED' }, 401); }
   if (!identity?.ok || identity.verified !== true) return json(req, { ok: false, reason: 'UNAUTHENTICATED' }, 401);
+
+  // ── Emergency master kill switch (DB_READS_ENABLED=false) ─────────────────
+  //
+  // Deliberately AFTER authentication: the breaker weakens no auth, and an
+  // unauthenticated caller still gets 401, never a degraded snapshot.
+  //
+  // This endpoint normally stays available — it is the terminal's core read —
+  // so only the owner's explicit master lever turns it off. When it is engaged
+  // the response is an honest ok:false with a named reason, which the browser
+  // already handles by falling back to /api/markets (an edge function that
+  // touches no database) and showing a visible toast. HTTP 200 rather than 5xx
+  // on purpose: a deliberate degradation must not masquerade as a server fault
+  // or flood the function error rate.
+  if (masterKillSwitchEngaged(deps.env || process.env)) {
+    noteCostBreakerBlock('context_read', REASON_COST_BREAKER_DISABLED_PATH);
+    return new Response(JSON.stringify({
+      ok: false, degraded: true, reason: REASON_COST_BREAKER_DISABLED_PATH,
+    }), { status: 200, headers: costGuardHeaders(REASON_COST_BREAKER_DISABLED_PATH, headers(req, 'bypass')) });
+  }
+
   const now = typeof deps.now === 'function' ? deps.now() : Date.now();
   const ttlMs = contextCacheMs(deps.env || process.env);
 

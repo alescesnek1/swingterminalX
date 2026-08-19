@@ -11,6 +11,12 @@
 // unbounded DELETE, never touches any other table, never RADAR/trading/
 // alert/Telegram.
 import { isSchedulerAuthenticated, PRICE_HISTORY_SCHEDULER_HEADER } from './price-history-collect-scheduled.mjs';
+import {
+  costGuardHeaders,
+  noteCostBreakerBlock,
+  priceHistoryPruneAllowed,
+  REASON_PRICE_HISTORY_DISABLED,
+} from './_cost-breaker.mjs';
 
 async function loadPriceHistory() {
   return await import('./_price-history.mjs');
@@ -48,8 +54,14 @@ export async function runPriceHistoryPruneScheduled(req, deps = {}) {
     return json(req, { ok: false, reason: 'SCHEDULER_UNAUTHENTICATED' }, 401);
   }
 
-  if (env[PRICE_HISTORY_PRUNE_ENV_FLAG] !== 'true') {
-    return json(req, { ok: true, skipped: true, pruned: false, prunedSnapshots: 0, reason: 'PRUNE_DISABLED' });
+  // Cost breaker: returns before the retention value is parsed and before the
+  // storage module is imported, so a disabled prune opens no connection.
+  if (!priceHistoryPruneAllowed(env)) {
+    noteCostBreakerBlock('price_history_prune_scheduled', REASON_PRICE_HISTORY_DISABLED);
+    return new Response(JSON.stringify({
+      ok: true, skipped: true, pruned: false, prunedSnapshots: 0,
+      reason: 'PRUNE_DISABLED', costGuard: REASON_PRICE_HISTORY_DISABLED,
+    }), { status: 200, headers: costGuardHeaders(REASON_PRICE_HISTORY_DISABLED, headers(req)) });
   }
 
   // C3 fix: prune is enabled but retention is unusable. This must be a

@@ -202,7 +202,12 @@ test('every versioned asset carries the same single bumped cache-bust token', ()
   // 6l2 -> 6l3 for the disabled Arkham Intel skeleton (the advisory placeholder
   // panel and its one manual status button in terminal.js, .arkham-intel styles
   // in terminal.css).
-  assert.equal(tokens[0], '6l3', 'token was bumped for this JS change');
+  // 6l3 -> 6l4 for the emergency Netlify cost breaker (_dbPanelReadAllowed gate
+  // plus the deferred states and the admin price-history memo in terminal.js).
+  // Load-bearing for that fix: netlify.toml sets max-age=3600 on /*.js, so
+  // without the bump a returning tab keeps the old code — and the old code is
+  // the code that opens a Postgres read for panels nobody is looking at.
+  assert.equal(tokens[0], '6l4', 'token was bumped for this JS change');
 });
 
 // The measurement budget targets the deepest drawdowns, and DISLOCATION is 20% of

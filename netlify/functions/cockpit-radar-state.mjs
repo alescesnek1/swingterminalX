@@ -10,6 +10,13 @@
 // It is a READ. It computes nothing, writes nothing, and changes no gate: the verdict
 // it returns was produced by the RADAR publisher. Freshness is reported, never
 // assumed, so the Cockpit can show an old verdict AS old rather than as current.
+import {
+  costGuardHeaders,
+  masterKillSwitchEngaged,
+  noteCostBreakerBlock,
+  REASON_COST_BREAKER_DISABLED_PATH,
+} from './_cost-breaker.mjs';
+
 async function loadAuth() { return await import('./_auth.mjs'); }
 async function loadStore() { return await import('./_market-context-store.mjs'); }
 async function loadDb() { return await import('./_db.mjs'); }
@@ -92,6 +99,18 @@ export async function runCockpitRadarStateRead(req, deps = {}) {
   if (!/^[A-Z0-9]{2,32}$/.test(symbol)) return json(req, { ok: false, reason: 'INVALID_SYMBOL' }, 400);
   const requestedMarket = url.searchParams.get('market');
   const market = requestedMarket === 'spot' || requestedMarket === 'futures' ? requestedMarket : undefined;
+
+  // Emergency master kill switch only — this endpoint keeps its normal
+  // behaviour under the narrow flags, because a RADAR verdict the operator can
+  // read is part of the safety surface. When the owner engages the master lever
+  // the panel says so explicitly instead of reporting NOT_SCORED, which would
+  // read as "the server rejected this setup".
+  if (masterKillSwitchEngaged(deps.env || process.env)) {
+    noteCostBreakerBlock('cockpit_radar_state', REASON_COST_BREAKER_DISABLED_PATH);
+    return new Response(JSON.stringify({
+      ok: false, disabled: true, symbol, reason: REASON_COST_BREAKER_DISABLED_PATH,
+    }), { status: 200, headers: costGuardHeaders(REASON_COST_BREAKER_DISABLED_PATH, headers(req)) });
+  }
 
   let store = deps.store; let database = deps.database;
   try {

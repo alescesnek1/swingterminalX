@@ -14,13 +14,20 @@ function req(method, query = 'symbol=btc', headers = {}) { return new Request(`$
 // to stubs that report unavailable so tests never trigger a real module
 // load / network fetch (edge bridge OR the Binance-direct fallback) unless
 // a case wants to exercise that path explicitly.
+// The emergency cost breaker gates the non-critical history reads and defaults
+// to OFF; this suite asserts the READ behaviour, so it enables it explicitly.
+// The disabled path has its own test below.
+const READS_ON = { PRICE_HISTORY_READS_ENABLED: 'true' };
+
 function call(method, {
   identity = ADMIN, isAdmin = (id) => id === ADMIN || id === UNVERIFIED_ADMIN, reads, query, headers,
   fetchOrderbookSummary = async () => ({ ok: false, reason: 'ORDERBOOK_UNAVAILABLE' }),
   fetchBinanceDepthSummary = async () => ({ ok: false, reason: 'ORDERBOOK_BINANCE_FETCH_FAILED' }),
+  env = READS_ON,
   ...extra
 } = {}) {
   return runAdminPriceHistorySignals(req(method, query, headers), {
+    env,
     getIdentity: async () => identity,
     isAdmin,
     reads: reads || { listRecentPricePoints: async () => ({ ok: true, points: POINTS }) },
@@ -29,6 +36,35 @@ function call(method, {
     ...extra,
   });
 }
+
+// ── Emergency cost breaker ──────────────────────────────────────────────────
+
+test('history reads disabled: signals read as UNKNOWN / HISTORY_DISABLED, never a bearish verdict', async () => {
+  let dbTouched = false;
+  const res = await call('GET', {
+    env: {},   // PRICE_HISTORY_READS_ENABLED unset — the emergency default
+    query: 'symbol=BTC',
+    reads: { listRecentPricePoints: async () => { dbTouched = true; return { ok: true, points: POINTS }; } },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(dbTouched, false, 'no read was issued');
+  const body = await res.json();
+  assert.equal(body.disabled, true);
+  assert.equal(body.status, 'HISTORY_DISABLED');
+  assert.equal(body.reason, 'DB_HISTORY_READS_DISABLED');
+  // Missing data must be UNKNOWN. NOT_CONFIRMED / NO_ABSORPTION would be a
+  // bearish reading invented out of a read that never happened.
+  assert.equal(body.reclaim.status, 'UNKNOWN');
+  assert.equal(body.reclaim.signal, 'UNKNOWN');
+  assert.equal(body.absorption.status, 'UNKNOWN');
+  assert.equal(body.absorption.signal, 'UNKNOWN');
+  assert.equal(res.headers.get('X-DB-Read-Guard'), 'DB_HISTORY_READS_DISABLED');
+});
+
+test('the breaker never weakens auth: non-admin still gets 403 with reads disabled', async () => {
+  assert.equal((await call('GET', { env: {}, query: 'symbol=BTC', identity: NON_ADMIN })).status, 403);
+  assert.equal((await call('GET', { env: {}, query: 'symbol=BTC', identity: { ok: false } })).status, 401);
+});
 
 test('non-GET returns 405 before auth or database work', async () => {
   let authCalled = false; let dbCalled = false;
