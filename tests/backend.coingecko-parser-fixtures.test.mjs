@@ -13,6 +13,7 @@ import {
   sanitizeName,
   sectionValueMode,
   detectChangeDirection,
+  CHANGE_DIRECTION_UNKNOWN,
 } from '../apps/edge/netlify/edge-functions/coingecko-highlights.js';
 
 const html = (...sections) => `<html><body>${sections.join('')}</body></html>`;
@@ -41,18 +42,27 @@ test('detectChangeDirection reads markup, not free-text words', () => {
 
 // ── Sign is not flipped by a hostile coin name ────────────────────────────
 
-test('a coin named with "Red/Down/Fall" does NOT become negative', () => {
+test('a coin named with "Red/Down/Fall" implies no direction at all', () => {
   const doc = html(
     `<h2>Top Gainers</h2><table>
        <tr><td><a href="/en/coins/redx">Red Down Falling RED</a></td><td>$2.00</td><td><span>5.0%</span></td></tr>
      </table>`,
   );
-  const gainers = parseCoinGeckoHighlights(doc).sections.find(s => s.key === 'top_gainers');
+  const parsed = parseCoinGeckoHighlights(doc);
+  const gainers = parsed.sections.find(s => s.key === 'top_gainers');
   const row = gainers.items[0];
-  // No explicit sign + no direction markup → stays positive (never flipped
-  // negative by the words in the name).
-  assert.ok(row.change24hPct > 0, `expected positive, got ${row.change24hPct}`);
-  assert.strictEqual(row.change24hPct, 5.0);
+  // The words in the name must never flip the sign negative...
+  assert.ok(!(row.change24hPct < 0), 'name words must never imply a negative move');
+  // ...and they must not imply a positive one either. With no trusted
+  // direction markup anywhere in the row the magnitude is UNKNOWN, so it is
+  // dropped rather than published as a +5.0% gain (fail closed).
+  assert.strictEqual(row.change24hPct, null);
+  assert.strictEqual(row.change24hText, '');
+  assert.strictEqual(row.change24hDirectionUnknown, true);
+  assert.ok(
+    parsed.diagnostics.warnings.some(w => w.startsWith(CHANGE_DIRECTION_UNKNOWN)),
+    'unknown direction must surface a parser warning',
+  );
 });
 
 test('positive gainers (explicit + and up markup)', () => {

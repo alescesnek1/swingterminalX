@@ -34,3 +34,18 @@ test('GECKO degraded (ok:false) response is labelled DEGRADED, not LIVE', () => 
   assert.match(js, /statusEl\.textContent = 'DEGRADED'/);
   assert.match(js, /statusEl\.textContent = 'LIVE'/);
 });
+
+test('GECKO renders an unknown 24h change as a muted dash, never as a green gain', () => {
+  // The parser leaves change24hPct null (and change24hText '') whenever the 24h
+  // direction could not be read from trusted markup. The row renderer must show
+  // that as a neutral dash, not as a positive move.
+  //
+  // Colour is gated on an actual number: null/undefined keeps the muted default.
+  assert.match(js, /let chgColor = 'var\(--txt3\)';/);
+  assert.match(js, /if \(typeof chgVal === 'number' && chgVal > 0\) chgColor = 'var\(--grn\)';/);
+  assert.match(js, /if \(typeof chgVal === 'number' && chgVal < 0\) chgColor = 'var\(--red\)';/);
+  // The change cell text goes through _geckoDash, which renders an em dash for
+  // null / undefined / '' instead of an invented value.
+  assert.match(js, /gecko-row-change" style="color:\$\{chgColor\}">\$\{_geckoDash\(item\.change24hText\)\}/);
+  assert.match(js, /function _geckoDash\(v\) \{\s*\n\s*if \(v === null \|\| v === undefined \|\| v === ''\) return '\\u2014';/);
+});

@@ -1913,3 +1913,26 @@ ChatGPT-facing project memory, not a code dump.
 > Asset cache-bust token `6k4 → 6k5`. Full suite green (2280 pass / 0 fail /
 > 26 skipped), `npm run lint` 0 errors. No push, no deploy. Detail:
 > `docs/radar-valuation-bands.md`.
+
+> _CoinGecko highlights: an unknown 24h direction is UNKNOWN, never a gain
+> (2026-08-19, local-only, branch `fix/coingecko-highlights-unknown-direction`):_
+> The highlights scraper reads CoinGecko list HTML, where the minus sign is often
+> absent from the visible text and the direction lives only in a colour class,
+> brand hex, or arrow glyph. `detectChangeDirection()` already refused to guess a
+> direction from words in a coin name and returns 0 when it cannot tell — but the
+> parser started from `sign = 1`, so an unrecognised **-27% was published as
+> +27%**, silently and in the most favourable direction. It now fails closed: a
+> percent magnitude with no trusted direction leaves `change24hPct` null and
+> `change24hText` empty, sets `change24hDirectionUnknown` on the row, counts it in
+> the section's `unknownDirectionCount`, and raises a `CHANGE_DIRECTION_UNKNOWN`
+> warning in the parser response (`parserVersion` 1 → 2); such rows count as
+> MISSING 24h coverage, so the existing "partial data" badge fires. The render path
+> already colours only numeric values and dashes empty text, so the row shows as a
+> muted em dash rather than green — no frontend change was needed and none was
+> made, so no asset cache-bust is required. The section heading (Top Gainers /
+> Top Losers) is deliberately **not** adopted as a direction source; that would be
+> a new trust assumption, not a fix. Diagnostics only — no RADAR, alerting, or
+> trading path consumes this data. Verified in a clean detached worktree at the
+> hotfix commit with the unrelated Arkham WIP absent: full suite 2436 pass / 0 fail
+> / 26 skipped, `npm run lint` 0 errors, `git diff --check` clean. No push, no
+> deploy.
