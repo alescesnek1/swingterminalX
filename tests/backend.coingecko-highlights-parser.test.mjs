@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert';
 
-import { parseCoinGeckoHighlights, sanitizeName, sectionValueMode } from '../apps/edge/netlify/edge-functions/coingecko-highlights.js';
+import { parseCoinGeckoHighlights, sanitizeName, sectionValueMode, CHANGE_DIRECTION_UNKNOWN } from '../apps/edge/netlify/edge-functions/coingecko-highlights.js';
 
 const mockHtml = `
 <html>
@@ -351,4 +351,173 @@ test('Missing values stay null and are never invented', (t) => {
 
 test('Source guard: no Binance order endpoints, no Telegram sender, no worker mutation paths', (t) => {
   assert.ok(true);
+});
+
+// ── Fail-closed 24h direction ──────────────────────────────────────────────
+//
+// CoinGecko's list markup does not always carry the minus sign in the visible
+// text: on some pages the direction lives ONLY in a colour class / brand hex /
+// arrow glyph. If that markup is not recognised, the magnitude is UNKNOWN.
+// It must never be published as a gain — a real -27% would otherwise surface
+// as +27%. Assumption pinned here: the section heading ("Top Gainers" /
+// "Top Losers") is NOT a trusted direction source, so a Top Losers row with no
+// row-level markup still resolves to UNKNOWN rather than to a negative move.
+
+// Deliberately markup-free: no colour class, no brand hex, no arrow glyph.
+const unknownDirHtml = `
+<html><body>
+  <div>
+    <h2>Top Losers</h2>
+    <table>
+      <tr><td><a href="/en/coins/quiet">Quiet QUI</a></td><td>$2.68</td><td><span class="pct">27.0%</span></td></tr>
+    </table>
+  </div>
+</body></html>`;
+
+test('Unknown direction leaves change24hPct null instead of inventing a gain', () => {
+  const result = parseCoinGeckoHighlights(unknownDirHtml);
+  const losers = result.sections.find(s => s.key === 'top_losers');
+  assert.ok(losers, 'Found Top Losers section');
+  const row = losers.items[0];
+
+  assert.strictEqual(row.change24hPct, null);
+  assert.ok(!(row.change24hPct > 0), 'unknown direction must never read as positive');
+  // The display text is dropped too, so the UI cannot render a bare "27.0%"
+  // that a reader would take for a gain.
+  assert.strictEqual(row.change24hText, '');
+  assert.strictEqual(row.change24hDirectionUnknown, true);
+});
+
+test('Unknown direction emits a CHANGE_DIRECTION_UNKNOWN diagnostic', () => {
+  const result = parseCoinGeckoHighlights(unknownDirHtml);
+  const warning = result.diagnostics.warnings.find(w => w.startsWith(CHANGE_DIRECTION_UNKNOWN));
+  assert.ok(warning, `expected a ${CHANGE_DIRECTION_UNKNOWN} warning, got ${JSON.stringify(result.diagnostics.warnings)}`);
+  assert.match(warning, /Top Losers/);
+
+  const losers = result.sections.find(s => s.key === 'top_losers');
+  assert.strictEqual(losers.diagnostics.unknownDirectionCount, 1);
+  // The row counts as MISSING 24h coverage, never as covered.
+  assert.strictEqual(losers.diagnostics.change24hCount, 0);
+  assert.strictEqual(losers.diagnostics.missingChange24hCount, 1);
+});
+
+test('Known loser markup still yields a negative percent', () => {
+  const doc = `
+<html><body>
+  <div>
+    <h2>Top Losers</h2>
+    <table>
+      <tr><td><a href="/en/coins/charlie">Charlie CHL</a></td><td>$3.00</td><td><span class="gecko-down">14.0%</span></td></tr>
+    </table>
+  </div>
+</body></html>`;
+  const losers = parseCoinGeckoHighlights(doc).sections.find(s => s.key === 'top_losers');
+  assert.strictEqual(losers.items[0].change24hPct, -14.0);
+  assert.strictEqual(losers.items[0].change24hText, '-14.0%');
+  assert.strictEqual(losers.items[0].change24hDirectionUnknown, false);
+  assert.strictEqual(losers.diagnostics.unknownDirectionCount, 0);
+});
+
+test('Known gainer markup still yields a positive percent', () => {
+  const doc = `
+<html><body>
+  <div>
+    <h2>Top Gainers</h2>
+    <table>
+      <tr><td><a href="/en/coins/alpha">Alpha ALP</a></td><td>$1.50</td><td><span class="gecko-up">12.0%</span></td></tr>
+    </table>
+  </div>
+</body></html>`;
+  const gainers = parseCoinGeckoHighlights(doc).sections.find(s => s.key === 'top_gainers');
+  assert.strictEqual(gainers.items[0].change24hPct, 12.0);
+  assert.strictEqual(gainers.items[0].change24hText, '+12.0%');
+  assert.strictEqual(gainers.items[0].change24hDirectionUnknown, false);
+});
+
+test('Explicit +/- in the visible text is still honoured without any markup', () => {
+  const doc = `
+<html><body>
+  <div>
+    <h2>Trending Coins</h2>
+    <table>
+      <tr><td><a href="/en/coins/plus">Plus PLS</a></td><td>$1.00</td><td><span class="pct">+3.5%</span></td></tr>
+      <tr><td><a href="/en/coins/minus">Minus MNS</a></td><td>$2.00</td><td><span class="pct">-4.5%</span></td></tr>
+    </table>
+  </div>
+</body></html>`;
+  const trending = parseCoinGeckoHighlights(doc).sections.find(s => s.key === 'trending_coins');
+  const plus = trending.items.find(i => i.href.endsWith('/plus'));
+  const minus = trending.items.find(i => i.href.endsWith('/minus'));
+  assert.strictEqual(plus.change24hPct, 3.5);
+  assert.strictEqual(minus.change24hPct, -4.5);
+  assert.strictEqual(minus.change24hText, '-4.5%');
+  assert.strictEqual(trending.diagnostics.unknownDirectionCount, 0);
+});
+
+test('Missing direction never defaults to +1, at any magnitude or section', () => {
+  const rows = ['0.5%', '8.0%', '27.0%', '1,234.56%'];
+  for (const pct of rows) {
+    for (const heading of ['Top Gainers', 'Top Losers', 'Trending Coins', 'New Coins']) {
+      const doc = `
+<html><body>
+  <div>
+    <h2>${heading}</h2>
+    <table>
+      <tr><td><a href="/en/coins/sample">Sample SMP</a></td><td>$1.00</td><td><span class="pct">${pct}</span></td></tr>
+    </table>
+  </div>
+</body></html>`;
+      const key = heading.toLowerCase().replace(/ /g, '_');
+      const sec = parseCoinGeckoHighlights(doc).sections.find(s => s.key === key);
+      assert.ok(sec, `Found ${heading} section`);
+      const row = sec.items[0];
+      assert.strictEqual(row.change24hPct, null, `${heading} / ${pct} must stay null`);
+      assert.strictEqual(row.change24hDirectionUnknown, true);
+    }
+  }
+});
+
+test('Coin/category words like red/green/falling/rising never decide direction', () => {
+  // No markup at all: the words in the name decide nothing, in either direction.
+  const wordsOnly = `
+<html><body>
+  <div>
+    <h2>Trending Coins</h2>
+    <table>
+      <tr><td><a href="/en/coins/redfall">Red Falling RED</a></td><td>$1.00</td><td><span class="pct">5.0%</span></td></tr>
+      <tr><td><a href="/en/coins/greenrise">Green Rising GRN</a></td><td>$2.00</td><td><span class="pct">6.0%</span></td></tr>
+    </table>
+  </div>
+</body></html>`;
+  const trending = parseCoinGeckoHighlights(wordsOnly).sections.find(s => s.key === 'trending_coins');
+  assert.strictEqual(trending.items.length, 2);
+  for (const row of trending.items) {
+    assert.strictEqual(row.change24hPct, null, `${row.name} must not get a direction from its name`);
+    assert.strictEqual(row.change24hDirectionUnknown, true);
+  }
+
+  // Trusted markup wins over the words: a coin named "Green Rising" inside a
+  // row marked down is negative, not positive.
+  const markupWins = `
+<html><body>
+  <div>
+    <h2>Top Losers</h2>
+    <table>
+      <tr><td><a href="/en/coins/greenrise">Green Rising GRN</a></td><td>$2.00</td><td><span class="gecko-down">6.0%</span></td></tr>
+    </table>
+  </div>
+</body></html>`;
+  const losers = parseCoinGeckoHighlights(markupWins).sections.find(s => s.key === 'top_losers');
+  assert.strictEqual(losers.items[0].change24hPct, -6.0);
+});
+
+test('Rows with no percent at all are not flagged as unknown-direction', () => {
+  const result = parseCoinGeckoHighlights(mockHtml);
+  const missing = result.sections.find(s => s.key === 'missing_data_section');
+  assert.strictEqual(missing.items[0].change24hPct, null);
+  assert.strictEqual(missing.items[0].change24hDirectionUnknown, false);
+  assert.strictEqual(missing.diagnostics.unknownDirectionCount, 0);
+  // A section that simply has no % values must not raise the direction warning.
+  const warned = result.diagnostics.warnings.filter(w => w.startsWith(CHANGE_DIRECTION_UNKNOWN));
+  assert.strictEqual(warned.length, 0, `unexpected warnings: ${JSON.stringify(warned)}`);
 });
