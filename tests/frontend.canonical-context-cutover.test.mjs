@@ -220,7 +220,17 @@ test('every versioned asset carries the same single bumped cache-bust token', ()
   // max-age=3600 on /*.js, so without the bump a returning tab keeps the old
   // code — the code whose REFRESH button cannot escape a cached snapshot and
   // whose detail panel shows a stale 24h % as if it were live.
-  assert.equal(tokens[0], '6m1', 'token was bumped for this JS change');
+  // 6m1 -> 6m2 for the production reliability P0-P2 hotfix (terminal.js: a
+  // forced refresh bypasses the canonical /api/context store, the hard-stale
+  // MARKET DATA UNAVAILABLE gate, the Supabase background-refresh shutdown in
+  // native-auth mode, the RADAR scanner-context freshness gate + throttle, the
+  // DOMContentLoaded-gated native session restore, and the removal of the
+  // always-400 news-scoring POST; js/freshness-badge.js: marketDataUnusable();
+  // js/ai-analysis.js: the 400 branch; terminal.css + index.html: the
+  // unavailable banner). Load-bearing: netlify.toml sets max-age=3600 on
+  // /*.js, so without the bump a returning tab keeps the old code — the code
+  // whose REFRESH cannot reach /api/markets at all.
+  assert.equal(tokens[0], '6m2', 'token was bumped for this JS change');
 });
 
 // The measurement budget targets the deepest drawdowns, and DISLOCATION is 20% of

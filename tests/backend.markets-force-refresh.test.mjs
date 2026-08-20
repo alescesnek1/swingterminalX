@@ -136,7 +136,7 @@ test('a forced read is answered no-store so no cache layer can replay it', () =>
 test('the stale last-good fallback is no longer CDN-cacheable', () => {
   // It used to go out with `public, s-maxage=30` + only `Vary: Origin`, so a
   // frozen body was parked in the CDN and replayed across tiers.
-  assert.match(marketsSrc, /headers: \{ \.\.\.noStoreHeaders\(request\), 'X-Tier': tier/);
+  assert.match(marketsSrc, /const staleHeaders = \{ \.\.\.noStoreHeaders\(request\), 'X-Tier': tier/);
 });
 
 test('forced rebuilds are bounded so click-mashing cannot hammer upstream', () => {
@@ -147,7 +147,9 @@ test('forced rebuilds are bounded so click-mashing cannot hammer upstream', () =
 });
 
 test('the force outcome is reported back, not silently swallowed', () => {
-  assert.match(marketsSrc, /X-Force-Refresh'\] = forcedRebuild \? 'rebuilt' : 'throttled'/);
+  assert.match(marketsSrc, /X-Force-Refresh'\] = forcedRebuild \? FORCE_OUTCOME_REBUILT : FORCE_OUTCOME_THROTTLED/);
+  assert.match(marketsSrc, /const FORCE_OUTCOME_REBUILT = 'rebuilt';/);
+  assert.match(marketsSrc, /const FORCE_OUTCOME_THROTTLED = 'throttled';/);
   assert.match(marketsSrc, /console\.warn\('\[MARKETS\] force refresh'/);
 });
 

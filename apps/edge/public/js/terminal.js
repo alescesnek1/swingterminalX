@@ -606,58 +606,29 @@ const LiveFeed = {
       return;
     }
 
-    // For real articles, try to get AI scoring
-    const headlines = articles.map(a => a.title).join('\n');
-    let scored = null;
-
-    try {
-      const token = await _getAccessTokenForFeed();
-      if (!token) {
-        // No auth — push raw headlines without AI scoring
-        this._pushRawHeadlines(articles);
-        return;
-      }
-
-      const r = await fetch('/api/analyze', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-          'Accept': 'application/json',
-        },
-        body: JSON.stringify({
-          symbol: '__NEWS_SCORING__',
-          lang: 'en',
-          _newsScoring: true,
-          headlines: headlines,
-        }),
-        signal: AbortSignal.timeout(15000),
-      });
-
-      if (r.ok) {
-        const data = await r.json();
-        const text = data?.analysis || '';
-        scored = this._parseAiScores(text, articles);
-      }
-    } catch (e) {
-      console.warn('[NEWS/AI] Scoring failed:', e.message);
+    // AI impact scoring is NOT AVAILABLE, and the honest thing is to say so
+    // once rather than keep asking.
+    //
+    // This used to POST /api/analyze every five minutes with
+    // `symbol: '__NEWS_SCORING__'`. /api/analyze is a per-SYMBOL endpoint:
+    // it runs the body through normalizeBinanceSymbol(), which rejects
+    // underscores, so that sentinel could only ever come back
+    // `400 Invalid symbol format`. It never once succeeded — the batch
+    // headline-scoring contract the payload assumed was never implemented on
+    // the server — so every cycle spent an authenticated round trip, logged an
+    // "Upstream returned 400" in the error log, and then fell through to the
+    // keyword heuristic below anyway.
+    //
+    // So: go straight to the heuristic, which is what actually rendered all
+    // along, and stop manufacturing a recurring error out of a feature that
+    // does not exist. `_parseAiScores` is kept — it is the reader for that
+    // response shape and costs nothing until a real batch endpoint exists.
+    // Nothing here changes what the operator sees in the feed.
+    if (!this.__aiScoringUnavailableLogged) {
+      this.__aiScoringUnavailableLogged = true;
+      console.warn('[NEWS/AI] headline impact scoring is unavailable — /api/analyze has no batch-headline route; using the keyword heuristic');
     }
-
-    // Push scored or raw headlines
-    if (scored && scored.length) {
-      scored.forEach(item => {
-        if (item.impact >= 6) {
-          this.enqueue(item.title, 'news', {
-            sentiment: item.sentiment,
-            impact: item.impact,
-            source: item.source,
-            url: item.url || ''
-          });
-        }
-      });
-    } else {
-      this._pushRawHeadlines(articles);
-    }
+    this._pushRawHeadlines(articles);
   },
 
   _pushRawHeadlines(articles) {
@@ -716,6 +687,12 @@ window.LiveFeed = LiveFeed;
 // Helper: get the access token for news AI scoring.
 // Goes through AuthClient so it works with either identity source (native
 // account or Supabase) — see js/auth-client.js and docs/native-auth.md.
+//
+// CURRENTLY HAS NO CALLER. Its only caller was the news headline-scoring POST
+// to /api/analyze, removed because that endpoint has no batch-headline route
+// and answered 400 every time (see _aiScoreNews). Kept, unchanged, because it
+// is the correct token accessor for the moment a real batch route exists —
+// not because anything is still using it.
 async function _getAccessTokenForFeed() {
   try {
     if (window.AuthClient) return await window.AuthClient.getAccessToken();
@@ -2058,12 +2035,29 @@ async function _fetchCanonicalMarkets(authHeaders) {
   if (!r.ok) { const body = await r.text().catch(() => ''); throw new Error('HTTP ' + r.status + ' — ' + body.slice(0, 120)); }
   const j = await r.json();
   if (!j || j.ok === false) throw new Error('context error: ' + ((j && j.reason) || 'unknown'));
+  // HARD age gate on the published run.
+  //
+  // A successful read of a DEAD store is the dangerous case: the response is
+  // 200, the rows parse, and every price looks like a quote — production spent
+  // a day rendering a 25.9-hour-old book as the live scanner. Past the hard
+  // ceiling this is treated as a FAILED canonical read so the existing honest
+  // fallback runs: the failure is logged and toasted, __canonicalContext is
+  // marked failed (so the RADAR panel stops replaying it as current), and the
+  // legacy /api/markets feed — which touches no database — takes over.
+  const _observedMs = j.market && j.market.observedAt ? Date.parse(j.market.observedAt) : NaN;
+  const _unusable = _marketDataUnusableFor(Number.isFinite(_observedMs) ? _observedMs : null);
+  if (_unusable.unusable) {
+    throw new Error('canonical snapshot unusable — ' + _unusable.reason);
+  }
   const tickers = (j.market && Array.isArray(j.market.tickers)) ? j.market.tickers : [];
   const rows = _dedupeCanonicalByBase(tickers.map(_mapCanonicalTicker).filter((row) => row.symbol));
   await _enrichCanonicalWithMarketCap(rows, authHeaders);
   // Expose the canonical RADAR + provider status for the RADAR/Absorb panels.
   window.__canonicalContext = { radar: j.radar || null, market: { observedAt: j.market?.observedAt || null, freshness: j.market?.freshness || null }, run: j.run || null, receivedAt: Date.now() };
-  window.__marketsFreshness = { ok: true, servedFrom: 'canonical', stale: j.market?.freshness === 'STALE', generatedAt: j.market?.observedAt ? Date.parse(j.market.observedAt) : null };
+  // `forced` is stated outright as false: a forced read can never reach this
+  // path (see fetchData), so a null outcome here means "this was a background
+  // tick", not "the force vanished".
+  window.__marketsFreshness = { ok: true, servedFrom: 'canonical', stale: j.market?.freshness === 'STALE', staleReason: j.market?.freshness === 'STALE' ? 'canonical run older than the store budget' : null, generatedAt: j.market?.observedAt ? Date.parse(j.market.observedAt) : null, forced: false, forceOutcome: null, upstreamStatus: null };
   return rows;
 }
 
@@ -2074,7 +2068,23 @@ async function fetchData(opts) {
   // wake the database.
   const force = !!(opts && opts.force);
   let live = null;
-  const _canonical = _canonicalContextEnabled();
+  // A FORCED read never goes through the canonical Context Store.
+  //
+  // This is the P0 bug in one line. /api/context is a DB-backed read of the
+  // last PUBLISHED run, and the publishing collector is deliberately off — so
+  // it answers instantly, successfully, with whatever it published last. In
+  // production that was a 25.9-hour-old snapshot. Because the click never
+  // reached /api/markets, `?force=1` was never sent, no X-Force-Refresh header
+  // ever came back (hence `force_outcome: null`), and REFRESH could not
+  // possibly produce fresh data no matter how many cache layers it defeated.
+  //
+  // Forcing the canonical read instead is NOT the fix: it would wake Postgres
+  // on a user's click and still hand back the same published run. The only
+  // path that can actually rebuild from upstream is the public market read.
+  const _canonical = _canonicalContextEnabled() && !force;
+  if (force && _canonicalContextEnabled()) {
+    console.warn('[REFRESH] forced read bypasses the canonical /api/context store — going straight to /api/markets (no DB read is forced)');
+  }
   try {
     const authHeaders = await _getAuthHeaders();
     if (_canonical) {
@@ -2123,24 +2133,41 @@ async function fetchData(opts) {
     const _staleHdr = r.headers.get('X-Stale') === 'true';
     const _genAtRaw = r.headers.get('X-Generated-At');
     const _genAtMs = _genAtRaw ? Date.parse(_genAtRaw) : NaN;
+    const _forceHdr = r.headers.get('X-Force-Refresh');
+    // A forced request must ALWAYS report an outcome. The header is the
+    // truth when we can read it; when we cannot (a cross-origin deploy whose
+    // Access-Control-Expose-Headers is missing or was stripped by a proxy) we
+    // say exactly that instead of `null`, which read as "no force happened"
+    // and sent the operator hunting the wrong bug. Never invented: this value
+    // claims only what we actually know.
+    const _forceOutcome = force
+      ? (_forceHdr || (_genAtRaw ? 'unknown-force-header-unreadable' : 'unknown-diagnostics-unavailable'))
+      : (_forceHdr || null);
     window.__marketsFreshness = {
       ok: true,
       servedFrom: _servedFrom,
       stale: _staleHdr || _servedFrom !== 'live',
       staleReason: r.headers.get('X-Stale-Reason') || null,
       generatedAt: Number.isFinite(_genAtMs) ? _genAtMs : null,
-      // What a forced read actually achieved: 'rebuilt' (upstream was hit) or
-      // 'throttled' (inside the anti-hammer window). Absent on a normal tick.
+      // What a forced read actually achieved: 'rebuilt' (upstream was hit),
+      // 'throttled' (inside the anti-hammer window) or 'upstream-failed' (the
+      // rebuild ran and failed, so a last-good body came back). Absent on a
+      // normal tick.
       forced: force,
-      forceOutcome: r.headers.get('X-Force-Refresh') || null,
+      forceOutcome: _forceOutcome,
+      upstreamStatus: r.headers.get('X-Upstream-Status') || null,
     };
     if (force) {
       console.warn('[REFRESH] forced /api/markets read', {
         outcome: window.__marketsFreshness.forceOutcome,
+        upstream_status: window.__marketsFreshness.upstreamStatus,
         served_from: _servedFrom,
         stale: window.__marketsFreshness.stale,
         generated_at: _genAtRaw || null,
       });
+      if (!_forceHdr) {
+        console.warn('[REFRESH] X-Force-Refresh was not readable on the response — check Access-Control-Expose-Headers on /api/markets');
+      }
     }
     let rawData = await r.json();
     if (window.__DEBUG) console.log("🔍 Data from /api/markets:", rawData);
@@ -2257,6 +2284,17 @@ function renderTopbar() {
   const badge = (typeof window.freshnessBadge === 'function')
     ? window.freshnessBadge(fresh, fState.stale && SRC !== 'ERROR' ? 'STALE' : SRC)
     : { cls: SRC.includes('LIVE') && !fState.stale ? 's-live' : 's-mock', label: fState.stale ? 'STALE' : SRC, title: SRC };
+  // HARD gate. Past the hard age ceiling the dataset is not "stale market
+  // data" that an amber badge covers — it is not market data. The badge says
+  // UNAVAILABLE and the scanner gets its own banner, so a 25.9-hour-old book
+  // can never again be mistaken for a normal table with a small warning.
+  const uState = _marketDataUnusableState();
+  if (uState.unusable) {
+    badge.cls = 's-error';
+    badge.label = 'UNAVAILABLE';
+    badge.title = 'market data unavailable — ' + (uState.reason || 'freshness unknown');
+  }
+  _applyMarketUnavailable(uState);
   const srcb = document.getElementById('srcb');
   srcb.className = 'sbadge ' + badge.cls;
   srcb.textContent = badge.label;
@@ -2956,6 +2994,45 @@ function _detailStaleBannerHtml(state) {
 function _applyDetailStaleClass(stale) {
   const dc = document.getElementById('dcon');
   if (dc) dc.classList.toggle('data-stale', !!stale);
+}
+
+// ─────────────────────────────────────────────────────────────
+// MARKET DATA UNAVAILABLE — the hard-stale presentation.
+//
+// Paints the banner above the scanner and marks the table + detail panel so
+// they cannot read as a normal market view. Purely presentational: it changes
+// no row, no score, no RADAR gate and sends nothing anywhere. The rows stay on
+// screen on purpose — they are the last thing we had, and hiding them would
+// replace one lie ("this is live") with another ("there was never anything").
+// ─────────────────────────────────────────────────────────────
+function _marketUnavailableText(state) {
+  const reason = (state && state.reason) || 'freshness could not be established';
+  return 'MARKET DATA UNAVAILABLE — ' + reason
+    + '. The rows below are a frozen last-good snapshot and are NOT tradeable. Press REFRESH.';
+}
+
+function _applyMarketUnavailable(state) {
+  const unusable = !!(state && state.unusable);
+  const banner = document.getElementById('market-unavailable');
+  if (banner) {
+    banner.textContent = unusable ? _marketUnavailableText(state) : '';
+    banner.hidden = !unusable;
+  }
+  const center = document.querySelector('.scanner-center');
+  if (center) center.classList.toggle('market-unavailable', unusable);
+  const dc = document.getElementById('dcon');
+  if (dc) dc.classList.toggle('data-unavailable', unusable);
+  // Logged once per TRANSITION, not per paint: the operator must be able to
+  // see in the console exactly when the dataset crossed the hard line — and
+  // must not have that signal buried under one line per render. The recovery
+  // line is only emitted after a real outage (previous state === true), so a
+  // healthy first paint says nothing at all.
+  const prev = window.__marketUnavailableLogged;
+  if (unusable !== prev) {
+    window.__marketUnavailableLogged = unusable;
+    if (unusable) console.error('[MARKET] data unavailable —', (state && state.reason) || 'unknown', { age_ms: state && state.ageMs });
+    else if (prev === true) console.warn('[MARKET] data usable again');
+  }
 }
 
 // On-demand Binance order book snapshot for the right detail panel.
@@ -4141,17 +4218,29 @@ function _resetTabOrder() {
   _renderTabReorderControls();
 }
 
+let _tabOrderRetryQueued = false;
 function initTabOrder() {
   const bar = document.getElementById('tabs');
   if (!bar) return;
   _canonicalTabIds();                 // snapshot the shipped order before any move
   const tools = document.getElementById('tab-tools');
   if (!_tabOrderApi()) {
-    // No module → keep the shipped order and hide a control that cannot work.
+    // tab-order.js is an ES module, so it is DEFERRED: during document parse it
+    // has not executed yet and window.__tabOrder does not exist. A boot that
+    // starts that early (fast native session restore) must not conclude the
+    // module is missing — it is merely not here YET. Retry once at
+    // DOMContentLoaded, by which time every deferred module has run.
+    if (document.readyState === 'loading' && !_tabOrderRetryQueued) {
+      _tabOrderRetryQueued = true;
+      document.addEventListener('DOMContentLoaded', () => { initTabOrder(); }, { once: true });
+      return;
+    }
+    // Genuinely absent → keep the shipped order and hide a control that cannot work.
     if (tools) tools.hidden = true;
     console.warn('[TAB-ORDER] tab-order.js not loaded — tab bar keeps its default order');
     return;
   }
+  if (tools) tools.hidden = false;
   _applyTabOrder(_currentTabOrder());
 
   // One delegated listener. Arrow clicks must NOT fall through to the tab's
@@ -4275,7 +4364,11 @@ function sv(v, el) {
     try { refreshFleet(); _startFleetPoll(); } catch (e) { console.warn('[Fleet] init failed:', e && e.message); }
   });
   if (activeViewName === 'radar') requestAnimationFrame(() => {
-    try { refreshFleet(); _startFleetPoll(); renderTradingRadarPanel(); window.__lastRadarContextPush = null; pushScannerContextToRadar(); } catch (e) { console.warn('[Trading RADAR] init failed:', e && e.message); }
+    // No timestamp reset here any more: entering the view used to null
+    // __lastRadarContextPush to force an immediate post, which is exactly how
+    // a UI action bypassed the cost throttle. The throttle now lives inside
+    // pushScannerContextToRadar(), so this asks and is answered honestly.
+    try { refreshFleet(); _startFleetPoll(); renderTradingRadarPanel(); pushScannerContextToRadar({ trigger: 'radar-view-entry' }); } catch (e) { console.warn('[Trading RADAR] init failed:', e && e.message); }
   });
   if (activeViewName === 'cockpit') requestAnimationFrame(() => {
     try { renderCockpit(); refreshPersonalWatchSettings(); refreshPersonalWatchList(); refreshAdminPriceHistorySignals(); } catch (e) { console.warn('[Cockpit] render failed:', e && e.message); }
@@ -4901,6 +4994,40 @@ function _marketFreshnessState() {
   };
 }
 
+// ─────────────────────────────────────────────────────────────
+// HARD trust gate — one step past _marketFreshnessState().
+//
+// STALE says "the numbers are frozen, do not trade off them". UNUSABLE says
+// "this is not market data": a snapshot beyond HARD_MAX_MARKET_AGE_MS is a
+// different market — other listings, other prices — and must never be painted
+// as a normal scanner table. The decision is the pure, unit-tested
+// js/freshness-badge.js module; the inline fallback FAILS CLOSED, so if that
+// module never loads an unknown age is UNUSABLE, never usable.
+// ─────────────────────────────────────────────────────────────
+const HARD_MAX_MARKET_AGE_MS = 30 * 60 * 1000;   // keep in sync with freshness-badge.js
+
+function _marketDataUnusableFor(generatedAtMs) {
+  const fresh = { ok: true, generatedAt: Number.isFinite(generatedAtMs) ? generatedAtMs : null };
+  const api = window.__marketFreshness;
+  if (api && typeof api.marketDataUnusable === 'function') return api.marketDataUnusable(fresh);
+  const gen = Number.isFinite(generatedAtMs) ? generatedAtMs : null;
+  if (gen == null) return { unusable: true, reason: 'no snapshot timestamp', ageMs: null, ageLabel: null };
+  const ageMs = Math.max(0, Date.now() - gen);
+  if (ageMs > HARD_MAX_MARKET_AGE_MS) return { unusable: true, reason: 'snapshot older than the hard limit', ageMs, ageLabel: Math.round(ageMs / 60000) + 'm' };
+  return { unusable: false, reason: null, ageMs, ageLabel: Math.round(ageMs / 1000) + 's' };
+}
+
+// Hard verdict for whatever is currently on screen. Before the first market
+// read has landed there is nothing to judge — that is LOADING, not unusable.
+function _marketDataUnusableState() {
+  if (!window.__marketsFreshness) return { unusable: false, reason: null, ageMs: null, ageLabel: null };
+  const fresh = window.__marketsFreshness;
+  const api = window.__marketFreshness;
+  if (api && typeof api.marketDataUnusable === 'function') return api.marketDataUnusable(fresh);
+  if (fresh.ok === false) return { unusable: true, reason: 'the market read failed', ageMs: null, ageLabel: null };
+  return _marketDataUnusableFor(fresh.generatedAt);
+}
+
 // How a percentage that is only meaningful on a CURRENT dataset should render.
 // Stale dataset → 'STALE'. Absent value → 'UNKNOWN'. Never a fabricated 0.00%.
 function _pct24hDisplay(value, state) {
@@ -4946,9 +5073,19 @@ async function manualRefresh(opts) {
       const why = state.reason || 'upstream did not return a newer snapshot';
       const outcome = fresh.forceOutcome === 'throttled'
         ? ' Force was throttled (min 10s between rebuilds) — try again shortly.'
-        : '';
-      window.Toast?.error?.('Still STALE after refresh', why + '.' + outcome, { endpoint: '/api/markets' });
-      console.warn('[REFRESH] manual refresh completed but data is still stale:', { reason: why, force_outcome: fresh.forceOutcome || null, age_ms: state.ageMs });
+        : fresh.forceOutcome === 'upstream-failed'
+          ? ' The rebuild ran and upstream failed — the rows below are the last good snapshot.'
+          : '';
+      const unusable = _marketDataUnusableState();
+      const title = unusable.unusable ? 'MARKET DATA UNAVAILABLE' : 'Still STALE after refresh';
+      window.Toast?.error?.(title, why + '.' + outcome, { endpoint: '/api/markets' });
+      console.warn('[REFRESH] manual refresh completed but data is still stale:', {
+        reason: why,
+        force_outcome: fresh.forceOutcome || null,
+        upstream_status: fresh.upstreamStatus || null,
+        age_ms: state.ageMs,
+        unusable: unusable.unusable,
+      });
     }
     return state;
   } catch (e) {
@@ -5039,9 +5176,10 @@ async function _doRefreshCore(opts) {
     DATA.forEach((d) => { d._mom = computeMomentumScore(d); });
   } catch (e) { console.warn('[MOM] compute failed:', e.message); }
 
-  if (!window.__lastRadarContextPush || (Date.now() - window.__lastRadarContextPush > 45000)) {
-    pushScannerContextToRadar();
-  }
+  // Throttle + freshness gate live inside pushScannerContextToRadar(), so a
+  // manual REFRESH cannot turn into an extra post and a stale dataset is never
+  // handed to the server RADAR as scanner truth.
+  pushScannerContextToRadar({ trigger: 'refresh-tick' });
 
   renderTopbar();
   renderList();
@@ -5139,11 +5277,66 @@ function _radarDetectScannerFields(rows) {
   return detected.map(([label, key]) => `${label}:${key || 'missing'}`);
 }
 
-function pushScannerContextToRadar() {
-  if (!DATA || !DATA.length) return;
-  window.__lastRadarContextPush = Date.now();
+// ─────────────────────────────────────────────────────────────
+// Foreground scanner-context post — cost guard + honesty gate.
+//
+// WHAT IT COSTS: one authenticated POST of up to 500 rows per open tab, which
+// on the server is a read-modify-write of the whole fleet Blobs document plus
+// a RADAR re-evaluation. It ran from the render path of EVERY refresh cycle
+// (60s steady state) behind a 45s window that any UI action could reset by
+// nulling the timestamp, so entering the RADAR view or pressing REFRESH fired
+// an extra one on demand.
+//
+// WHAT IT MUST NEVER DO: feed a stale dataset into the server's RADAR context.
+// While production was serving a 25.9-hour-old snapshot this path was posting
+// that book as current scanner truth every 45 seconds. Yesterday's prices
+// scored against today's gates is worse than no context at all, so this now
+// fails CLOSED: stale or unusable market data means no post, with the reason
+// stated in the console and on window.__lastRadarContextPostStatus.
+//
+// WHAT IT DOES NOT TOUCH: RADAR scoring, the Absorb/Reclaim gates,
+// ENTRY_READY, Telegram, or any order path. It only decides whether — and how
+// often — the browser hands its scanner rows over.
+// ─────────────────────────────────────────────────────────────
+const RADAR_CONTEXT_MIN_INTERVAL_MS = 45 * 1000;
+const RADAR_CONTEXT_MAX_ROWS = 500;          // the server rejects anything above this
+let _lastRadarContextPostAt = 0;
+
+function _noteRadarContextSkip(reason) {
+  window.__lastRadarContextPostStatus = 'skipped: ' + reason;
+  window.__lastRadarContextSkipReason = reason;
+  console.warn('[RADAR] scanner context post skipped —', reason);
+}
+
+function pushScannerContextToRadar(opts) {
+  const trigger = (opts && opts.trigger) || 'refresh-tick';
+  const now = Date.now();
+  if (!DATA || !DATA.length) { _noteRadarContextSkip('no scanner rows loaded (' + trigger + ')'); return; }
+
+  // Fail closed on data freshness BEFORE the throttle, so the reason the
+  // operator sees is the real one and not "throttled".
+  const _unusable = _marketDataUnusableState();
+  if (_unusable.unusable) {
+    _noteRadarContextSkip('market data unavailable — ' + (_unusable.reason || 'freshness unknown'));
+    return;
+  }
+  const _fresh = _marketFreshnessState();
+  if (_fresh.stale) {
+    _noteRadarContextSkip('market snapshot is STALE — ' + (_fresh.reason || 'not live') + (_fresh.ageLabel ? ' (age ' + _fresh.ageLabel + ')' : ''));
+    return;
+  }
+
+  // ONE throttle, enforced here. It used to live at the call site behind a
+  // window flag that UI actions reset, which is why a click could bypass it.
+  if (_lastRadarContextPostAt && (now - _lastRadarContextPostAt) < RADAR_CONTEXT_MIN_INTERVAL_MS) {
+    const waitMs = RADAR_CONTEXT_MIN_INTERVAL_MS - (now - _lastRadarContextPostAt);
+    window.__lastRadarContextPostStatus = 'throttled (' + Math.ceil(waitMs / 1000) + 's to go)';
+    return;
+  }
+  _lastRadarContextPostAt = now;
+  window.__lastRadarContextPush = now;
   try {
-    const rows = DATA.slice(0, 500);
+    const rows = DATA.slice(0, RADAR_CONTEXT_MAX_ROWS);
     const payload = rows.map(d => {
       const sigMeta = d && d._sig ? d._sig : (typeof _sigOf === 'function' ? _sigOf(d || {}) : null);
       return {
@@ -12801,9 +12994,102 @@ async function _bootstrapSupabaseConfig() {
 
 let supabaseCl = null;
 
+// ─────────────────────────────────────────────────────────────
+// Supabase background-refresh spam (production reliability hotfix).
+//
+// SYMPTOM: a steady stream of failed POSTs to
+// supabase.co/auth/v1/token?grant_type=refresh_token raising
+// AuthRetryableFetchError, on accounts that sign in through NATIVE auth and
+// never touch Supabase.
+//
+// CAUSE: the client was created with the SDK defaults — autoRefreshToken and
+// persistSession both on. The SDK therefore adopts whatever is still parked in
+// localStorage under `sb-<project-ref>-auth-token` (left behind by the
+// pre-native era) and runs its own refresh loop against a refresh token that
+// the server has long since stopped honouring. Nothing in this app reads that
+// session, so every one of those requests is pure noise — and it buries real
+// failures in the console the owner is supposed to be watching.
+//
+// FIX, deliberately narrow:
+//   • When native auth is the ACTIVE identity source, the compatibility client
+//     is created with autoRefreshToken / persistSession / detectSessionInUrl
+//     all off. It still exists, still signs in, still reports sessions — it
+//     just stops running a background loop for a session nobody asked for.
+//   • When native auth is NOT active the SDK defaults are untouched, so a
+//     legacy Supabase-only user keeps exactly the behaviour they have today.
+//   • The stale `sb-*-auth-token` keys are removed ONLY once native auth is
+//     confirmed active, and ONLY those keys — nothing else in localStorage is
+//     read or written.
+// Supabase itself is not removed, no user is migrated, and no auth decision
+// changes: AuthClient still owns which token is sent.
+// ─────────────────────────────────────────────────────────────
+
+// Mirrors STORAGE_KEY in js/auth-client.js. Duplicated on purpose rather than
+// exported: this is a READ-ONLY probe and the auth module stays untouched.
+const _NATIVE_AUTH_STORAGE_KEY = 'swing.nativeAuth.v1';
+
+// Only the Supabase SDK's own auth entries: `sb-<ref>-auth-token`, plus the
+// numbered chunks it writes for large sessions. Anchored at both ends so no
+// other key can ever match.
+const _SUPABASE_AUTH_KEY_RE = /^sb-[A-Za-z0-9_-]+-auth-token(\.\d+)?$/;
+
+function _nativeAuthActive() {
+  try {
+    if (window.AuthClient && typeof window.AuthClient.mode === 'function' && window.AuthClient.mode() === 'native') return true;
+    const raw = window.localStorage ? window.localStorage.getItem(_NATIVE_AUTH_STORAGE_KEY) : null;
+    if (!raw) return false;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed.token !== 'string' || !parsed.session) return false;
+    // A stored session past its absolute 8h device deadline is NOT an active
+    // native session — AuthClient.init() is about to drop it. Treating it as
+    // active would disable Supabase persistence for a browser that is about to
+    // fall back to Supabase. An absent/unparseable deadline is a legacy token,
+    // which AuthClient still treats as native, so it counts here too.
+    const deadline = parsed.session.sessionExpiresAt ? Date.parse(parsed.session.sessionExpiresAt) : NaN;
+    if (Number.isFinite(deadline) && deadline <= Date.now()) return false;
+    return true;
+  } catch (err) {
+    // Storage blocked / corrupt value. Report "not native" so the Supabase
+    // client keeps its current behaviour — the conservative answer.
+    console.warn('[AUTH] could not determine the active auth mode:', err && err.message);
+    return false;
+  }
+}
+
+function _purgeStaleSupabaseAuthStorage() {
+  if (!window.localStorage) return 0;
+  let removed = 0;
+  try {
+    const doomed = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const key = window.localStorage.key(i);
+      if (key && _SUPABASE_AUTH_KEY_RE.test(key)) doomed.push(key);
+    }
+    for (const key of doomed) {
+      window.localStorage.removeItem(key);
+      removed += 1;
+    }
+  } catch (err) {
+    console.warn('[AUTH] stale Supabase auth storage could not be cleared:', err && err.message);
+    return removed;
+  }
+  if (removed) console.warn('[AUTH] cleared', removed, 'stale Supabase auth storage entrie(s) — native auth is the active session');
+  return removed;
+}
+
 (async function _initSupabase() {
   const cfg = await _bootstrapSupabaseConfig();
-  supabaseCl = window.supabase.createClient(cfg.url, cfg.key);
+  const nativeActive = _nativeAuthActive();
+  if (nativeActive) _purgeStaleSupabaseAuthStorage();
+  const sbOptions = nativeActive
+    ? { auth: { autoRefreshToken: false, persistSession: false, detectSessionInUrl: false } }
+    : undefined;
+  console.warn('[AUTH] Supabase compatibility client:', nativeActive
+    ? 'background refresh DISABLED (native auth is active)'
+    : 'SDK defaults (no native session found)');
+  supabaseCl = sbOptions
+    ? window.supabase.createClient(cfg.url, cfg.key, sbOptions)
+    : window.supabase.createClient(cfg.url, cfg.key);
   window.__supabase = supabaseCl;
   // Re-wire auth listeners now that the client exists. The handlers
   // defined further below capture `supabaseCl` by closure — they read
@@ -12959,6 +13245,11 @@ document.getElementById('admin-users-btn')?.addEventListener('click', () => {
 window.AuthClient?.onChange((session, mode) => {
   if (mode !== 'native') return; // Supabase transitions arrive via onAuthStateChange
   if (session) {
+    // Native auth is now CONFIRMED active for this browser. Drop any leftover
+    // Supabase auth entry so the SDK stops retrying a refresh token nobody
+    // uses. Narrow by construction: only `sb-<ref>-auth-token` keys, and only
+    // once a native session actually exists.
+    _purgeStaleSupabaseAuthStorage();
     _applyAuthenticatedState({ email: session.email, tierHint: null });
     if (session.mustChangePassword) _promptForcedPasswordChange();
   } else {
@@ -12970,7 +13261,36 @@ window.AuthClient?.onChange((session, mode) => {
 // Supabase bootstrap: if a valid native token is in storage the app opens
 // straight away, and if the server has since disabled the account the refresh
 // inside init() fails and the gate stays up.
-(async function _restoreNativeSession() {
+//
+// ── DEFERRED ON PURPOSE — do not turn this back into a bare IIFE ──
+//
+// AuthClient.init() can adopt a stored session and notify listeners WITHOUT
+// awaiting anything (the path that reuses a token the server confirmed
+// recently). The onChange handler above answers that notification by booting
+// the ENTIRE terminal: _applyAuthenticatedState() → initTerminalApp() →
+// initTabOrder() / initColumnDnD(). Two things then go wrong if this runs
+// inline:
+//
+//   1. TDZ. Inline, that boot happens HERE, hundreds of lines ABOVE
+//      `const DEFAULT_COLUMN_ORDER` and the other column-layout constants,
+//      while this file is still being evaluated. Reading a `const` before its
+//      declaration is a ReferenceError, which died inside a promise and
+//      surfaced as "can't access lexical declaration 'DEFAULT_COLUMN_ORDER'
+//      before initialization" with the scanner stuck on LOADING.
+//   2. MODULE ORDER. terminal.js is a classic <script> and executes at its
+//      tag; the ES modules beside it (tab-order.js, freshness-badge.js, …)
+//      are implicitly deferred and only execute once parsing finishes. So a
+//      fast restore booted the app before window.__tabOrder existed and
+//      initTabOrder() logged "[TAB-ORDER] tab-order.js not loaded" — the
+//      user's saved tab order silently discarded on every fast restore.
+//
+// A microtask fixes (1) but not (2): it runs as soon as THIS file finishes,
+// still before the deferred modules. DOMContentLoaded fires after every
+// deferred module has executed, so it fixes both. The readyState check keeps
+// the microtask path for the case where the document is already parsed (this
+// script arriving late), where the modules have run too.
+// Nothing about auth changes — only when the restore is started.
+async function _restoreNativeSession() {
   if (!window.AuthClient) return;
   try {
     await window.AuthClient.init();
@@ -12981,7 +13301,13 @@ window.AuthClient?.onChange((session, mode) => {
       reason: (err && err.message) || 'unknown', endpoint: '/api/auth-refresh',
     });
   }
-})();
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _restoreNativeSession, { once: true });
+} else {
+  queueMicrotask(_restoreNativeSession);
+}
 
 // ── Module 4: Market Briefing trigger ──
 // We pick the top 3 coins by computed score from the *current* DATA

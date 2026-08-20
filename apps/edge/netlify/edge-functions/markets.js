@@ -107,6 +107,27 @@ let _futIdxInFlight = null;
 let _spotUsdtIdxInFlight = null;
 let _alphaMapInFlight = null;
 
+// Freshness/force diagnostics the BROWSER is allowed to read.
+//
+// Without Access-Control-Expose-Headers a cross-origin reader can only see the
+// six CORS-safelisted response headers, so every one of these came back as
+// `null` in JS — which is exactly how a forced refresh reported
+// `force_outcome: null` and could not tell "rebuilt" from "upstream failed".
+// Same-origin reads never needed it; a preview deploy, a custom domain, or a
+// localhost dev origin did. All of these are non-secret status codes.
+const EXPOSED_DIAGNOSTIC_HEADERS = [
+  'X-Served-From',
+  'X-Stale',
+  'X-Stale-Reason',
+  'X-Generated-At',
+  'X-Age-Ms',
+  'X-Force-Refresh',
+  'X-Force-Refresh-Retry-After-Ms',
+  'X-Upstream-Status',
+  'X-Tier',
+  'X-Markets-Schema',
+].join(', ');
+
 // CORS headers — delegate to pickAllowOrigin so localhost dev gets
 // its Origin echoed back (browsers reject a wildcard "*" when credentials
 // are involved, and previously a request from http://localhost:8888 to
@@ -117,6 +138,7 @@ function corsHeaders(request) {
     'Access-Control-Allow-Origin': request ? pickAllowOrigin(request) : (Deno.env.get('APP_ORIGIN') || '*'),
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Expose-Headers': EXPOSED_DIAGNOSTIC_HEADERS,
     'Vary': 'Origin',
   };
 }
@@ -151,6 +173,19 @@ function noStoreHeaders(request) {
 // in-isolate snapshot) but does not trigger another upstream rebuild.
 const FORCE_REBUILD_MIN_INTERVAL_MS = 10 * 1000;
 let _lastForcedBuildAt = 0;
+
+// Every outcome a FORCED read can have. There is deliberately no "unknown":
+// a forced request always leaves with one of these, so the browser can never
+// again report `force_outcome: null` for a click that actually happened.
+const FORCE_OUTCOME_REBUILT = 'rebuilt';
+const FORCE_OUTCOME_THROTTLED = 'throttled';
+const FORCE_OUTCOME_UPSTREAM_FAILED = 'upstream-failed';
+
+// Non-secret upstream diagnostics. Stable short codes only — never a URL, a
+// key, or an upstream body.
+const UPSTREAM_STATUS_OK = 'ok';
+const UPSTREAM_STATUS_REBUILD_FAILED = 'rebuild-failed-serving-last-good';
+const UPSTREAM_STATUS_NO_SNAPSHOT = 'rebuild-failed-no-snapshot';
 
 async function getQuoteIndex() {
   const now = Date.now();
@@ -1004,7 +1039,8 @@ export default async function handler(request) {
     if (force) {
       // Visible, non-secret account of what the force actually did, so a
       // click that could not rebuild is distinguishable from one that did.
-      headers['X-Force-Refresh'] = forcedRebuild ? 'rebuilt' : 'throttled';
+      headers['X-Force-Refresh'] = forcedRebuild ? FORCE_OUTCOME_REBUILT : FORCE_OUTCOME_THROTTLED;
+      headers['X-Upstream-Status'] = UPSTREAM_STATUS_OK;
       if (!forcedRebuild) headers['X-Force-Refresh-Retry-After-Ms'] = String(Math.max(0, FORCE_REBUILD_MIN_INTERVAL_MS - (now - _lastForcedBuildAt)));
       console.warn('[MARKETS] force refresh', { outcome: headers['X-Force-Refresh'], snapshot_age_ms: Math.max(0, now - bundle.at), tier });
     }
@@ -1018,18 +1054,32 @@ export default async function handler(request) {
       // green LIVE over a frozen book. Preserves the prior X-Served-From
       // value and adds X-Stale / X-Generated-At / X-Age-Ms.
       const staleMeta = buildFreshnessMeta({ servedFrom: SERVED_STALE, generatedAt: _responseCache.at, now: Date.now(), maxAgeMs: MARKET_MAX_AGE_MS });
+      const staleHeaders = { ...noStoreHeaders(request), 'X-Tier': tier, 'X-Markets-Schema': MARKETS_SCHEMA_VERSION, ...freshnessHeaders(staleMeta), 'X-Upstream-Status': UPSTREAM_STATUS_REBUILD_FAILED };
+      // A FORCED read that ends here did reach origin — the rebuild is what
+      // failed. Saying so explicitly is the difference between "the click did
+      // nothing" and "the click ran and upstream had nothing to give", and it
+      // is why a forced request can never report a null outcome.
+      if (force) {
+        staleHeaders['X-Force-Refresh'] = FORCE_OUTCOME_UPSTREAM_FAILED;
+        console.warn('[MARKETS] force refresh', { outcome: FORCE_OUTCOME_UPSTREAM_FAILED, upstream_status: UPSTREAM_STATUS_REBUILD_FAILED, snapshot_age_ms: Math.max(0, Date.now() - _responseCache.at), tier });
+      }
       return new Response(body, {
         status: 200,
         // no-store: a last-good snapshot must never be parked in the CDN.
         // Previously this went out with `public, s-maxage=30` and only
         // `Vary: Origin`, so a frozen body kept being replayed to every
         // caller — including a manual refresh trying to escape it.
-        headers: { ...noStoreHeaders(request), 'X-Tier': tier, 'X-Markets-Schema': MARKETS_SCHEMA_VERSION, ...freshnessHeaders(staleMeta) },
+        headers: staleHeaders,
       });
     }
-    return new Response(JSON.stringify({ error: err.message }), {
+    const failHeaders = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...corsHeaders(request), 'X-Upstream-Status': UPSTREAM_STATUS_NO_SNAPSHOT };
+    if (force) failHeaders['X-Force-Refresh'] = FORCE_OUTCOME_UPSTREAM_FAILED;
+    // `err.message` is our own upstream diagnostic ("exchangeInfo HTTP 451",
+    // "CoinGecko HTTP 429"); it carries no key, token or user data. The stable
+    // machine-readable code travels in X-Upstream-Status.
+    return new Response(JSON.stringify({ error: err.message, upstreamStatus: UPSTREAM_STATUS_NO_SNAPSHOT, forceOutcome: force ? FORCE_OUTCOME_UPSTREAM_FAILED : null }), {
       status: 502,
-      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...corsHeaders(request) },
+      headers: failHeaders,
     });
   }
 }
