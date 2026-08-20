@@ -2229,3 +2229,41 @@ html,body{overflow-x:hidden;max-width:100vw}
 .arkham-intel__card .cp-radar-insight__title { color: #b9a6ff; }
 .arkham-intel__btn { font-family: inherit; font-size: 9px; letter-spacing: .06em; font-weight: 700; text-transform: uppercase; color: var(--txt3); background: var(--s3); border: 1px solid var(--b2); border-radius: 3px; padding: 3px 8px; margin-top: 6px; cursor: pointer; }
 .arkham-intel__btn:disabled { opacity: .45; cursor: not-allowed; }
+
+/* ─────────────────────────────────────────────────────────────
+   Manual-refresh freshness hotfix — stale-data presentation.
+
+   Rule: a stale dataset must never LOOK like live market truth. The
+   detail panel keeps rendering (the trader still needs the context) but
+   is visibly degraded and carries an explicit banner, and any number that
+   is only meaningful while current renders as STALE/UNKNOWN in amber
+   rather than in confident green/red.
+   ───────────────────────────────────────────────────────────── */
+.detail-stale-banner{
+  padding:5px 10px;font-size:9px;font-weight:700;letter-spacing:.04em;
+  color:var(--amb);background:rgba(255,176,32,.12);
+  border-bottom:1px solid rgba(255,176,32,.35);
+}
+.detail-stale-banner[hidden]{display:none}
+
+/* Withheld / unreported percentages. Amber + no directional colour, so
+   they cannot be misread as a gain or a loss. */
+.pct-stale,.pct-unknown{color:var(--amb)!important;font-weight:700;letter-spacing:.04em}
+
+/* Whole-panel degrade while stale: conviction readouts (SIGNAL, SCORE,
+   PANIC, lead score) are dimmed and desaturated so they read as "held",
+   not as a live call. The banner itself stays at full strength. */
+#dcon.data-stale .mgrid,
+#dcon.data-stale .validity-box,
+#dcon.data-stale .lead-score,
+#dcon.data-stale [data-detail="signal"],
+#dcon.data-stale [data-detail="score"],
+#dcon.data-stale [data-detail="panic"]{opacity:.45;filter:saturate(.35)}
+#dcon.data-stale .detail-stale-banner{opacity:1;filter:none}
+
+/* Top-bar timestamp turns amber once the snapshot is past its age budget. */
+#last-update.is-stale{color:var(--amb);font-weight:700}
+
+/* REFRESH button in-flight state — a click must visibly do something. */
+.hbtn.is-loading{opacity:.6;cursor:progress}
+.hbtn:disabled{cursor:not-allowed}

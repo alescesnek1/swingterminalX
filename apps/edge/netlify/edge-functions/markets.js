@@ -20,7 +20,7 @@
 import { logFatal, logWarn } from './lib/log.js';
 import { verifyAuth, checkOrigin, pickAllowOrigin } from './lib/security.js';
 import { getTier, COIN_CAPS, tierSeesDex, TIER_FREE, TIER_PRO } from './lib/tier.js';
-import { buildFreshnessMeta, freshnessHeaders, SERVED_LIVE, SERVED_STALE } from './lib/freshness.js';
+import { buildFreshnessMeta, freshnessHeaders, isForceRefreshRequest, MARKET_MAX_AGE_MS, SERVED_LIVE, SERVED_STALE } from './lib/freshness.js';
 
 const COINGECKO_MARKETS_URL_PAGE1 =
   'https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=1&sparkline=true&price_change_percentage=1h,24h,7d';
@@ -128,6 +128,29 @@ function cacheHeaders(request) {
     ...corsHeaders(request),
   };
 }
+
+// Manual-refresh hotfix: headers for a response that NO cache layer may
+// store or replay. Used for (a) an explicit force refresh — otherwise the
+// CDN would answer the user's click with the very snapshot they are trying
+// to escape — and (b) the stale last-good fallback, which previously went
+// out with `public, s-maxage=30` and so got parked in the CDN as if it were
+// a normal answer (and without `Vary: Authorization`, meaning one tier's
+// stale body could be replayed to another).
+function noStoreHeaders(request) {
+  return {
+    'Content-Type': 'application/json',
+    'Cache-Control': 'no-store, no-cache, must-revalidate',
+    ...corsHeaders(request),
+    'Vary': 'Authorization, Origin',
+  };
+}
+
+// A forced rebuild is bounded: a user mashing REFRESH must not turn into a
+// CoinGecko fan-out per click. Inside this window a force request still
+// bypasses every cache LAYER (it is answered `no-store` from the freshest
+// in-isolate snapshot) but does not trigger another upstream rebuild.
+const FORCE_REBUILD_MIN_INTERVAL_MS = 10 * 1000;
+let _lastForcedBuildAt = 0;
 
 async function getQuoteIndex() {
   const now = Date.now();
@@ -926,17 +949,34 @@ export default async function handler(request) {
   }
   const tier = getTier(auth.user);
 
+  // Manual-refresh hotfix: is the caller explicitly asking to bypass caches?
+  // Parsed AFTER origin + auth, so force can never be used to skip a gate —
+  // it only changes which SNAPSHOT an already-authorised reader gets. This is
+  // the PUBLIC market read only; no DB-backed history/context collector reads
+  // this flag.
+  const force = isForceRefreshRequest(request);
+
   try {
     const now = Date.now();
     let bundle;
-    if (_responseCache && _responseCache.v === MARKETS_SCHEMA_VERSION && now - _responseCache.at < RESPONSE_CACHE_TTL_MS) {
-      bundle = _responseCache;
-    } else {
-      // V6.8 Sprint 1 (FIX-2): dedup-wrapped build.
+    let forcedRebuild = false;
+    const cacheUsable = _responseCache
+      && _responseCache.v === MARKETS_SCHEMA_VERSION
+      && now - _responseCache.at < RESPONSE_CACHE_TTL_MS;
+    // A force request ignores the in-isolate response cache and rebuilds from
+    // upstream — unless it lands inside the anti-hammer window, in which case
+    // we reuse the newest snapshot we have but still answer `no-store`.
+    const forceThrottled = force && (now - _lastForcedBuildAt < FORCE_REBUILD_MIN_INTERVAL_MS) && !!_responseCache;
+    if ((force && !forceThrottled) || !cacheUsable) {
+      // V6.8 Sprint 1 (FIX-2): dedup-wrapped build. Concurrent force clicks
+      // collapse onto the SAME upstream fan-out instead of one each.
+      if (force) { forcedRebuild = true; _lastForcedBuildAt = now; }
       const fullArr = await buildMarketsBodyDeduped();
       // V6.8 Sprint 1 (FIX-6): build all three tier views once.
       bundle = { at: now, v: MARKETS_SCHEMA_VERSION, ..._buildCacheBundle(fullArr) };
       _responseCache = bundle;
+    } else {
+      bundle = _responseCache;
     }
     // V6.8 Sprint 1 (FIX-6): O(1) tier lookup — no parse, no filter, no
     // stringify on the hot path.
@@ -944,18 +984,30 @@ export default async function handler(request) {
     // Batch B: freshness metadata. `bundle.at` is the true snapshot build
     // time (== now for a fresh build, ≤ TTL old for an in-isolate cache
     // hit), so the browser can show real data age instead of wall-clock.
-    const freshMeta = buildFreshnessMeta({ servedFrom: SERVED_LIVE, generatedAt: bundle.at, now });
+    // Manual-refresh hotfix: MARKET_MAX_AGE_MS demotes a snapshot that was
+    // built "live" but has since aged out of the budget, so a frozen
+    // pipeline cannot keep wearing the LIVE label.
+    const freshMeta = buildFreshnessMeta({ servedFrom: SERVED_LIVE, generatedAt: bundle.at, now, maxAgeMs: MARKET_MAX_AGE_MS });
     // V6.8 Sprint 1 (FIX-1): restore CDN caching. Cache-Control comes
     // straight from cacheHeaders() (s-maxage=30, SWR=60). MARKETS_SCHEMA_VERSION
     // bumps are the safe invalidation mechanism; `no-cache` was the wrong tool
     // and forced every authed request through to origin.
+    // A FORCED read is the one exception: it must never be answered from — or
+    // parked in — a shared cache, or the next click gets the same frozen body.
     const headers = {
-      ...cacheHeaders(request),
+      ...(force ? noStoreHeaders(request) : cacheHeaders(request)),
       'X-Tier': tier,
       'X-Markets-Schema': MARKETS_SCHEMA_VERSION,
       ...freshnessHeaders(freshMeta),
       'Vary': 'Authorization, Origin',
     };
+    if (force) {
+      // Visible, non-secret account of what the force actually did, so a
+      // click that could not rebuild is distinguishable from one that did.
+      headers['X-Force-Refresh'] = forcedRebuild ? 'rebuilt' : 'throttled';
+      if (!forcedRebuild) headers['X-Force-Refresh-Retry-After-Ms'] = String(Math.max(0, FORCE_REBUILD_MIN_INTERVAL_MS - (now - _lastForcedBuildAt)));
+      console.warn('[MARKETS] force refresh', { outcome: headers['X-Force-Refresh'], snapshot_age_ms: Math.max(0, now - bundle.at), tier });
+    }
     return new Response(body, { status: 200, headers });
   } catch (err) {
     logFatal({ location: 'markets/handler', error: err, payload: { cached_fallback_available: !!_responseCache, tier } });
@@ -965,10 +1017,14 @@ export default async function handler(request) {
       // UI can degrade the source badge (amber STALE) instead of showing
       // green LIVE over a frozen book. Preserves the prior X-Served-From
       // value and adds X-Stale / X-Generated-At / X-Age-Ms.
-      const staleMeta = buildFreshnessMeta({ servedFrom: SERVED_STALE, generatedAt: _responseCache.at, now: Date.now() });
+      const staleMeta = buildFreshnessMeta({ servedFrom: SERVED_STALE, generatedAt: _responseCache.at, now: Date.now(), maxAgeMs: MARKET_MAX_AGE_MS });
       return new Response(body, {
         status: 200,
-        headers: { ...cacheHeaders(request), 'X-Tier': tier, 'X-Markets-Schema': MARKETS_SCHEMA_VERSION, ...freshnessHeaders(staleMeta) },
+        // no-store: a last-good snapshot must never be parked in the CDN.
+        // Previously this went out with `public, s-maxage=30` and only
+        // `Vary: Origin`, so a frozen body kept being replayed to every
+        // caller — including a manual refresh trying to escape it.
+        headers: { ...noStoreHeaders(request), 'X-Tier': tier, 'X-Markets-Schema': MARKETS_SCHEMA_VERSION, ...freshnessHeaders(staleMeta) },
       });
     }
     return new Response(JSON.stringify({ error: err.message }), {

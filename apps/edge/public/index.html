@@ -11,7 +11,7 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◈</text></svg>">
   <title>Swing Terminal Version X</title>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/terminal.css?v=6l4">
+  <link rel="stylesheet" href="css/terminal.css?v=6m1">
   
   <!-- Supabase CDN -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
@@ -105,7 +105,7 @@
         <span class="version-x-badge" title="Terminal Version X" style="font-size:9px;font-weight:700;letter-spacing:.12em;color:var(--acc);padding:2px 6px;border:1px solid rgba(0,232,200,.35);border-radius:3px;background:rgba(0,232,200,.06);line-height:1">X</span>
         <button class="hbtn hbtn--mkt-briefing" id="mkt-briefing-trigger" title="AI Market Briefing — Macro / Meta / Opportunities (cache 45 min)">🌍 MARKET BRIEFING</button>
         <button class="hbtn hbtn--briefing" id="briefing-trigger" title="AI syntéza trhu (top 3 setupy)">📋 SYNTÉZA TRHU</button>
-        <button class="hbtn" onclick="document.dispatchEvent(new Event('refresh_now'))">REFRESH</button>
+        <button class="hbtn" id="btn-refresh" type="button" title="Force a fresh public market read (bypasses browser + CDN cache)" onclick="document.dispatchEvent(new CustomEvent('refresh_now',{detail:{manual:true}}))">REFRESH</button>
         <button class="hbtn" onclick="sv('manual', document.querySelector('[data-tab=\'manual\']'))" title="Interactive Manual — every signal explained">MANUAL</button>
         <!-- Admin-only. `hidden` is the default and is toggled by
              AdminUsersPanel.syncButton() from window.__isAdmin. That is a UI
@@ -964,22 +964,22 @@
        that records every non-OK response and network failure, so it has to be
        in place before any other script issues a request. Type errors() in
        devtools for the full list of failures with reasons. -->
-  <script src="js/error-log.js?v=6l4"></script>
-  <script src="js/toast.js?v=6l4"></script>
+  <script src="js/error-log.js?v=6m1"></script>
+  <script src="js/toast.js?v=6m1"></script>
   <!-- auth-client.js must precede terminal.js: terminal.js calls
        window.AuthClient at load to restore a stored native session. -->
-  <script src="js/auth-client.js?v=6l4"></script>
-  <script src="js/admin-users-panel.js?v=6l4"></script>
-  <script type="module" src="/js/ai-analysis.js?v=6l4"></script>
-  <script type="module" src="/js/freshness-badge.js?v=6l4"></script>
-  <script type="module" src="/js/url-safety.js?v=6l4"></script>
-  <script type="module" src="/js/gecko-layout.js?v=6l4"></script>
-  <script type="module" src="/js/change-digest.js?v=6l4"></script>
-  <script type="module" src="/js/scanner-lead-score.js?v=6l4"></script>
-  <script type="module" src="/js/tab-order.js?v=6l4"></script>
-  <script type="module" src="/js/personal-watch.js?v=6l4"></script>
-  <script type="module" src="/js/price-history-signals-panel.js?v=6l4"></script>
-  <script type="module" src="/js/price-history-orderbook.js?v=6l4"></script>
-  <script src="js/terminal.js?v=6l4"></script>
+  <script src="js/auth-client.js?v=6m1"></script>
+  <script src="js/admin-users-panel.js?v=6m1"></script>
+  <script type="module" src="/js/ai-analysis.js?v=6m1"></script>
+  <script type="module" src="/js/freshness-badge.js?v=6m1"></script>
+  <script type="module" src="/js/url-safety.js?v=6m1"></script>
+  <script type="module" src="/js/gecko-layout.js?v=6m1"></script>
+  <script type="module" src="/js/change-digest.js?v=6m1"></script>
+  <script type="module" src="/js/scanner-lead-score.js?v=6m1"></script>
+  <script type="module" src="/js/tab-order.js?v=6m1"></script>
+  <script type="module" src="/js/personal-watch.js?v=6m1"></script>
+  <script type="module" src="/js/price-history-signals-panel.js?v=6m1"></script>
+  <script type="module" src="/js/price-history-orderbook.js?v=6m1"></script>
+  <script src="js/terminal.js?v=6m1"></script>
 </body>
 </html>

@@ -451,7 +451,8 @@ test('UI renders heatmap/data before Live Feed so operator sees market context e
   // doRefresh() is now a thin in-flight-dedupe wrapper (Netlify cost control);
   // the refresh body it guards lives in _doRefreshCore(). The ordering rule is
   // unchanged — only the function holding it moved.
-  const coreStart = terminalJs.indexOf('async function _doRefreshCore()');
+  // _doRefreshCore now takes an options bag (the manual-refresh force flag).
+  const coreStart = terminalJs.indexOf('async function _doRefreshCore(');
   assert.ok(coreStart > 0, 'the refresh body is where the test expects it');
   const refreshBody = terminalJs.slice(coreStart);
   const htmlOrder = refreshBody.indexOf('renderHeatmap()') < refreshBody.indexOf('LiveFeed.push');
