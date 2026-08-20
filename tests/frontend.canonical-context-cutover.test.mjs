@@ -207,7 +207,14 @@ test('every versioned asset carries the same single bumped cache-bust token', ()
   // Load-bearing for that fix: netlify.toml sets max-age=3600 on /*.js, so
   // without the bump a returning tab keeps the old code — and the old code is
   // the code that opens a Postgres read for panels nobody is looking at.
-  assert.equal(tokens[0], '6l4', 'token was bumped for this JS change');
+  // 6l4 -> 6l5 for the 8h native auth device sessions (js/auth-client.js: the
+  // deadline is stored and checked in the browser, an expired token inside a live
+  // window refreshes instead of signing out, and a recently confirmed token is
+  // adopted without calling /api/auth-refresh). Load-bearing for that change:
+  // netlify.toml sets max-age=3600 on /*.js, so without the bump a returning tab
+  // keeps the OLD auth client — the one that drops an expired token and shows the
+  // login form, which is the exact bug being fixed.
+  assert.equal(tokens[0], '6l5', 'token was bumped for this JS change');
 });
 
 // The measurement budget targets the deepest drawdowns, and DISLOCATION is 20% of

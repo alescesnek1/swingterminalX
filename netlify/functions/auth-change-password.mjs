@@ -200,6 +200,11 @@ export async function runAuthChangePassword(req, deps = {}) {
     token: minted.token,
     expiresAt: minted.expiresAt,
     expiresInSeconds: minted.expiresInSeconds,
+    // A self-service change re-proves the password, so this deliberately opens a
+    // NEW device session window rather than inheriting the remainder of the old
+    // one — it is equivalent to logging in again.
+    sessionExpiresAt: minted.sessionExpiresAt,
+    sessionExpiresInSeconds: minted.sessionExpiresInSeconds,
     mustChangePassword: false,
     user: stored.user,
     notice: 'Password changed. Any other session for this account stops working at its next refresh.',

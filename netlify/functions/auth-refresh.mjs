@@ -15,9 +15,29 @@
 // a database dependency on every authenticated request. For IMMEDIATE global
 // revocation the lever is rotating AUTH_JWT_SECRET.
 //
-// A refresh NEVER accepts a password and never extends an already-expired token:
-// once a token is past `exp`, the user logs in again.
-import { mintAccessToken, nativeAuthEnabled, getSigningSecret, verifyAccessToken } from './_native-jwt.mjs';
+// A refresh NEVER accepts a password.
+//
+// ── Device sessions: what a refresh may and may not extend ──
+// A refresh re-mints the SHORT access token and carries the token's device
+// session (`sid`/`sxp`, opened at login, 8h by default) forward UNCHANGED. It
+// therefore accepts a token whose `exp` has already lapsed, as long as the
+// session window is still open — that is what makes a page reload after an hour
+// silent instead of a login prompt. It can never push the deadline out: 8h after
+// signing in the session is refused here and on every other path, and the user
+// logs in again on that device.
+//
+// The tolerance is bounded and DB-checked, never blind: verifyRefreshableToken()
+// checks the signature/issuer/audience as strictly as the request path and
+// refuses once `sxp` has passed, and the account lookup below still ends the
+// session on a disabled account or a changed password. A token accepted here is
+// refused by every API path, which uses verifyAccessToken().
+//
+// A legacy token minted before `sxp` existed gets NO tolerance (it must still be
+// unexpired) and, when refreshed, is upgraded into a token with a fresh session
+// window — so the fleet migrates by itself with no forced logout.
+import {
+  mintAccessToken, nativeAuthEnabled, getSigningSecret, verifyRefreshableToken,
+} from './_native-jwt.mjs';
 import { findById, writeAudit } from './_user-store.mjs';
 
 function headers(req) {
@@ -45,7 +65,7 @@ function bearerToken(req) {
 export async function runAuthRefresh(req, deps = {}) {
   const env = deps.env || process.env;
   const store = deps.store || { findById, writeAudit };
-  const verify = deps.verifyAccessToken || verifyAccessToken;
+  const verify = deps.verifyRefreshableToken || verifyRefreshableToken;
   const mint = deps.mintAccessToken || mintAccessToken;
   const now = deps.nowMs || Date.now();
 
@@ -111,6 +131,12 @@ export async function runAuthRefresh(req, deps = {}) {
     { id: user.id, email: user.email, role: user.role, token_version: user.tokenVersion },
     env,
     now,
+    // The ONE thing carried over from the presented token: its device session.
+    // Null for a legacy token, which then opens a fresh window rather than
+    // living forever without one.
+    verified.sessionExpiresAtSeconds
+      ? { sessionId: verified.sessionId, sessionExpiresAtSeconds: verified.sessionExpiresAtSeconds }
+      : null,
   );
   if (!minted.ok) {
     console.error('[AUTH_REFRESH] token minting failed', { reason: minted.reason });
@@ -122,6 +148,11 @@ export async function runAuthRefresh(req, deps = {}) {
     token: minted.token,
     expiresAt: minted.expiresAt,
     expiresInSeconds: minted.expiresInSeconds,
+    // The absolute deadline of this device session. The browser needs it to know
+    // when to stop refreshing and show the login form, instead of discovering it
+    // through a failed request.
+    sessionExpiresAt: minted.sessionExpiresAt,
+    sessionExpiresInSeconds: minted.sessionExpiresInSeconds,
     mustChangePassword: user.mustChangePassword === true,
     user,
   });

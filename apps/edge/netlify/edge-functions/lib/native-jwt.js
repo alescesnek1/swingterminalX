@@ -143,9 +143,20 @@ export async function verifyNativeAccessToken(token, nowMs = Date.now()) {
   const auds = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
   if (!auds.includes(NATIVE_AUDIENCE)) return { ok: false, reason: 'TOKEN_AUDIENCE_MISMATCH' };
 
+  const nowSeconds = Math.floor(nowMs / 1000);
+
+  // Device session (`sxp`, minted at login, 8h by default). Checked BEFORE the
+  // access token's own expiry and in the same order as the Node twin: once the
+  // absolute deadline passes, no token from that session is accepted anywhere.
+  // Absent on tokens minted before the claim existed — those are governed by
+  // `exp` alone, exactly as before, so no live session is invalidated by this.
+  const sessionExp = Number(payload.sxp);
+  const hasSession = Number.isFinite(sessionExp);
+  if (hasSession && nowSeconds >= sessionExp) return { ok: false, reason: 'SESSION_EXPIRED' };
+
   const exp = Number(payload.exp);
   if (!Number.isFinite(exp)) return { ok: false, reason: 'TOKEN_EXP_MISSING' };
-  if (Math.floor(nowMs / 1000) >= exp) return { ok: false, reason: 'TOKEN_EXPIRED' };
+  if (nowSeconds >= exp) return { ok: false, reason: 'TOKEN_EXPIRED' };
 
   const sub = typeof payload.sub === 'string' ? payload.sub.trim() : '';
   if (!sub) return { ok: false, reason: 'TOKEN_SUBJECT_MISSING' };
@@ -159,5 +170,7 @@ export async function verifyNativeAccessToken(token, nowMs = Date.now()) {
     role: payload.role === 'admin' ? 'admin' : 'user',
     tokenVersion: Number.isInteger(payload.tv) ? payload.tv : 1,
     expiresAt: new Date(exp * 1000).toISOString(),
+    sessionId: typeof payload.sid === 'string' && payload.sid ? payload.sid : null,
+    sessionExpiresAt: hasSession ? new Date(sessionExp * 1000).toISOString() : null,
   };
 }

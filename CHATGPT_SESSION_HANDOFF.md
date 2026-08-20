@@ -1192,6 +1192,53 @@ email allowlist (§9), not a billing tier.
     redeploy. Verified from production: unknown-account login →
     `401 INVALID_CREDENTIALS` (proves `app_users` exists and was queried),
     unauthenticated `/api/admin-users` → `401`.
+  - 🆕 **Device sessions — 8h per device, added 2026-08-20 (local, on
+    `fix/netlify-emergency-cost-breaker`, NOT yet pushed/deployed).** Problem: a
+    page reload could cost a password. Access tokens live 60 min and
+    `/api/auth-refresh` refused to touch an expired one, so a tab closed over
+    lunch or a resumed laptop landed on the login gate. Fix: a login now stamps
+    `sid` (session id) + `sxp` (absolute deadline = login + `SESSION_TTL_SECONDS`,
+    **default 8h**, clamped to access-TTL … 7 days) into the token.
+    `/api/auth-refresh` re-mints the short access token inside that window,
+    **carrying `sid`/`sxp` forward unchanged** (a refresh can never extend the
+    deadline) and **tolerating an already-expired `exp`** — that tolerance is the
+    whole point and it lives ONLY in the new `verifyRefreshableToken()`. Every API
+    path still calls `verifyAccessToken()`, which never accepts an expired token,
+    `exp` is capped at `sxp`, refresh keeps its DB check (status +
+    `token_version`), and the **Deno edge verifier enforces `sxp` too** (parity
+    test would fail otherwise). Browser (`js/auth-client.js`): the deadline is
+    persisted and checked LOCALLY, so an ended session is dropped with **no
+    request** and a toast naming the reason; an expired token inside a live window
+    triggers a silent refresh instead of a sign-out. **Cost fix in the same
+    change:** a stored token the server confirmed < 15 min ago is adopted on load
+    **without** calling `/api/auth-refresh` (that endpoint reads Postgres, and
+    Netlify bills DB compute per hour AWAKE — confirming on every reload woke the
+    DB for no new information). Still strictly tighter than the existing worst
+    case (a running tab re-confirms only at 75% of a 60-min token ≈ 45 min), so
+    revocation is unchanged in practice. **Backwards compatible both ways:**
+    legacy tokens without `sxp` keep verifying to their `exp`, get NO tolerance,
+    and are upgraded on their next refresh; a browser talking to a server that
+    answers without `sessionExpiresAt` reads that as "no deadline known", never as
+    expired — so a rollback does not lock anyone out. Also fixed the
+    `Number('')===0` trap in both TTL readers (a blank env var means *unset*, not
+    a 60-second token / an instantly-dead session) and a **1-in-4 flaky
+    assertion** in `tests/auth.edge-native-jwt.test.mjs` (flipping the LAST
+    base64url char of a 32-byte HMAC can decode to the same bytes, so a valid
+    signature legitimately verified and the test failed at random). Guards:
+    `tests/auth.native-jwt.test.mjs` (+13), `tests/auth.refresh-endpoint.test.mjs`
+    (rewritten expiry contract, +6), `tests/auth.edge-native-jwt.test.mjs` (+4),
+    `tests/frontend.auth-client.test.mjs` (+9). **Cache-bust `6l4 → 6l5`
+    included — the change is deploy-safe.** `netlify.toml` sets `max-age=3600` on
+    `/*.js`, so without the bump a returning tab would keep the OLD
+    `auth-client.js` for up to an hour — and the old client is exactly the code
+    that drops an expired token and shows the login form, i.e. the bug being
+    fixed. All 16 versioned assets in `index.html` carry `6l5`, and the two tests
+    that pin the exact token were updated with it
+    (`tests/frontend.canonical-context-cutover.test.mjs` and the cache-token
+    assertion in `tests/frontend.arkham-intel-panel.test.mjs` — that file's
+    Arkham assertions and the Arkham modules themselves are untouched).
+    Nothing to set in Netlify — 8h is the default; `SESSION_TTL_SECONDS` only
+    needs setting to choose something else.
   - 🩹 **Post-cutover bug, fixed 2026-08-03 (`fix/native-session-ai-401`, local,
     unpushed): AI was unusable for native-only accounts.** `js/ai-analysis.js`
     was the ONE frontend module still reading
