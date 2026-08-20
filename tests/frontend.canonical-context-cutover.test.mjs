@@ -214,7 +214,14 @@ test('every versioned asset carries the same single bumped cache-bust token', ()
   // netlify.toml sets max-age=3600 on /*.js, so without the bump a returning tab
   // keeps the OLD auth client — the one that drops an expired token and shows the
   // login form, which is the exact bug being fixed.
-  assert.equal(tokens[0], '6l6', 'token was bumped for this JS change');
+  // 6l6 -> 6m1 for the manual-refresh freshness hotfix (terminal.js: forced
+  // /api/markets read on a REFRESH click, age-aware stale gate, honest 24h
+  // rendering; js/freshness-badge.js: the pure trust gate; terminal.css: the
+  // stale banner + degraded-number styles). Load-bearing: netlify.toml sets
+  // max-age=3600 on /*.js, so without the bump a returning tab keeps the old
+  // code — the code whose REFRESH button cannot escape a cached snapshot and
+  // whose detail panel shows a stale 24h % as if it were live.
+  assert.equal(tokens[0], '6m1', 'token was bumped for this JS change');
 });
 
 // The measurement budget targets the deepest drawdowns, and DISLOCATION is 20% of

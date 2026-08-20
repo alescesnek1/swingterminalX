@@ -1660,6 +1660,52 @@ email allowlist (§9), not a billing tier.
 ## 11. Known completed work / recent milestones
 
 From current git history (most recent first, condensed — see `git log` for full):
+
+- **Manual REFRESH market-freshness hotfix (LOCAL, UNPUSHED, branch
+  `fix/manual-refresh-freshness`)** — the top-bar REFRESH button could not
+  produce fresh data, and a stale dataset still rendered confident per-coin
+  numbers. Root cause was three independent cache layers with no force path
+  plus a servedFrom-only staleness test:
+  1. `fetchData()` issued a plain `fetch('/api/markets')`, answerable from the
+     **browser HTTP cache** and from the **Netlify CDN entry**
+     (`public, s-maxage=30, stale-while-revalidate=60`), so a click inside that
+     window returned byte-identical frozen bytes.
+  2. `/api/markets` had no way to be told "rebuild": a force click could not
+     bypass the 30 s in-isolate `_responseCache`, and the **stale last-good
+     fallback was itself sent with `public, s-maxage=30` and only
+     `Vary: Origin`** — so a frozen body got parked in the CDN and replayed
+     (across tiers).
+  3. `doRefresh()`'s in-flight dedupe attached a user click to whatever
+     background tick was already running — i.e. to a cache read.
+  4. Staleness was `servedFrom !== 'live'` only, with **no age test**, so an
+     aged snapshot could still wear the green LIVE badge, and the detail panel
+     showed e.g. a 48-minute-old `+35.20%` (VELVET) exactly like a live number.
+  Fix, additive and reversible: `?force=1` / `X-Force-Refresh: 1` on the
+  **public market read only** (parsed *after* origin + auth, so it can never
+  skip a gate) → edge skips its response cache, rebuilds via the existing
+  `buildMarketsBodyDeduped()` singleton, answers `no-store`, and reports the
+  outcome as `X-Force-Refresh: rebuilt|throttled`; forced rebuilds are bounded
+  by `FORCE_REBUILD_MIN_INTERVAL_MS = 10 s`. The stale fallback is now
+  `no-store` + `Vary: Authorization, Origin`. New age budget
+  `MARKET_MAX_AGE_MS = 180 000` (`freshnessVerdict`, `X-Stale-Reason`) is
+  enforced **in the browser** on every paint, because CDN/isolate delay is
+  added after the header is written. Stale mode degrades honestly: prominent
+  `STALE` badge, amber timestamp, a detail-panel banner, dimmed SIGNAL / SCORE
+  / PANIC / lead-score, 24h % rendered `STALE`, and an unreported 24h rendered
+  `UNKNOWN` (new `_c24Known` flag — never a fabricated `0.00%`, never derived
+  from the 24h range or the current price). Button gets a loading state; a
+  refresh that comes back still stale says so. **Cost posture unchanged**: no
+  DB-heavy read is ever forced (`/api/context` gets no force flag), no
+  collector re-enabled, no price-history write, background cadences untouched
+  (60 s steady state / 10 s emergency). Touched files:
+  `apps/edge/netlify/edge-functions/lib/freshness.js`,
+  `apps/edge/netlify/edge-functions/markets.js`,
+  `apps/edge/public/js/freshness-badge.js`,
+  `apps/edge/public/js/terminal.js`, `apps/edge/public/index.html`
+  (cache-bust `6l5 → 6m1`), `apps/edge/public/css/terminal.css`; new tests
+  `tests/backend.markets-force-refresh.test.mjs` (19) and
+  `tests/frontend.manual-refresh-freshness.test.mjs` (31).
+  **NOT pushed, NOT deployed — awaiting owner review.**
 - **Arkham Intel skeleton (LOCAL, UNPUSHED, branch `feat/arkham-intel-skeleton`)**
   — advisory on-chain entity intelligence (Arkham, `api.arkm.com`), **disabled by
   default and NOT deployed**. Full research + design in

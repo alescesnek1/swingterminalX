@@ -31,7 +31,10 @@ test('badge decision is delegated to the pure freshness-badge module (with fallb
   // Phase 4: the live/stale/error mapping moved to freshness-badge.js (real
   // behavior coverage in frontend.freshness-badge-behavior.test.mjs). terminal.js
   // calls it via window.freshnessBadge and keeps a safe inline fallback.
-  assert.match(js, /window\.freshnessBadge\(fresh, SRC\)/);
+  // The SRC argument is now the AGE-AWARE verdict, so a snapshot whose header
+  // said "live" but which has since aged out cannot reach the green branch
+  // (see tests/frontend.manual-refresh-freshness.test.mjs).
+  assert.match(js, /window\.freshnessBadge\(fresh, fState\.stale && SRC !== 'ERROR' \? 'STALE' : SRC\)/);
   assert.match(js, /typeof window\.freshnessBadge === 'function'/);
   assert.match(js, /srcb\.className = 'sbadge ' \+ badge\.cls/);
 });

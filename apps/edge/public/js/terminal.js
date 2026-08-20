@@ -2067,7 +2067,12 @@ async function _fetchCanonicalMarkets(authHeaders) {
   return rows;
 }
 
-async function fetchData() {
+async function fetchData(opts) {
+  // `force` is honoured for the PUBLIC market read ONLY. It is deliberately
+  // NOT propagated to /api/context (four Postgres queries) or to any
+  // price-history collector — a user pressing REFRESH must never be able to
+  // wake the database.
+  const force = !!(opts && opts.force);
   let live = null;
   const _canonical = _canonicalContextEnabled();
   try {
@@ -2088,7 +2093,22 @@ async function fetchData() {
       }
     }
     if (!live) {
-    const r = await fetch('/api/markets', { headers: { 'Accept': 'application/json', ...authHeaders } });
+    // Manual refresh must reach ORIGIN. Three layers have to be told, because
+    // each of them can independently answer with the frozen snapshot:
+    //   ?force=1            → the edge skips its in-isolate response cache and
+    //                         rebuilds from upstream (bounded, see markets.js),
+    //                         and answers `no-store` so the CDN cannot park it.
+    //   X-Force-Refresh: 1  → same signal for callers that cannot vary the URL.
+    //   cache: 'reload'     → the BROWSER HTTP cache is bypassed too.
+    // Auth headers are unchanged: force alters which snapshot an already
+    // authorised reader gets, never whether they are authorised.
+    const _mktUrl = force ? '/api/markets?force=1' : '/api/markets';
+    const _mktInit = { headers: { 'Accept': 'application/json', ...authHeaders } };
+    if (force) {
+      _mktInit.cache = 'reload';
+      _mktInit.headers['X-Force-Refresh'] = '1';
+    }
+    const r = await fetch(_mktUrl, _mktInit);
     if (!r.ok) {
       const body = await r.text().catch(() => '');
       window.Toast?.error('Market data fetch failed', `HTTP ${r.status} — ${body.slice(0,140)}`, { endpoint: '/api/markets', code: r.status });
@@ -2107,8 +2127,21 @@ async function fetchData() {
       ok: true,
       servedFrom: _servedFrom,
       stale: _staleHdr || _servedFrom !== 'live',
+      staleReason: r.headers.get('X-Stale-Reason') || null,
       generatedAt: Number.isFinite(_genAtMs) ? _genAtMs : null,
+      // What a forced read actually achieved: 'rebuilt' (upstream was hit) or
+      // 'throttled' (inside the anti-hammer window). Absent on a normal tick.
+      forced: force,
+      forceOutcome: r.headers.get('X-Force-Refresh') || null,
     };
+    if (force) {
+      console.warn('[REFRESH] forced /api/markets read', {
+        outcome: window.__marketsFreshness.forceOutcome,
+        served_from: _servedFrom,
+        stale: window.__marketsFreshness.stale,
+        generated_at: _genAtRaw || null,
+      });
+    }
     let rawData = await r.json();
     if (window.__DEBUG) console.log("🔍 Data from /api/markets:", rawData);
 
@@ -2125,6 +2158,14 @@ async function fetchData() {
         if (c1 != null) d._c1 = c1;
         if (c4 != null) d._c4 = c4;
         if (c12 != null) d._c12 = c12;
+        // `_c24Known` records whether ANY 24h field was actually reported
+        // (getTimeframePct('c24') already scans price_change_percentage_24h and
+        // every alias). The legacy `|| 0` fallback below is kept so sorting and
+        // scoring comparators keep seeing a number, but the flag is what the
+        // detail panel reads — so a coin with no reported 24h renders UNKNOWN
+        // instead of a confident 0.00%. 24h is NEVER derived from the 24h range
+        // or the current price; only reported 24h fields feed it.
+        d._c24Known = c24 != null;
         if (c24 != null) {
           d._c24 = c24;
           d.price_change_percentage_24h = c24;
@@ -2168,7 +2209,7 @@ async function fetchData() {
     }
   } catch(e) {
     SRC = 'ERROR';
-    window.__marketsFreshness = { ok: false, servedFrom: 'error', stale: true, generatedAt: null };
+    window.__marketsFreshness = { ok: false, servedFrom: 'error', stale: true, staleReason: (e && e.message) || 'market read failed', generatedAt: null, forced: force };
     console.error('Data fetch err:', e);
     window.Toast?.error('Scanner refresh failed', e.message || String(e), { endpoint: '/api/markets' });
   }
@@ -2203,23 +2244,39 @@ function renderTopbar() {
   // (window.freshnessBadge). The inline fallback keeps the badge rendering
   // if that module ever fails to load — no regression to a blank/stuck badge.
   const fresh = window.__marketsFreshness || {};
+  // Manual-refresh hotfix: age is the deciding test, not just the edge's
+  // servedFrom label. A snapshot built "live" can still reach the browser
+  // minutes later (CDN entry, isolate cache, sleeping laptop), so a snapshot
+  // past the age budget is demoted to STALE here even when the header said
+  // live. Fails closed: unknown freshness → STALE, never green.
+  // Before the first market read has landed there is nothing to be stale
+  // ABOUT — that is the muted LOADING state, not a stale dataset.
+  const fState = window.__marketsFreshness
+    ? _marketFreshnessState()
+    : { stale: false, reason: null, ageMs: null, ageLabel: null };
   const badge = (typeof window.freshnessBadge === 'function')
-    ? window.freshnessBadge(fresh, SRC)
-    : { cls: SRC.includes('LIVE') ? 's-live' : 's-mock', label: SRC, title: SRC };
+    ? window.freshnessBadge(fresh, fState.stale && SRC !== 'ERROR' ? 'STALE' : SRC)
+    : { cls: SRC.includes('LIVE') && !fState.stale ? 's-live' : 's-mock', label: fState.stale ? 'STALE' : SRC, title: SRC };
   const srcb = document.getElementById('srcb');
   srcb.className = 'sbadge ' + badge.cls;
   srcb.textContent = badge.label;
-  srcb.title = badge.title;
+  srcb.title = badge.title + (fState.reason ? ' · ' + fState.reason : '') + (fState.ageLabel ? ' · age ' + fState.ageLabel : '');
   document.getElementById('sts').textContent = badge.label;
   // Show the TRUE data age (snapshot build time) when the edge reported it,
   // instead of always painting the current wall-clock as if it were fresh.
+  // With no timestamp at all we say so outright — wall-clock here was the
+  // thing that made a frozen dataset look freshly fetched.
   const lu = document.getElementById('last-update');
   if (Number.isFinite(fresh.generatedAt)) {
     const ageSec = Math.max(0, Math.round((Date.now() - fresh.generatedAt) / 1000));
     lu.textContent = new Date(fresh.generatedAt).toLocaleTimeString('cs-CZ') + ' · ' + ageSec + 's';
   } else {
-    lu.textContent = new Date().toLocaleTimeString('cs-CZ');
+    lu.textContent = window.__marketsFreshness ? '— · age unknown' : new Date().toLocaleTimeString('cs-CZ');
   }
+  lu.classList.toggle('is-stale', fState.stale);
+  // Keep an already-open detail panel in step with the topbar verdict, so the
+  // badge can never say STALE while the panel still shows confident numbers.
+  _applyDetailStaleClass(fState.stale);
 
   const top10 = DATA.slice(0, 10);
   document.getElementById('tkr').innerHTML = top10.map(d => {
@@ -2696,10 +2753,16 @@ function pickCoin(id) {
   document.getElementById('dlbl').textContent = sym;
   const symAttr = JSON.stringify(String(sym || ''));
   const idAttr  = JSON.stringify(String(d.id || ''));
+  // Manual-refresh hotfix: the 24h % is only market truth while the dataset is
+  // current. A stale snapshot renders STALE, an unreported 24h renders UNKNOWN
+  // — never a confident number the trader could mistake for the live market.
+  const _fState = _marketFreshnessState();
+  const _c24Disp = _pct24hDisplay(d._c24Known === false ? null : (d._c24 ?? d.price_change_percentage_24h), _fState);
   document.getElementById('dcon').innerHTML = `
+    ${_detailStaleBannerHtml(_fState)}
     <div class="dhead">
       <div><div class="dsym">${_esc(sym)}</div><div class="dname">${_esc(d.name)} · ${_esc(getSector(d.id))}</div></div>
-      <div><div class="dprc" data-detail="price">${_esc(fmt(d.current_price))}</div><div class="dchg ${(d.price_change_percentage_24h||0)>=0?'pos':'neg'}" data-detail="c24">${_esc(fp(d.price_change_percentage_24h||0))}</div></div>
+      <div><div class="dprc" data-detail="price">${_esc(fmt(d.current_price))}</div><div class="dchg ${_esc(_c24Disp.cls)}" data-detail="c24" title="${_esc(_c24Disp.title)}">${_esc(_c24Disp.text)}</div></div>
     </div>
 
     <button id="ai-analyze-btn"
@@ -2768,7 +2831,9 @@ function pickCoin(id) {
             ${tfRow('1H', d._c1)}
             ${tfRow('4H', d._c4)}
             ${tfRow('12H', d._c12)}
-            ${tfRow('24H', d._c24 ?? d.price_change_percentage_24h)}
+            ${_fState.stale || d._c24Known === false
+              ? `<div style="display:flex;justify-content:space-between;font-size:9px"><span style="color:var(--txt3)">24H</span><span style="color:var(--amb)">${_esc(_c24Disp.text)}</span></div>`
+              : tfRow('24H', d._c24 ?? d.price_change_percentage_24h)}
             ${tfRow('7D', d._c7d)}
           </div>
         </div>
@@ -2861,8 +2926,36 @@ function pickCoin(id) {
   // in place (no full-panel flicker), and start the live order-book poll so
   // the book + bid/ask bar keep ticking like Binance.
   { const _dc = document.getElementById('dcon'); if (_dc) _dc.dataset.coinId = id; }
+  // Manual-refresh hotfix: one class drives the whole-panel degrade, so the
+  // SIGNAL / SCORE / lead-score readouts are visibly dimmed while the dataset
+  // is stale instead of reading like live conviction.
+  _applyDetailStaleClass(_fState.stale);
   _startOrderbookLive(d);
   renderList();
+}
+
+// ─────────────────────────────────────────────────────────────
+// Detail-panel staleness presentation. Both helpers are shared by the
+// initial pickCoin() paint and the in-place _updateDetailPanel() mutation,
+// so the two can never disagree about whether the numbers are live.
+// ─────────────────────────────────────────────────────────────
+function _detailStaleBannerText(state) {
+  if (!state || !state.stale) return '';
+  const age = state.ageLabel ? ' · snapshot ' + state.ageLabel + ' old' : '';
+  const why = state.reason ? ' — ' + state.reason : '';
+  return 'STALE DATA' + age + why + '. Values below are NOT live — press REFRESH.';
+}
+
+// The node is ALWAYS rendered (hidden while fresh) so the in-place update path
+// can reveal it the moment the dataset ages out, without a full repaint.
+function _detailStaleBannerHtml(state) {
+  const stale = !!(state && state.stale);
+  return `<div class="detail-stale-banner" data-detail="stale-banner"${stale ? '' : ' hidden'}>${_esc(_detailStaleBannerText(state))}</div>`;
+}
+
+function _applyDetailStaleClass(stale) {
+  const dc = document.getElementById('dcon');
+  if (dc) dc.classList.toggle('data-stale', !!stale);
 }
 
 // On-demand Binance order book snapshot for the right detail panel.
@@ -4753,7 +4846,14 @@ function setAlertFilter(f, el) {
   renderAlerts();
 }
 
-document.addEventListener('refresh_now', () => { doRefresh(); });
+// Manual REFRESH. `force` is what makes the click mean something: without it
+// the request is answerable from the browser HTTP cache and from the Netlify
+// CDN entry (public, s-maxage=30, SWR=60), so a click inside that window
+// returned the byte-identical frozen snapshot the user was trying to escape.
+document.addEventListener('refresh_now', (e) => {
+  const manual = !e || !e.detail || e.detail.manual !== false;
+  manualRefresh({ force: manual });
+});
 
 // In-flight dedupe. Several independent triggers can land on the same refresh
 // (steady-state REST tick, 5-minute safety net, visibility resume, view switch,
@@ -4761,19 +4861,110 @@ document.addEventListener('refresh_now', () => { doRefresh(); });
 // /api/markets + /api/regime round trip, so one user action could cost three
 // Postgres reads. Callers still get a promise that resolves when the data is
 // live — they just share the one already running.
+//
+// Manual-refresh hotfix: dedupe now distinguishes FORCED from background
+// refreshes. A background tick already in flight is reading from cache, so
+// attaching a user's click to it would hand them the same stale bytes and the
+// click would silently do nothing. Two concurrent FORCED refreshes still
+// collapse onto one — that is the case dedupe exists for.
 let _refreshInFlight = null;
-function doRefresh() {
-  if (_refreshInFlight) {
+let _refreshInFlightForced = false;
+function doRefresh(opts) {
+  const force = !!(opts && opts.force);
+  if (_refreshInFlight && (!force || _refreshInFlightForced)) {
     window.__pollGovernor.dedupedRefreshes = (window.__pollGovernor.dedupedRefreshes || 0) + 1;
     return _refreshInFlight;
   }
-  _refreshInFlight = _doRefreshCore().finally(() => { _refreshInFlight = null; });
+  _refreshInFlightForced = force;
+  _refreshInFlight = _doRefreshCore({ force }).finally(() => { _refreshInFlight = null; _refreshInFlightForced = false; });
   return _refreshInFlight;
 }
 
-async function _doRefreshCore() {
+// ─────────────────────────────────────────────────────────────
+// Age-aware trust gate for everything painted from the market snapshot.
+//
+// The decision itself is the pure, unit-tested js/freshness-badge.js module
+// (window.__marketFreshness). The inline fallback FAILS CLOSED — if that
+// module ever fails to load we degrade to STALE, never to a confident number.
+// ─────────────────────────────────────────────────────────────
+function _marketFreshnessState() {
+  const fresh = window.__marketsFreshness || {};
+  const api = window.__marketFreshness;
+  if (api && typeof api.marketFreshnessState === 'function') return api.marketFreshnessState(fresh);
+  const gen = Number.isFinite(fresh.generatedAt) ? fresh.generatedAt : null;
+  const ageMs = gen != null ? Math.max(0, Date.now() - gen) : null;
+  return {
+    stale: fresh.ok === false || fresh.stale === true || gen == null || ageMs > 180000,
+    reason: fresh.staleReason || (fresh.ok === false ? 'fetch failed' : null),
+    ageMs,
+    ageLabel: ageMs == null ? null : Math.round(ageMs / 1000) + 's',
+  };
+}
+
+// How a percentage that is only meaningful on a CURRENT dataset should render.
+// Stale dataset → 'STALE'. Absent value → 'UNKNOWN'. Never a fabricated 0.00%.
+function _pct24hDisplay(value, state) {
+  const api = window.__marketFreshness;
+  if (api && typeof api.pct24hDisplay === 'function') return api.pct24hDisplay(value, state, { format: (n) => fp(n) });
+  if (!state || state.stale) return { text: 'STALE', cls: 'pct-stale', title: '24h change withheld — dataset is not live. Press REFRESH.', known: false };
+  if (value === null || value === undefined || value === '' || !Number.isFinite(Number(value))) {
+    return { text: 'UNKNOWN', cls: 'pct-unknown', title: '24h change not reported by the market source', known: false };
+  }
+  return { text: fp(Number(value)), cls: Number(value) >= 0 ? 'pos' : 'neg', title: '24h change from the current market snapshot', known: true };
+}
+
+// ─────────────────────────────────────────────────────────────
+// MANUAL REFRESH (the top-bar REFRESH button).
+//
+// Contract the hotfix enforces:
+//   • the click always forces a fresh public market read (never joins a
+//     cache-reading background tick, never answered from a cache layer);
+//   • the button shows it is working, and cannot be double-fired;
+//   • on success the timestamp/badge update and STALE clears ONLY if the
+//     new snapshot is genuinely fresh;
+//   • on failure — or on a refresh that came back still stale — the exact
+//     non-secret reason is surfaced and the STALE badge stays.
+// It does NOT force any DB-backed read and does not touch auth.
+// ─────────────────────────────────────────────────────────────
+let _manualRefreshBusy = false;
+async function manualRefresh(opts) {
+  const force = !opts || opts.force !== false;
+  const btn = document.getElementById('btn-refresh');
+  if (_manualRefreshBusy) return _refreshInFlight || Promise.resolve();
+  _manualRefreshBusy = true;
+  const label = btn ? btn.textContent : null;
+  if (btn) { btn.disabled = true; btn.classList.add('is-loading'); btn.textContent = 'REFRESHING…'; }
+  try {
+    await doRefresh({ force });
+    const state = _marketFreshnessState();
+    const fresh = window.__marketsFreshness || {};
+    if (fresh.ok === false) {
+      window.Toast?.error?.('Refresh failed', 'Market read did not complete — the data below is the previous snapshot.', { endpoint: '/api/markets' });
+    } else if (state.stale) {
+      // The click DID reach origin; upstream simply had nothing newer. Say so
+      // plainly instead of leaving the operator to guess why the clock froze.
+      const why = state.reason || 'upstream did not return a newer snapshot';
+      const outcome = fresh.forceOutcome === 'throttled'
+        ? ' Force was throttled (min 10s between rebuilds) — try again shortly.'
+        : '';
+      window.Toast?.error?.('Still STALE after refresh', why + '.' + outcome, { endpoint: '/api/markets' });
+      console.warn('[REFRESH] manual refresh completed but data is still stale:', { reason: why, force_outcome: fresh.forceOutcome || null, age_ms: state.ageMs });
+    }
+    return state;
+  } catch (e) {
+    const reason = (e && e.message) || String(e);
+    window.Toast?.error?.('Refresh failed', reason, { endpoint: '/api/markets' });
+    console.error('[REFRESH] manual refresh failed:', reason);
+    throw e;
+  } finally {
+    _manualRefreshBusy = false;
+    if (btn) { btn.disabled = false; btn.classList.remove('is-loading'); if (label != null) btn.textContent = label; }
+  }
+}
+
+async function _doRefreshCore(opts) {
   document.getElementById('sts').textContent = 'FETCHING...';
-  const live = await fetchData();
+  const live = await fetchData(opts);
   if (live && live.length) {
     // Observation-only "WHAT CHANGED?" digest: retain the prior snapshot
     // (and its timestamp) so the next render can diff it against the new one.
@@ -12166,14 +12357,26 @@ function _updateDetailPanel(d, newPrice, prevPrice, prevPanic) {
     priceEl.classList.add(dir);
   }
 
-  // 24H % — text mutate + class swap (pos/neg) so the existing colour
-  // tone follows the latest sign.
-  const c24Val = (d && d._c24 != null) ? d._c24 : (d && d.price_change_percentage_24h) || 0;
+  // 24H % — same trust gate as the initial paint (shared helper), so an
+  // in-place poll update can never quietly restore a confident number over a
+  // stale dataset. Class swap covers pos/neg AND the degraded variants.
+  const _fState = _marketFreshnessState();
+  _applyDetailStaleClass(_fState.stale);
+  const banner = dcon.querySelector('[data-detail="stale-banner"]');
+  if (banner) {
+    banner.textContent = _detailStaleBannerText(_fState);
+    banner.hidden = !_fState.stale;
+  }
+  const c24Raw = (d && d._c24Known === false) ? null : (d ? (d._c24 ?? d.price_change_percentage_24h) : null);
+  const c24Disp = _pct24hDisplay(c24Raw, _fState);
   const c24El = dcon.querySelector('[data-detail="c24"]');
-  if (c24El && Number.isFinite(c24Val)) {
-    c24El.textContent = fp(c24Val);
-    c24El.classList.toggle('pos', c24Val >= 0);
-    c24El.classList.toggle('neg', c24Val < 0);
+  if (c24El) {
+    c24El.textContent = c24Disp.text;
+    c24El.title = c24Disp.title;
+    c24El.classList.toggle('pos', c24Disp.cls === 'pos');
+    c24El.classList.toggle('neg', c24Disp.cls === 'neg');
+    c24El.classList.toggle('pct-stale', c24Disp.cls === 'pct-stale');
+    c24El.classList.toggle('pct-unknown', c24Disp.cls === 'pct-unknown');
   }
 
   // SCORE — re-apply the integer + threshold-coloured tone.
