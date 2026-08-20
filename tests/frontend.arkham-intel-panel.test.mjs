@@ -57,8 +57,8 @@ test('the asset cache-bust token was bumped so returning users get the new code'
   assert.equal(indexHtml.includes('?v=6l2'), false, 'the old token must not survive a js/css change');
   // 6l4 -> 6l5: the 8h native auth device sessions bumped the token again (see
   // tests/frontend.canonical-context-cutover.test.mjs for the running log).
-  assert.match(indexHtml, /js\/terminal\.js\?v=6l5/);
-  assert.match(indexHtml, /css\/terminal\.css\?v=6l5/);
+  assert.match(indexHtml, /js\/terminal\.js\?v=6l6/);
+  assert.match(indexHtml, /css\/terminal\.css\?v=6l6/);
 });
 
 test('the panel styles exist and no unrelated CSS was disturbed', () => {
