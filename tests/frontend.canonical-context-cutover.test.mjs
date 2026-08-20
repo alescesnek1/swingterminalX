@@ -214,7 +214,7 @@ test('every versioned asset carries the same single bumped cache-bust token', ()
   // netlify.toml sets max-age=3600 on /*.js, so without the bump a returning tab
   // keeps the OLD auth client — the one that drops an expired token and shows the
   // login form, which is the exact bug being fixed.
-  assert.equal(tokens[0], '6l5', 'token was bumped for this JS change');
+  assert.equal(tokens[0], '6l6', 'token was bumped for this JS change');
 });
 
 // The measurement budget targets the deepest drawdowns, and DISLOCATION is 20% of

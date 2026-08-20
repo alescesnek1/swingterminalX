@@ -12767,7 +12767,28 @@ window.AuthClient?.onChange((session, mode) => {
 // Supabase bootstrap: if a valid native token is in storage the app opens
 // straight away, and if the server has since disabled the account the refresh
 // inside init() fails and the gate stays up.
-(async function _restoreNativeSession() {
+//
+// ── DEFERRED ON PURPOSE — do not turn this back into a bare IIFE ──
+// `AuthClient.init()` can adopt a stored session and notify listeners WITHOUT
+// awaiting anything (the path that reuses a token the server confirmed
+// recently). The `onChange` handler right above answers that notification by
+// booting the entire terminal — `_applyAuthenticatedState()` → `initTerminalApp()`
+// → `initColumnDnD()` → `_ensureColumnPositions()`.
+//
+// Run inline, that whole boot happens HERE, on line ~12770, while the script is
+// still being evaluated — about 170 lines ABOVE
+// `const DEFAULT_COLUMN_ORDER` and the other column-layout constants. Reading a
+// `const` before its declaration has been evaluated is a TDZ ReferenceError, so
+// the boot died inside a promise and production showed exactly that: a toast
+// reading "can't access lexical declaration 'DEFAULT_COLUMN_ORDER' before
+// initialization", the Scanner stuck in LOADING, and empty data panels.
+//
+// A microtask runs as soon as this file's top-level evaluation finishes, so
+// every `const`/`let` below is initialized before anything can boot. This is
+// strictly EARLIER than the old behaviour (which always waited for a network
+// refresh first), and it changes nothing about the auth flow itself — only the
+// point in the page's boot sequence at which the restore is kicked off.
+queueMicrotask(async function _restoreNativeSession() {
   if (!window.AuthClient) return;
   try {
     await window.AuthClient.init();
@@ -12778,7 +12799,7 @@ window.AuthClient?.onChange((session, mode) => {
       reason: (err && err.message) || 'unknown', endpoint: '/api/auth-refresh',
     });
   }
-})();
+});
 
 // ── Module 4: Market Briefing trigger ──
 // We pick the top 3 coins by computed score from the *current* DATA
