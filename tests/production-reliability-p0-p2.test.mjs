@@ -235,10 +235,16 @@ test('P0: a hard-stale snapshot renders MARKET DATA UNAVAILABLE, not a normal ta
 test('P0: a dead canonical store is treated as a FAILED read, not as market truth', () => {
   const canonical = region(js, 'async function _fetchCanonicalMarkets(authHeaders)', 'async function fetchData(opts)');
   assert.match(canonical, /const _unusable = _marketDataUnusableFor\(/);
-  assert.match(canonical, /throw new Error\('canonical snapshot unusable — ' \+ _unusable\.reason\)/);
-  // The existing honest fallback then runs: visible failure + /api/markets.
+  // The refusal is unchanged; it now carries a tag so the caller can report an
+  // EXPECTED aged run as INFO instead of as a fault (see the post-deploy
+  // diagnostics cleanup). The aged rows are still never used.
+  assert.match(canonical, /const err = new Error\('canonical snapshot unusable — ' \+ _unusable\.reason\);/);
+  assert.match(canonical, /err\.canonicalDegraded = true;/);
+  assert.match(canonical, /throw err;/);
+  // The existing honest fallback then runs: the genuine-failure branch keeps
+  // its visible error, and /api/markets takes over either way.
   assert.match(js, /\[CANONICAL\] \/api\/context read failed; falling back to \/api\/markets:/);
-  assert.match(js, /failed: true, failureReason: \(ce && ce\.message\) \|\| 'error'/);
+  assert.match(js, /failureReason: \(ce && ce\.message\) \|\| 'error',/);
 });
 
 test('P0: the inline hard gate fails closed if freshness-badge.js never loads', () => {
@@ -550,11 +556,11 @@ test('P2: no generated document is written without a doctype', () => {
 test('the cache-bust token was bumped once, consistently, for this JS/CSS change', () => {
   const tokens = Array.from(new Set((html.match(/\?v=([0-9a-z]+)/g) || []).map((m) => m.slice(3))));
   assert.equal(tokens.length, 1, 'every versioned asset must carry the SAME token, got ' + tokens.join(','));
-  assert.equal(tokens[0], '6m2');
+  assert.equal(tokens[0], '6m3');
   assert.doesNotMatch(html, /\?v=6m1/);
   // The files this hotfix actually changed are all versioned.
   for (const asset of ['js/terminal.js', 'js/freshness-badge.js', 'js/ai-analysis.js', 'css/terminal.css']) {
-    assert.ok(html.includes(asset + '?v=6m2'), asset + ' must carry the bumped token');
+    assert.ok(html.includes(asset + '?v=6m3'), asset + ' must carry the bumped token');
   }
 });
 

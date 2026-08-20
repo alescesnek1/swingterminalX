@@ -59,8 +59,8 @@ test('the asset cache-bust token was bumped so returning users get the new code'
   // tests/frontend.canonical-context-cutover.test.mjs for the running log).
   // 6l5 -> 6m1: the manual-refresh freshness hotfix bumped it again.
   // 6m1 -> 6m2: the production reliability P0-P2 hotfix bumped it again.
-  assert.match(indexHtml, /js\/terminal\.js\?v=6m2/);
-  assert.match(indexHtml, /css\/terminal\.css\?v=6m2/);
+  assert.match(indexHtml, /js\/terminal\.js\?v=6m3/);
+  assert.match(indexHtml, /css\/terminal\.css\?v=6m3/);
 });
 
 test('the panel styles exist and no unrelated CSS was disturbed', () => {

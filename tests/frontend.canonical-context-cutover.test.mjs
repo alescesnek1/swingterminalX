@@ -162,8 +162,12 @@ test('falling back to the legacy radar states the active source and the reason',
 test('a failed canonical read replaces the stale context instead of leaving it in place', () => {
   // Previously __canonicalContext was assigned only on success, so a failed fetch
   // left the previous cycle's object rendering as if it were current.
-  assert.match(terminalJs, /failed: true, failureReason:/);
-  assert.match(terminalJs, /window\.__canonicalContext\.failed \? `\/api\/context failed/);
+  assert.match(terminalJs, /failed: true,/);
+  assert.match(terminalJs, /failureReason: \(ce && ce\.message\) \|\| 'error',/);
+  // The panel wording now splits an EXPECTED stale run from a genuine failure,
+  // but both still refuse the canonical rows and both still say so.
+  assert.match(terminalJs, /\/api\/context is STALE — \$\{window\.__canonicalContext\.failureReason/);
+  assert.match(terminalJs, /\/api\/context failed — \$\{window\.__canonicalContext\.failureReason/);
 });
 
 test('every versioned asset carries the same single bumped cache-bust token', () => {
@@ -231,7 +235,7 @@ test('every versioned asset carries the same single bumped cache-bust token', ()
   // unavailable banner). Load-bearing: netlify.toml sets max-age=3600 on
   // /*.js, so without the bump a returning tab keeps the old code — the code
   // whose REFRESH cannot reach /api/markets at all.
-  assert.equal(tokens[0], '6m2', 'token was bumped for this JS change');
+  assert.equal(tokens[0], '6m3', 'token was bumped for this JS change');
 });
 
 // The measurement budget targets the deepest drawdowns, and DISLOCATION is 20% of

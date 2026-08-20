@@ -2047,7 +2047,17 @@ async function _fetchCanonicalMarkets(authHeaders) {
   const _observedMs = j.market && j.market.observedAt ? Date.parse(j.market.observedAt) : NaN;
   const _unusable = _marketDataUnusableFor(Number.isFinite(_observedMs) ? _observedMs : null);
   if (_unusable.unusable) {
-    throw new Error('canonical snapshot unusable — ' + _unusable.reason);
+    // TAGGED as an EXPECTED degraded source, not a fault. The publishing
+    // collector is deliberately off, so an aged run is the normal state of this
+    // store — and the terminal has a working answer for it (the live
+    // /api/markets read). The caller uses this flag to report it as an INFO
+    // diagnostic instead of an error the owner has to triage. It is still a
+    // refusal: the aged rows are never used.
+    const err = new Error('canonical snapshot unusable — ' + _unusable.reason);
+    err.canonicalDegraded = true;
+    err.canonicalReason = _unusable.reason;
+    err.canonicalAgeMs = _unusable.ageMs;
+    throw err;
   }
   const tickers = (j.market && Array.isArray(j.market.tickers)) ? j.market.tickers : [];
   const rows = _dedupeCanonicalByBase(tickers.map(_mapCanonicalTicker).filter((row) => row.symbol));
@@ -2082,6 +2092,11 @@ async function fetchData(opts) {
   // on a user's click and still hand back the same published run. The only
   // path that can actually rebuild from upstream is the public market read.
   const _canonical = _canonicalContextEnabled() && !force;
+  // Set when the canonical store answered but its run was past the hard ceiling.
+  // Read again on the /api/markets failure path: a degraded canonical PLUS a
+  // failed live read means there is no usable market source at all, and that
+  // combination must be stated outright rather than left as two quiet lines.
+  let _canonicalDegraded = null;
   if (force && _canonicalContextEnabled()) {
     console.warn('[REFRESH] forced read bypasses the canonical /api/context store — going straight to /api/markets (no DB read is forced)');
   }
@@ -2092,14 +2107,42 @@ async function fetchData(opts) {
         live = await _fetchCanonicalMarkets(authHeaders);
         SRC = window.__marketsFreshness.stale ? 'STALE' : 'LIVE';
       } catch (ce) {
-        // Honest fallback: surface the canonical failure, then use the legacy feed.
-        console.warn('[CANONICAL] /api/context read failed; falling back to /api/markets:', ce && ce.message);
-        window.Toast?.error?.('Canonical context unavailable', `Falling back to /api/markets — ${ce && ce.message || 'error'}`, { endpoint: '/api/context' });
+        // TWO different things end up here, and conflating them was noise:
+        //
+        //   EXPECTED DEGRADED — the store answered fine, its newest published
+        //   run is simply older than the hard ceiling (the publishing collector
+        //   is deliberately off). Nothing is broken, the terminal has a working
+        //   answer, and a red toast on every boot trains the owner to ignore
+        //   toasts. Reported as INFO: no error toast, and — because Toast only
+        //   forwards error/warn to ErrorLog — no entry in errors() either.
+        //
+        //   GENUINE FAILURE — 401/503/network/parse. Unchanged: warn + a red
+        //   toast, because the owner does have to look at it.
+        //
+        // Either way the aged rows are REFUSED and the live /api/markets read
+        // below is what actually feeds the scanner.
+        _canonicalDegraded = (ce && ce.canonicalDegraded === true)
+          ? { reason: ce.canonicalReason || 'stale run', ageMs: ce.canonicalAgeMs ?? null }
+          : null;
+        if (_canonicalDegraded) {
+          console.warn('[CANONICAL] context stale; using live /api/markets —', _canonicalDegraded.reason);
+          window.Toast?.info?.('Canonical context stale', `Using live /api/markets — ${_canonicalDegraded.reason}.`, { endpoint: '/api/context' });
+        } else {
+          console.warn('[CANONICAL] /api/context read failed; falling back to /api/markets:', ce && ce.message);
+          window.Toast?.error?.('Canonical context unavailable', `Falling back to /api/markets — ${ce && ce.message || 'error'}`, { endpoint: '/api/context' });
+        }
         // The canonical context is only ever assigned on success, so a failed read
         // would otherwise leave the PREVIOUS cycle's object in place and the RADAR
         // panel would keep rendering it as if it were current. Replace it with an
         // explicit failure marker instead of letting stale data pose as fresh.
-        window.__canonicalContext = { radar: null, market: null, run: null, receivedAt: Date.now(), failed: true, failureReason: (ce && ce.message) || 'error' };
+        // `degraded` only changes how the panel WORDS it — the rows are refused
+        // in both cases.
+        window.__canonicalContext = {
+          radar: null, market: null, run: null, receivedAt: Date.now(),
+          failed: true,
+          degraded: !!_canonicalDegraded,
+          failureReason: (ce && ce.message) || 'error',
+        };
       }
     }
     if (!live) {
@@ -2121,7 +2164,15 @@ async function fetchData(opts) {
     const r = await fetch(_mktUrl, _mktInit);
     if (!r.ok) {
       const body = await r.text().catch(() => '');
-      window.Toast?.error('Market data fetch failed', `HTTP ${r.status} — ${body.slice(0,140)}`, { endpoint: '/api/markets', code: r.status });
+      // Downgrading the canonical-stale notice to INFO must never make a TOTAL
+      // outage quieter. When the live read fails too, the fact that the
+      // canonical store was ALSO unusable is part of the error, not a separate
+      // whisper: there is no usable market source at all.
+      const both = _canonicalDegraded
+        ? ` Canonical context is also unusable (${_canonicalDegraded.reason}) — no usable market source right now.`
+        : '';
+      window.Toast?.error('Market data fetch failed', `HTTP ${r.status} — ${body.slice(0,140)}.${both}`, { endpoint: '/api/markets', code: r.status });
+      if (_canonicalDegraded) console.error('[MARKET] no usable source — canonical is stale AND /api/markets failed:', { canonical: _canonicalDegraded.reason, markets_status: r.status });
       throw new Error('HTTP ' + r.status);
     }
     // Batch B: read freshness metadata off the response headers (the body
@@ -5305,6 +5356,8 @@ let _lastRadarContextPostAt = 0;
 function _noteRadarContextSkip(reason) {
   window.__lastRadarContextPostStatus = 'skipped: ' + reason;
   window.__lastRadarContextSkipReason = reason;
+  // Mirrors the shape of the post proof, so a skip is as readable as a post.
+  window.__lastRadarContextPostProof = { market_fresh: false, skipped_reason: reason };
   console.warn('[RADAR] scanner context post skipped —', reason);
 }
 
@@ -5313,13 +5366,43 @@ function pushScannerContextToRadar(opts) {
   const now = Date.now();
   if (!DATA || !DATA.length) { _noteRadarContextSkip('no scanner rows loaded (' + trigger + ')'); return; }
 
-  // Fail closed on data freshness BEFORE the throttle, so the reason the
-  // operator sees is the real one and not "throttled".
+  // ── Freshness gate, evaluated in THIS tick, immediately before the post ──
+  //
+  // Every condition is checked and named separately rather than collapsed into
+  // one composite, so the console says exactly WHICH one refused. All of them
+  // fail closed: anything we cannot prove to be current blocks the post.
+  //
+  // The order matters — freshness before the throttle, so the operator is never
+  // told "throttled" when the real reason is that the data is not trustworthy.
+  const _snapshot = window.__marketsFreshness;
+
+  // 1. No market read has completed at all (first paint, or a boot that died).
+  if (!_snapshot) { _noteRadarContextSkip('no market read has completed yet (' + trigger + ')'); return; }
+
+  // 2. The read itself failed — this is also the "canonical stale AND live
+  //    /api/markets failed" case, where fetchData records ok:false. A degraded
+  //    canonical with a WORKING live replacement does not land here: the
+  //    replacement is what __marketsFreshness describes, and it is judged on
+  //    its own age below.
+  if (_snapshot.ok === false) {
+    _noteRadarContextSkip('the market read failed — ' + (_snapshot.staleReason || 'no usable market source'));
+    return;
+  }
+
+  // 3. No build timestamp → age is unprovable, so freshness is unprovable.
+  if (!Number.isFinite(_snapshot.generatedAt)) {
+    _noteRadarContextSkip('snapshot has no generatedAt timestamp — freshness cannot be proven');
+    return;
+  }
+
+  // 4. Past the HARD ceiling: not market data at all.
   const _unusable = _marketDataUnusableState();
   if (_unusable.unusable) {
     _noteRadarContextSkip('market data unavailable — ' + (_unusable.reason || 'freshness unknown'));
     return;
   }
+
+  // 5. Past the soft budget: real data, but not current enough to score against.
   const _fresh = _marketFreshnessState();
   if (_fresh.stale) {
     _noteRadarContextSkip('market snapshot is STALE — ' + (_fresh.reason || 'not live') + (_fresh.ageLabel ? ' (age ' + _fresh.ageLabel + ')' : ''));
@@ -5401,12 +5484,26 @@ function pushScannerContextToRadar(opts) {
 
     const fieldMappingDetected = _radarDetectScannerFields(rows);
 
+    // Proof line: every post states the freshness it was allowed on, so a post
+    // and a skip are equally accountable in the console. `market_fresh` is true
+    // by construction here — the five gates above return before this point —
+    // and the source/age it was true FOR is printed alongside, non-secret.
+    const _postProof = {
+      market_fresh: true,
+      source: _snapshot.servedFrom || 'unknown',
+      age_ms: _fresh.ageMs,
+      generated_at: new Date(_snapshot.generatedAt).toISOString(),
+      rows: payload.length,
+      rows_available: DATA.length,
+      trigger,
+    };
+    window.__lastRadarContextPostProof = _postProof;
     window.__lastRadarContextPostStatus = 'posting...';
-    console.log(`[RADAR] Posting scanner context to /api/bot/radar-context (${payload.length} rows)...`);
+    console.log('[RADAR] posting scanner context to /api/bot/radar-context', _postProof);
     _fleetFetch('POST', '/api/bot/radar-context', { scannerCandidates: payload, fieldMappingDetected, scannerRowsAvailable: DATA.length, scannerRowsSent: payload.length })
       .then((res) => {
          window.__lastRadarContextPostStatus = `ok (${res.stored} stored)`;
-         console.log(`[RADAR] Scanner context post successful. Server stored: ${res.stored}`);
+         console.log('[RADAR] scanner context post successful', { stored: res.stored, sent: _postProof.rows, source: _postProof.source, age_ms: _postProof.age_ms });
       })
       .catch((err) => {
          window.__lastRadarContextPostStatus = `error: ${err.message || 'unknown'}`;
@@ -11449,7 +11546,11 @@ function renderTradingRadarPanel() {
       const reason = !_canonicalContextEnabled()
         ? 'the canonical read is DISABLED in this browser — set localStorage radarCanonicalContextRead = "true" and reload (a server env var cannot enable it)'
         : !window.__canonicalContext ? 'not loaded yet'
-        : window.__canonicalContext.failed ? `/api/context failed — ${window.__canonicalContext.failureReason || 'error'}`
+        : window.__canonicalContext.failed
+          ? (window.__canonicalContext.degraded
+            // Expected: the store works, its newest run is just too old to trust.
+            ? `/api/context is STALE — ${window.__canonicalContext.failureReason || 'aged run'}; the live /api/markets feed is in use`
+            : `/api/context failed — ${window.__canonicalContext.failureReason || 'error'}`)
         : !canonicalRadar ? 'no canonical RADAR in the response'
         : PENDING_REASONS[canonicalRadar.pendingReason]
           || `canonical RADAR status ${String(canonicalRadar.status || 'unknown').toUpperCase()}`;

@@ -1661,6 +1661,59 @@ email allowlist (§9), not a billing tier.
 
 From current git history (most recent first, condensed — see `git log` for full):
 
+- **Post-deploy freshness diagnostics cleanup (LOCAL, UNPUSHED, branch
+  `fix/post-deploy-reliability-cleanup`)** — follow-up to the P0-P2 deploy
+  (`f1eefde`), which is confirmed working in production (`REFRESH` →
+  `outcome: rebuilt · upstream_status: ok · served_from: live`). Three
+  leftovers, no behaviour regression:
+  - **Canonical fallback noise.** Every boot logged *and red-toasted*
+    `[CANONICAL] /api/context read failed` because the published run is ~27h
+    old. That is the EXPECTED state of a store whose publishing collector is
+    deliberately off, and the terminal has a working answer (the live
+    `/api/markets` read) — so a red toast on every boot only teaches the owner
+    to ignore toasts. The refusal now carries a tag (`err.canonicalDegraded`),
+    and the caller splits the two cases: an EXPECTED aged run is
+    `Toast.info('Canonical context stale', 'Using live /api/markets — …')` plus
+    a `console.warn`, which — because `toast.js` forwards only `error`/`warn`
+    to `ErrorLog` — adds **no entry to `errors()`**. A GENUINE failure
+    (401/503/network/parse) keeps its `console.warn` + red toast, unchanged.
+    The aged rows are still REFUSED in both cases. If the live read then fails
+    too, the market-failure toast names the combination outright
+    (*"Canonical context is also unusable (…) — no usable market source right
+    now"*) plus a `console.error`, so downgrading the notice cannot make a real
+    outage quieter. The RADAR panel now says `/api/context is STALE — …; the
+    live /api/markets feed is in use` for the degraded case instead of
+    `failed`.
+  - **RADAR scanner-context post — PROVED, not asserted.** The five blocking
+    conditions are now checked and named separately (no market read yet /
+    `ok:false` / no `generatedAt` / hard-stale-unavailable / soft-stale),
+    each returning with its own reason, evaluated in the same tick as the post
+    with no `await` in between, and BEFORE the throttle so the operator is
+    never told "throttled" when the data is the real problem. A post now logs a
+    proof object — `{market_fresh, source, age_ms, generated_at, rows,
+    rows_available, trigger}` — and the completion line repeats it; a skip logs
+    `{market_fresh:false, skipped_reason}`. Both are readable from
+    `window.__lastRadarContextPostProof`. The 45s throttle is unchanged and
+    still uncancellable; the 500-row cap is unchanged. **The gate is executed
+    in tests**, not just pattern-matched: `pushScannerContextToRadar` is lifted
+    out of the bundle and run with stubs, proving fresh→POST and each unfit
+    state→BLOCKED. No RADAR gate, ENTRY_READY rule, Telegram field or order
+    path touched.
+  - **Quirks mode — attributed, no code change.** `index.html` starts with
+    `<!DOCTYPE html>` (no BOM, no leading bytes) and production **measured**
+    `document.compatMode === 'CSS1Compat'`, i.e. standards mode. The app also
+    has no `document.write`, no `document.open`, and no `srcdoc` iframe, so it
+    cannot create a second doctype-less document. The browser's "backward
+    compatibility mode" report therefore comes from another frame on the page
+    (extension or embedded third-party iframe), not from this document. Tests
+    pin all of it.
+  - Touched files: `apps/edge/public/js/terminal.js`,
+    `apps/edge/public/index.html` (cache-bust `6m2 → 6m3`); new
+    `tests/post-deploy-freshness-diagnostics.test.mjs` (25); four existing
+    cache-token assertions advanced. Suite 2,665 tests / 2,639 pass / 0 fail /
+    26 skipped; eslint 0 errors / 163 warnings. Nothing outside `apps/` and
+    `tests/` changed — no env, migration, package, scheduler or workflow.
+  **NOT pushed, NOT deployed — awaiting owner review.**
 - **Production reliability P0-P2 hotfix (LOCAL, UNPUSHED, branch
   `fix/production-reliability-p0-p2`)** — after the manual-refresh freshness
   hotfix the browser still showed: REFRESH returning `age_ms 93382647` (~25.9 h)
