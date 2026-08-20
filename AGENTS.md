@@ -151,6 +151,17 @@ Do not rediscover the whole repo from scratch unless these are clearly stale.
   `apps/edge/netlify/edge-functions/lib/native-jwt.js`) byte-compatible — the
   cross-runtime test exists because a drift means half the API accepts a token
   the other half rejects. See `docs/native-auth.md`.
+- **Device sessions (`sid`/`sxp`) must stay bounded.** A login stamps an
+  ABSOLUTE deadline into the token (`SESSION_TTL_SECONDS`, 8h default) so a page
+  reload never costs a password inside the window. Rules that must not be
+  relaxed: the expiry tolerance lives ONLY in `verifyRefreshableToken()`, used by
+  `/api/auth-refresh` alone — every API path keeps calling `verifyAccessToken()`,
+  which never accepts an expired token. A refresh CARRIES `sid`/`sxp` forward and
+  must never extend the deadline, `exp` stays capped at `sxp`, refresh keeps its
+  database check (status + `token_version`), and both verifiers enforce `sxp` in
+  the same order. Never add a "remember me" path that skips the deadline, and
+  never read a blank env var as `0` (a blank `SESSION_TTL_SECONDS` means unset,
+  not "expire immediately").
 - **No secrets / keys / tokens / customer PII** in code, docs, URLs, or commits.
 
 ## Error observability (non-negotiable)

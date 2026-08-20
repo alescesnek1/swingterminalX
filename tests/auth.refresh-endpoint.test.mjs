@@ -7,6 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runAuthRefresh } from '../netlify/functions/auth-refresh.mjs';
+import { createHmac } from 'node:crypto';
 import { mintAccessToken, verifyAccessToken } from '../netlify/functions/_native-jwt.mjs';
 
 const SECRET = 'r'.repeat(48);
@@ -30,6 +31,26 @@ function tokenFor(over = {}) {
   );
   assert.equal(minted.ok, true);
   return minted.token;
+}
+
+// A token exactly as this endpoint used to mint them: no `sid`/`sxp`. Built by
+// hand because the current minter always opens a session, and the point is to
+// prove tokens already in users' browsers keep behaving predictably.
+function legacyToken() {
+  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify({
+    iss: 'swing-terminal',
+    aud: 'swing-terminal-app',
+    sub: USER_ROW.id,
+    email: USER_ROW.email,
+    role: USER_ROW.role,
+    tv: USER_ROW.tokenVersion,
+    iat: Math.floor(NOW / 1000),
+    exp: Math.floor(NOW / 1000) + 3600,
+    jti: 'legacy-token',
+  })).toString('base64url');
+  const signature = createHmac('sha256', SECRET).update(`${header}.${payload}`).digest('base64url');
+  return `${header}.${payload}.${signature}`;
 }
 
 function req(token, method = 'POST') {
@@ -102,10 +123,69 @@ test('a bumped token_version invalidates the session', async () => {
   assert.equal(json.token, undefined);
 });
 
-test('an expired token cannot be refreshed — the user logs in again', async () => {
+// ── device sessions: a reload must not ask for a password ──
+// This is the behaviour the whole feature exists for. An access token that
+// lapsed while the tab was closed is re-minted WITHOUT a password, but only
+// inside the 8h window opened at login, and the window itself never moves.
+
+test('an expired token IS refreshed inside its live device session', async () => {
+  // One second past the 60-minute access token, well inside the 8h session.
   const { res, json } = await call({ nowMs: NOW + 3601 * 1000 });
+  assert.equal(res.status, 200, 'an ordinary page reload must not require a password');
+  assert.equal(json.ok, true);
+  assert.ok(json.token);
+});
+
+test('a refresh cannot push the 8h deadline out', async () => {
+  const first = await call();
+  const deadline = first.json.sessionExpiresAt;
+  assert.equal(deadline, new Date(NOW + 8 * 3600 * 1000).toISOString());
+
+  // Refresh again, much later, with the token the first refresh issued.
+  const second = await call({ token: first.json.token, nowMs: NOW + 7 * 3600 * 1000 });
+  assert.equal(second.res.status, 200);
+  assert.equal(second.json.sessionExpiresAt, deadline, 'the window must be carried, never extended');
+});
+
+test('a token past its 8h deadline is refused — the user logs in again', async () => {
+  const { res, json } = await call({ nowMs: NOW + 8 * 3600 * 1000 + 1000 });
+  assert.equal(res.status, 401);
+  assert.equal(json.reason, 'SESSION_EXPIRED');
+  assert.equal(json.token, undefined);
+});
+
+test('SESSION_TTL_SECONDS sets the window, and is refused past it', async () => {
+  const env = { SESSION_TTL_SECONDS: String(2 * 3600) };
+  // The window is stamped into the token AT LOGIN, so the login-time env is what
+  // decides it — the token has to be minted with the same setting.
+  const token = mintAccessToken(
+    { id: USER_ROW.id, email: USER_ROW.email, role: USER_ROW.role, token_version: USER_ROW.tokenVersion },
+    { ...ENV, ...env },
+    NOW,
+  ).token;
+
+  const inside = await call({ env, token, nowMs: NOW + 3601 * 1000 });
+  assert.equal(inside.res.status, 200);
+  assert.equal(inside.json.sessionExpiresAt, new Date(NOW + 2 * 3600 * 1000).toISOString());
+
+  const outside = await call({ env, token, nowMs: NOW + 2 * 3600 * 1000 + 1000 });
+  assert.equal(outside.res.status, 401);
+  assert.equal(outside.json.reason, 'SESSION_EXPIRED');
+});
+
+test('a legacy token with no session claim gets NO expiry tolerance', async () => {
+  // Tokens minted before device sessions existed must behave exactly as before:
+  // once expired, the user logs in again.
+  const { res, json } = await call({ token: legacyToken(), nowMs: NOW + 3601 * 1000 });
   assert.equal(res.status, 401);
   assert.equal(json.reason, 'TOKEN_EXPIRED');
+});
+
+test('a still-valid legacy token is upgraded into a device session', async () => {
+  // The fleet migrates itself: no forced logout, and the next reload is covered.
+  const { res, json } = await call({ token: legacyToken(), nowMs: NOW + 60 * 1000 });
+  assert.equal(res.status, 200);
+  assert.equal(json.sessionExpiresAt, new Date(NOW + 60 * 1000 + 8 * 3600 * 1000).toISOString());
 });
 
 test('a forged token cannot be refreshed', async () => {

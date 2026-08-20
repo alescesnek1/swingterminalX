@@ -16,6 +16,7 @@
 // Node 22+, so no other shim is needed.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import { mintAccessToken, NATIVE_ISSUER, NATIVE_AUDIENCE } from '../netlify/functions/_native-jwt.mjs';
 
 const SECRET = 'e'.repeat(48);
@@ -202,6 +203,62 @@ test('signature comparison does not short-circuit on length or first byte', asyn
   // LAST byte must both be refused. The latter is what an early-return
   // implementation would still get right, but it pins the behaviour.
   assert.equal((await edge.verifyNativeAccessToken(`${h}.${p}.${s.slice(0, -4)}`, NOW)).reason, 'TOKEN_SIGNATURE_INVALID');
-  const flipped = s.slice(0, -1) + (s.endsWith('A') ? 'B' : 'A');
+  // Flip the SECOND-TO-LAST base64url character, not the last one. A 32-byte
+  // HMAC encodes to 43 unpadded characters whose final character carries only 2
+  // significant bits plus 4 bits of padding — so 'A'→'B' there can decode to the
+  // SAME bytes and the token legitimately verifies. That made this assertion fail
+  // about one run in four (whenever the random `jti` produced a signature ending
+  // in 'A'), which is a false alarm in the one suite that must be trusted.
+  const flipped = `${s.slice(0, -2)}${s.at(-2) === 'A' ? 'B' : 'A'}${s.at(-1)}`;
   assert.equal((await edge.verifyNativeAccessToken(`${h}.${p}.${flipped}`, NOW)).reason, 'TOKEN_SIGNATURE_INVALID');
+});
+
+
+// ── device sessions must mean the same thing in both runtimes ──
+// If only the Node side enforced `sxp`, a session past its 8h deadline would
+// keep working on every edge endpoint — the exact half-accepts-half-rejects
+// failure this file exists to prevent.
+
+test('the edge accepts a session-bearing token and reports its deadline', async () => {
+  const minted = mintAccessToken(USER, nodeEnv(), NOW);
+  const result = await edge.verifyNativeAccessToken(minted.token, NOW);
+  assert.equal(result.ok, true, `edge rejected a session token: ${result.reason}`);
+  assert.equal(result.sessionExpiresAt, minted.sessionExpiresAt);
+  assert.equal(result.sessionId, minted.sessionId);
+});
+
+test('the edge refuses a token past its 8h session deadline', async () => {
+  const minted = mintAccessToken(USER, nodeEnv(), NOW);
+  const result = await edge.verifyNativeAccessToken(minted.token, NOW + 8 * 3600 * 1000 + 1000);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'SESSION_EXPIRED');
+});
+
+test('the edge never grants the refresh endpoint\'s expiry tolerance', async () => {
+  // /api/auth-refresh accepts an expired token inside a live session. No edge
+  // endpoint may: an expired access token must be dead on every API path.
+  const minted = mintAccessToken(USER, nodeEnv(), NOW);
+  const result = await edge.verifyNativeAccessToken(minted.token, NOW + 3601 * 1000);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'TOKEN_EXPIRED');
+});
+
+test('the edge still accepts a legacy token minted before device sessions', async () => {
+  // Nobody is logged out of the edge API by the new claim.
+  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify({
+    iss: NATIVE_ISSUER,
+    aud: NATIVE_AUDIENCE,
+    sub: USER.id,
+    email: USER.email,
+    role: USER.role,
+    tv: USER.token_version,
+    iat: Math.floor(NOW / 1000),
+    exp: Math.floor(NOW / 1000) + 3600,
+  })).toString('base64url');
+  const signature = createHmac('sha256', SECRET).update(`${header}.${payload}`).digest('base64url');
+
+  const result = await edge.verifyNativeAccessToken(`${header}.${payload}.${signature}`, NOW);
+  assert.equal(result.ok, true, `edge rejected a legacy token: ${result.reason}`);
+  assert.equal(result.sessionExpiresAt, null, 'and reports "no session issued", not an expired one');
 });

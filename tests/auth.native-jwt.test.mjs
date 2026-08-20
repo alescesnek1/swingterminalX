@@ -14,18 +14,42 @@ import {
   getSigningSecret,
   nativeAuthEnabled,
   accessTtlSeconds,
+  sessionTtlSeconds,
+  verifyRefreshableToken,
   NATIVE_ISSUER,
   NATIVE_AUDIENCE,
   DEFAULT_ACCESS_TTL_SECONDS,
+  DEFAULT_SESSION_TTL_SECONDS,
+  MAX_SESSION_TTL_SECONDS,
   MIN_SECRET_LENGTH,
 } from '../netlify/functions/_native-jwt.mjs';
 
 const SECRET = 'a'.repeat(48);
+const NOW = 1_800_000_000_000;
 const ENV = { NATIVE_AUTH_ENABLED: 'true', AUTH_JWT_SECRET: SECRET };
 const USER = { id: '11111111-2222-3333-4444-555555555555', email: 'Owner@Example.com', role: 'admin', token_version: 3 };
 
 function decodePayload(token) {
   return JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
+}
+
+// Sign an arbitrary claim set with the real secret. Needed to build shapes the
+// minter deliberately cannot produce: a legacy token with no `sxp`, or an `exp`
+// that outlives its `sxp`.
+function handSigned(claims) {
+  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify({
+    iss: NATIVE_ISSUER,
+    aud: NATIVE_AUDIENCE,
+    sub: USER.id,
+    email: USER.email,
+    role: USER.role,
+    tv: USER.token_version,
+    iat: Math.floor(NOW / 1000),
+    ...claims,
+  })).toString('base64url');
+  const signature = crypto.createHmac('sha256', SECRET).update(`${header}.${payload}`).digest('base64url');
+  return `${header}.${payload}.${signature}`;
 }
 
 // ── minting ──
@@ -60,7 +84,7 @@ test('no password, hash, or secret is ever embedded in a token', () => {
   assert.equal(payload.password_hash, undefined);
   assert.deepEqual(
     Object.keys(payload).sort(),
-    ['aud', 'email', 'exp', 'iat', 'iss', 'jti', 'role', 'sub', 'tv'],
+    ['aud', 'email', 'exp', 'iat', 'iss', 'jti', 'role', 'sid', 'sub', 'sxp', 'tv'],
     'the claim set is deliberately fixed — a new claim must be a conscious change',
   );
 });
@@ -218,6 +242,11 @@ test('the TTL is clamped to a sane window', () => {
   assert.equal(accessTtlSeconds({ ACCESS_TOKEN_TTL_SECONDS: 'nonsense' }), DEFAULT_ACCESS_TTL_SECONDS);
   assert.equal(accessTtlSeconds({}), DEFAULT_ACCESS_TTL_SECONDS);
   assert.equal(accessTtlSeconds({ ACCESS_TOKEN_TTL_SECONDS: '900' }), 900);
+  // A BLANK setting means "unset", not 0 — Number('') is 0, which would clamp to
+  // 60-second tokens and make the terminal unusable for a typo in Netlify's UI.
+  for (const blank of ['', '   ', null, undefined]) {
+    assert.equal(accessTtlSeconds({ ACCESS_TOKEN_TTL_SECONDS: blank }), DEFAULT_ACCESS_TTL_SECONDS);
+  }
 });
 
 // ── dispatch helper ──
@@ -251,4 +280,149 @@ test('dispatch is not a security decision: a fake native issuer still fails veri
 
   assert.equal(looksLikeNativeToken(forged), true, 'it does get routed to us');
   assert.equal(verifyAccessToken(forged, ENV).ok, false, 'and we reject it');
+});
+
+
+// ── device sessions (`sid` / `sxp`) ──
+// The property being pinned: ONE password per device per session window, a
+// reload inside the window never asks again, and nothing can move the deadline.
+
+test('a login opens an 8h device session by default', () => {
+  const minted = mintAccessToken(USER, ENV, NOW);
+  assert.equal(minted.ok, true);
+  assert.equal(minted.sessionExpiresInSeconds, DEFAULT_SESSION_TTL_SECONDS);
+  assert.equal(minted.sessionExpiresAt, new Date(NOW + 8 * 3600 * 1000).toISOString());
+  assert.ok(minted.sessionId, 'the session must be identifiable');
+
+  const payload = decodePayload(minted.token);
+  assert.equal(payload.sxp, Math.floor(NOW / 1000) + 8 * 3600);
+  assert.equal(payload.sid, minted.sessionId);
+});
+
+test('SESSION_TTL_SECONDS is honoured and clamped at both ends', () => {
+  assert.equal(sessionTtlSeconds(ENV), DEFAULT_SESSION_TTL_SECONDS);
+  assert.equal(sessionTtlSeconds({ ...ENV, SESSION_TTL_SECONDS: '7200' }), 7200);
+  // Never longer than a week, whatever an operator asks for.
+  assert.equal(
+    sessionTtlSeconds({ ...ENV, SESSION_TTL_SECONDS: String(400 * 24 * 3600) }),
+    MAX_SESSION_TTL_SECONDS,
+  );
+  // Never shorter than one access token, or the terminal would die before its
+  // first refresh.
+  assert.equal(sessionTtlSeconds({ ...ENV, SESSION_TTL_SECONDS: '30' }), DEFAULT_ACCESS_TTL_SECONDS);
+  // Garbage is not '0' — it falls back to the default rather than to a session
+  // that ends immediately.
+  for (const bad of ['', 'soon', null, undefined]) {
+    assert.equal(sessionTtlSeconds({ ...ENV, SESSION_TTL_SECONDS: bad }), DEFAULT_SESSION_TTL_SECONDS);
+  }
+});
+
+test('a carried session is preserved, and a refresh cannot extend it', () => {
+  const login = mintAccessToken(USER, ENV, NOW);
+  const carried = {
+    sessionId: login.sessionId,
+    sessionExpiresAtSeconds: Math.floor(NOW / 1000) + 8 * 3600,
+  };
+  const refreshed = mintAccessToken(USER, ENV, NOW + 3600 * 1000, carried);
+  assert.equal(refreshed.ok, true);
+  assert.equal(refreshed.sessionId, login.sessionId);
+  assert.equal(refreshed.sessionExpiresAt, login.sessionExpiresAt, 'the deadline must not move');
+  assert.ok(refreshed.expiresInSeconds > 0);
+});
+
+test('an access token is never minted past its session deadline', () => {
+  // Twenty minutes of session left, a 60-minute access TTL: `exp` is capped at
+  // `sxp`, so the stateless request path alone stops a token past the deadline.
+  const carried = {
+    sessionId: 'sid-1',
+    sessionExpiresAtSeconds: Math.floor(NOW / 1000) + 20 * 60,
+  };
+  const minted = mintAccessToken(USER, ENV, NOW, carried);
+  assert.equal(minted.ok, true);
+  assert.equal(minted.expiresInSeconds, 20 * 60);
+  assert.equal(decodePayload(minted.token).exp, decodePayload(minted.token).sxp);
+});
+
+test('minting is refused once the carried session has ended', () => {
+  const carried = { sessionId: 'sid-1', sessionExpiresAtSeconds: Math.floor(NOW / 1000) - 1 };
+  const minted = mintAccessToken(USER, ENV, NOW, carried);
+  assert.equal(minted.ok, false);
+  assert.equal(minted.reason, 'SESSION_EXPIRED');
+});
+
+test('an unusable carried session opens a NEW window instead of an endless one', () => {
+  // A missing/garbled descriptor must never mean 'no deadline'.
+  const broken = [
+    null,
+    {},
+    { sessionId: 'x' },
+    { sessionExpiresAtSeconds: 123 },
+    { sessionId: '', sessionExpiresAtSeconds: 'soon' },
+  ];
+  for (const bad of broken) {
+    const minted = mintAccessToken(USER, ENV, NOW, bad);
+    assert.equal(minted.ok, true);
+    assert.equal(minted.sessionExpiresInSeconds, DEFAULT_SESSION_TTL_SECONDS);
+  }
+});
+
+test('a token past its session deadline is refused even if `exp` is still ahead', () => {
+  // Hand-signed: the minter caps `exp` at `sxp`, so this shape can only come
+  // from tampering or a clock jump. `sxp` must win.
+  const token = handSigned({
+    exp: Math.floor(NOW / 1000) + 3600,
+    sxp: Math.floor(NOW / 1000) - 1,
+    sid: 'sid-1',
+  });
+  const result = verifyAccessToken(token, ENV, NOW);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'SESSION_EXPIRED');
+  // And the refresh path must not be more permissive about the deadline.
+  assert.equal(verifyRefreshableToken(token, ENV, NOW).reason, 'SESSION_EXPIRED');
+});
+
+// ── the refresh-only tolerance ──
+
+test('verifyAccessToken NEVER tolerates an expired token, session or not', () => {
+  const minted = mintAccessToken(USER, ENV, NOW);
+  const result = verifyAccessToken(minted.token, ENV, NOW + 3601 * 1000);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'TOKEN_EXPIRED', 'the request path must stay strict');
+});
+
+test('verifyRefreshableToken tolerates an expired token inside a live session', () => {
+  const minted = mintAccessToken(USER, ENV, NOW);
+  const result = verifyRefreshableToken(minted.token, ENV, NOW + 3601 * 1000);
+  assert.equal(result.ok, true, 'this is what makes a page reload silent');
+  assert.equal(result.expired, true, 'and it says so, so the caller is not misled');
+  assert.equal(result.sessionExpiresAtSeconds, Math.floor(NOW / 1000) + 8 * 3600);
+});
+
+test('the refresh tolerance stops at the session deadline', () => {
+  const minted = mintAccessToken(USER, ENV, NOW);
+  const result = verifyRefreshableToken(minted.token, ENV, NOW + 8 * 3600 * 1000 + 1000);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'SESSION_EXPIRED');
+});
+
+test('the refresh tolerance does not apply to a legacy (session-less) token', () => {
+  const token = handSigned({ exp: Math.floor(NOW / 1000) + 3600 });
+  assert.equal(verifyRefreshableToken(token, ENV, NOW).ok, true, 'still valid: accepted');
+  const expired = verifyRefreshableToken(token, ENV, NOW + 3601 * 1000);
+  assert.equal(expired.ok, false);
+  assert.equal(expired.reason, 'TOKEN_EXPIRED', 'no window, no tolerance');
+});
+
+test('a legacy token still verifies on the request path and reports no session', () => {
+  const result = verifyAccessToken(handSigned({ exp: Math.floor(NOW / 1000) + 3600 }), ENV, NOW);
+  assert.equal(result.ok, true, 'nobody is logged out by the new claim');
+  assert.equal(result.sessionExpiresAtSeconds, null, 'null means "none issued", not "expired"');
+  assert.equal(result.sessionId, null);
+});
+
+test('the refresh tolerance is not a hole: a forged expired token is still refused', () => {
+  const minted = mintAccessToken(USER, { ...ENV, AUTH_JWT_SECRET: 'z'.repeat(48) }, NOW);
+  const result = verifyRefreshableToken(minted.token, ENV, NOW + 3601 * 1000);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'TOKEN_SIGNATURE_INVALID');
 });

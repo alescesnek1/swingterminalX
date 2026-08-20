@@ -220,6 +220,12 @@ export async function runAuthLogin(req, deps = {}) {
     token: minted.token,
     expiresAt: minted.expiresAt,
     expiresInSeconds: minted.expiresInSeconds,
+    // A successful login OPENS a device session with an absolute deadline
+    // (8h by default). Refreshes re-mint the short access token inside that
+    // window without ever extending it, so the password is asked for once per
+    // device per session — not on every page reload.
+    sessionExpiresAt: minted.sessionExpiresAt,
+    sessionExpiresInSeconds: minted.sessionExpiresInSeconds,
     // `mustChangePassword` only ever reaches an already-authenticated caller, so
     // it cannot be used to probe accounts.
     mustChangePassword: row.must_change_password === true,

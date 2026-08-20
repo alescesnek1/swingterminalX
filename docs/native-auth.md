@@ -112,7 +112,8 @@ token the other half rejects.
 | --- | --- | --- |
 | `NATIVE_AUTH_ENABLED` | *(off)* | Must be exactly `"true"`. Anything else (`TRUE`, `1`, `yes`) leaves native auth off — tested. |
 | `AUTH_JWT_SECRET` | *(none)* | HS256 signing secret, **≥ 32 characters**. Must be identical for Node functions and the edge. |
-| `ACCESS_TOKEN_TTL_SECONDS` | `3600` | Clamped to 60 … 86400. |
+| `ACCESS_TOKEN_TTL_SECONDS` | `3600` | Clamped to 60 … 86400. A blank value means *unset*, not 0. |
+| `SESSION_TTL_SECONDS` | `28800` (8h) | How long a **device session** lives from the moment of login. Clamped to `ACCESS_TOKEN_TTL_SECONDS` … 7 days; blank means *unset*, not 0. |
 | `BOT_ADMIN_EMAILS` | *(existing)* | **Unchanged.** Still the only source of admin authority. |
 
 Generate a secret with:
@@ -138,6 +139,69 @@ A `role` claim inside a token the user holds is likewise ignored — tested.
 
 ---
 
+## Device sessions: one password per device per 8 hours
+
+**The problem this solves.** Access tokens live 60 minutes. Before device
+sessions, a page reload with a lapsed token — a tab left closed over lunch, a
+laptop resumed from sleep — dropped the token and showed the login form, because
+`/api/auth-refresh` refused to touch an expired token. Refreshing the page could
+therefore cost a password.
+
+**How it works.** A successful login stamps two extra claims into the token:
+
+| Claim | Meaning |
+| --- | --- |
+| `sid` | Session id — identifies this device session (audit; future per-device revocation). |
+| `sxp` | The session's **absolute deadline** in unix seconds: login time + `SESSION_TTL_SECONDS`. |
+
+Inside that window `/api/auth-refresh` re-mints the short access token silently,
+carrying `sid`/`sxp` forward **unchanged** — a refresh can never move the
+deadline. It also accepts a token whose `exp` has already lapsed, which is
+precisely what makes a reload silent. Once `sxp` passes, every path refuses the
+token and the user signs in again — on that device only, since the window is
+stamped per login.
+
+**What is deliberately NOT loosened:**
+
+- **The request path stays strict.** Every API endpoint calls
+  `verifyAccessToken()`, which never tolerates an expired token. The tolerance
+  lives only in `verifyRefreshableToken()`, used by the refresh endpoint alone. A
+  stolen access token is dead for API calls after ≤ 60 minutes, exactly as before.
+- **The tolerance is bounded and database-checked.** Refresh still verifies the
+  signature, issuer and audience as strictly as the request path, still refuses
+  once `sxp` passes, and still re-reads the account (status + `token_version`) —
+  so a disabled account or a changed password ends the session there.
+- **`exp` is capped at `sxp`.** An access token can never outlive its session, so
+  even a verifier that ignored `sxp` would refuse a token past the deadline.
+- **Both runtimes enforce it.** The Deno edge verifier checks `sxp` in the same
+  order as the Node one; `tests/auth.edge-native-jwt.test.mjs` fails on drift.
+- **A blank/garbled setting never shortens a session to zero.** `Number('')` is
+  `0`, so the env readers reject blank values *before* converting — a typo in
+  Netlify's UI cannot turn every session into a 60-second one.
+
+**Backwards compatible in both directions.** Tokens minted before these claims
+existed keep verifying until their `exp` (nobody is logged out by the deploy) and
+get **no** expiry tolerance; refreshing one upgrades it into a session-bearing
+token. A rollback is equally safe: a server that answers without
+`sessionExpiresAt` is treated by the browser as "no deadline known", never as
+"already expired".
+
+**In the browser** (`js/auth-client.js`): the deadline is stored alongside the
+token and checked locally, so a session that has ended is dropped **without a
+request** — no round trip, and no misleading "database unreachable" on the way
+out. The user gets a toast naming the real reason ("this device session reached
+its 8-hour limit").
+
+**Cost note.** `/api/auth-refresh` reads Postgres, and Netlify bills database
+compute per hour **awake**. Confirming a stored token on literally every page
+load woke the database repeatedly for no new information, so a token the server
+confirmed less than **15 minutes** ago is now adopted on load without a call.
+That is strictly tighter than the existing worst case (a running tab only
+re-confirms at 75% of a 60-minute token, ≈ 45 min), so revocation is not
+weakened.
+
+---
+
 ## Revocation: the tradeoff, stated plainly
 
 Token verification is **stateless**. No database read happens on the request hot
@@ -151,6 +215,7 @@ The cost is that a token stays valid until it expires. So:
 | Disable a user | Admin page → disable. Bumps `token_version`. | Their next **refresh** fails → out within one TTL (≤ 60 min). |
 | Reset a password | Admin page → reset. Bumps `token_version`. | Same: existing sessions die at next refresh. |
 | **Revoke everyone NOW** | Rotate `AUTH_JWT_SECRET`. | Every outstanding token stops verifying immediately. |
+| Bound how long a stolen device stays signed in | `SESSION_TTL_SECONDS` (8h default). | The session dies at its absolute deadline whatever the user does — refreshing cannot extend it. |
 
 `/api/auth-refresh` is the one database-checked endpoint (status +
 `token_version`), which is exactly what makes stateless verification acceptable
