@@ -45,6 +45,13 @@ export function freshnessBadge(fresh, src) {
 // publish cycle: a healthy pipeline never flickers, a frozen one is named.
 export const MARKET_MAX_AGE_MS = 180_000;
 
+// Keep in sync with HARD_MAX_MARKET_AGE_MS in the edge freshness lib.
+// The hard ceiling: past this the snapshot is not "stale market data", it is
+// NOT market data. Production shipped a 25.9-hour-old canonical snapshot into
+// the scanner and every row still looked like a normal quote, so this is the
+// line where the UI stops rendering a market table and says so.
+export const HARD_MAX_MARKET_AGE_MS = 30 * 60_000;
+
 /**
  * May the on-screen market numbers be presented as live?
  * Pure. Fails closed — every unknown resolves to stale.
@@ -66,6 +73,37 @@ export function marketFreshnessState(fresh, opts) {
   if (gen == null) return { stale: true, reason: 'no snapshot timestamp', ageMs: null, ageLabel: null };
   if (ageMs > maxAgeMs) return { stale: true, reason: 'snapshot is ' + label + ' old', ageMs, ageLabel: label };
   return { stale: false, reason: null, ageMs, ageLabel: label };
+}
+
+/**
+ * Is the on-screen dataset too old to be shown as a market table at all?
+ *
+ * This is the HARD gate, one step past `marketFreshnessState`. Stale means
+ * "believe the shape, not the numbers"; unusable means "there is nothing here
+ * to believe" — the scanner must say MARKET DATA UNAVAILABLE instead of
+ * painting rows that look exactly like live quotes.
+ *
+ * Pure. Fails closed on every unknown: a failed fetch and a missing timestamp
+ * are both unusable, because neither can prove the data is from today.
+ *
+ * @param {Object} fresh window.__marketsFreshness
+ * @param {Object} [opts] { now, hardMaxAgeMs }
+ * @returns {{unusable:boolean, reason:string|null, ageMs:number|null, ageLabel:string|null}}
+ */
+export function marketDataUnusable(fresh, opts) {
+  const f = fresh || {};
+  const o = opts || {};
+  const now = Number.isFinite(o.now) ? o.now : Date.now();
+  const hardMaxAgeMs = Number.isFinite(o.hardMaxAgeMs) ? o.hardMaxAgeMs : HARD_MAX_MARKET_AGE_MS;
+  const gen = Number.isFinite(f.generatedAt) ? f.generatedAt : null;
+  const ageMs = gen != null ? Math.max(0, now - gen) : null;
+  const label = ageMs == null ? null : ageAgoLabel(ageMs);
+  if (f.ok === false) return { unusable: true, reason: 'the market read failed', ageMs, ageLabel: label };
+  if (gen == null) return { unusable: true, reason: 'no snapshot timestamp', ageMs: null, ageLabel: null };
+  if (ageMs > hardMaxAgeMs) {
+    return { unusable: true, reason: 'snapshot is ' + label + ' old — beyond the ' + ageAgoLabel(hardMaxAgeMs) + ' hard limit', ageMs, ageLabel: label };
+  }
+  return { unusable: false, reason: null, ageMs, ageLabel: label };
 }
 
 /** Compact human age ("48m", "12s"). Pure. */
@@ -124,5 +162,5 @@ if (typeof window !== 'undefined') {
   // over on `window` the same way. terminal.js keeps fail-closed inline
   // fallbacks: if this module ever fails to load the UI degrades to STALE,
   // never to a confident number.
-  window.__marketFreshness = { marketFreshnessState, pct24hDisplay, ageAgoLabel, MARKET_MAX_AGE_MS };
+  window.__marketFreshness = { marketFreshnessState, marketDataUnusable, pct24hDisplay, ageAgoLabel, MARKET_MAX_AGE_MS, HARD_MAX_MARKET_AGE_MS };
 }

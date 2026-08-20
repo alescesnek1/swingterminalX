@@ -2267,3 +2267,35 @@ html,body{overflow-x:hidden;max-width:100vw}
 /* REFRESH button in-flight state — a click must visibly do something. */
 .hbtn.is-loading{opacity:.6;cursor:progress}
 .hbtn:disabled{cursor:not-allowed}
+
+/* ─────────────────────────────────────────────────────────────
+   Production reliability hotfix — HARD-stale presentation.
+
+   One step past .data-stale. Stale means "these numbers are frozen";
+   unavailable means "this is not market data" — a snapshot past
+   HARD_MAX_MARKET_AGE_MS (30 min) is a different market. Production
+   rendered a 25.9-hour-old book as an ordinary scanner table, so the
+   whole centre column is stamped instead of just tinted: a red banner
+   that cannot be skimmed past, and rows dimmed hard enough that nobody
+   reads a price off them by accident.
+   ───────────────────────────────────────────────────────────── */
+.market-unavailable-banner{
+  padding:8px 12px;margin:0 0 6px;font-size:10px;font-weight:800;
+  letter-spacing:.06em;line-height:1.45;color:var(--red);
+  background:rgba(255,51,86,.12);border:1px solid rgba(255,51,86,.45);
+  border-radius:3px;
+}
+.market-unavailable-banner[hidden]{display:none}
+
+.scanner-center.market-unavailable #clist,
+.scanner-center.market-unavailable #scanner-thdr{opacity:.32;filter:grayscale(.85)}
+.scanner-center.market-unavailable .market-unavailable-banner{opacity:1;filter:none}
+
+/* The detail panel gets the same hard treatment as the table. */
+#dcon.data-unavailable .mgrid,
+#dcon.data-unavailable .validity-box,
+#dcon.data-unavailable .lead-score,
+#dcon.data-unavailable [data-detail="signal"],
+#dcon.data-unavailable [data-detail="score"],
+#dcon.data-unavailable [data-detail="panic"]{opacity:.3;filter:grayscale(.85)}
+#dcon.data-unavailable .detail-stale-banner{opacity:1;filter:none}

@@ -1661,6 +1661,100 @@ email allowlist (§9), not a billing tier.
 
 From current git history (most recent first, condensed — see `git log` for full):
 
+- **Production reliability P0-P2 hotfix (LOCAL, UNPUSHED, branch
+  `fix/production-reliability-p0-p2`)** — after the manual-refresh freshness
+  hotfix the browser still showed: REFRESH returning `age_ms 93382647` (~25.9 h)
+  with `force_outcome: null`, a stream of failed Supabase
+  `token?grant_type=refresh_token` posts, a foreground RADAR context POST every
+  45 s, `[TAB-ORDER] tab-order.js not loaded`, and a recurring `/api/analyze`
+  400.
+  - **P0 root cause — the click never reached `/api/markets` at all.**
+    `index.html` sets `window.RADAR_CANONICAL_CONTEXT_READ = true`, so
+    `fetchData()` reads the canonical **`/api/context`** store first. That
+    endpoint is DB-backed, answers 200 instantly with the last *published* run,
+    and the publishing collector is deliberately OFF — so it returned a
+    25.9-hour-old snapshot. `?force=1` was never sent, no `X-Force-Refresh`
+    header ever came back (hence `force_outcome: null`), and every cache-layer
+    fix from the previous hotfix was irrelevant because that code path never
+    executed. Fix: a **forced** read now bypasses the canonical store entirely
+    (`const _canonical = _canonicalContextEnabled() && !force`) and goes
+    straight to `/api/markets?force=1`. `/api/context` is still never given a
+    force flag, so a click still cannot wake Postgres.
+  - **P0 second cause — `Access-Control-Expose-Headers` was missing** on
+    `/api/markets`, so a cross-origin reader could not read *any* of the
+    freshness/force headers. Added, listing only non-secret diagnostics
+    (`X-Served-From`, `X-Stale`, `X-Stale-Reason`, `X-Generated-At`, `X-Age-Ms`,
+    `X-Force-Refresh`, `X-Force-Refresh-Retry-After-Ms`, `X-Upstream-Status`,
+    `X-Tier`, `X-Markets-Schema`).
+  - **P0 — a forced read can no longer report a null outcome.** New
+    `X-Force-Refresh: upstream-failed` on the last-good fallback AND on the 502
+    (repeated in the 502 body as `forceOutcome`), plus `X-Upstream-Status`
+    (`ok` / `rebuild-failed-serving-last-good` / `rebuild-failed-no-snapshot`).
+    In the browser, a forced read with an unreadable header records
+    `unknown-force-header-unreadable` instead of `null`, and says so.
+  - **P0 — new HARD age ceiling `HARD_MAX_MARKET_AGE_MS = 30 min`** (edge
+    `lib/freshness.js` + browser `js/freshness-badge.js`, kept in sync and
+    asserted equal by a test). Past it the dataset is not "stale market data",
+    it is **not market data**: the source badge goes red `UNAVAILABLE`, a
+    `MARKET DATA UNAVAILABLE — <reason>` banner is painted above the scanner,
+    and the table + detail panel are hard-dimmed. A canonical read that comes
+    back beyond the ceiling is treated as a **failed** read, so the existing
+    honest fallback runs (visible toast, `__canonicalContext.failed = true`,
+    legacy `/api/markets` feed). A 25.9 h book can no longer be replayed as
+    scanner truth. Fails closed: unknown age / failed fetch → unavailable.
+  - **P1 Supabase refresh spam.** The compatibility client was created with the
+    SDK defaults, so it adopted a leftover `sb-<ref>-auth-token` from the
+    pre-native era and ran its own refresh loop against a dead refresh token.
+    When native auth is the active source the client is now created with
+    `autoRefreshToken:false, persistSession:false, detectSessionInUrl:false`,
+    and the stale `sb-*-auth-token` keys (that exact pattern only) are removed.
+    When native auth is NOT active the SDK defaults are untouched, so a legacy
+    Supabase-only user is unaffected. Supabase is **not** removed, no user
+    migrated, `js/auth-client.js` **not modified**.
+  - **P1 RADAR foreground context POST.** It posted up to 500 scanner rows on
+    every refresh cycle behind a 45 s window that any UI action could reset by
+    nulling `window.__lastRadarContextPush` — and while the market read was
+    25.9 h stale it was posting *that book* as current scanner truth. The
+    freshness gate and the throttle now live **inside**
+    `pushScannerContextToRadar()`: stale or unavailable market data ⇒ no post,
+    with the reason on `window.__lastRadarContextPostStatus` and in the
+    console; the 45 s floor is unchanged and no caller can reset it. Row cap
+    stays 500 (the server's own limit). **No RADAR gate, ENTRY_READY rule,
+    Absorb rule or Telegram field was touched.** Note for the operator: the
+    stale gate uses the existing `MARKET_MAX_AGE_MS = 180 s` budget, so if the
+    canonical collector is ever re-enabled on its ~3 min publish cadence this
+    path will report itself blocked — the reason is printed, and the budget is
+    the thing to revisit, not the gate.
+  - **P1 boot order.** The native session restore was a bare IIFE running during
+    `terminal.js`'s own evaluation. A stored, still-valid token is adopted with
+    no network round trip, so the whole app booted mid-parse: above
+    `const DEFAULT_COLUMN_ORDER` (TDZ) and before the deferred ES modules had
+    executed (`window.__tabOrder` absent ⇒ the saved tab order silently
+    discarded). Now gated on `DOMContentLoaded` when the document is still
+    parsing, `queueMicrotask` otherwise, and `initTabOrder()` retries once at
+    `DOMContentLoaded` instead of concluding the module is missing.
+  - **P2 `/api/analyze` 400 was AUTOMATIC.** The 5-minute news loop POSTed
+    `symbol: '__NEWS_SCORING__'`; `/api/analyze` is a per-symbol endpoint and
+    `normalizeBinanceSymbol` rejects underscores, so it answered
+    `400 Invalid symbol format` every time and the code then fell through to
+    the keyword heuristic anyway — the batch headline-scoring contract that
+    payload assumed was never implemented server-side. The call is removed (the
+    feed renders exactly as before, from the heuristic that was already doing
+    the work) and the unavailability is logged once. The user-click path gets a
+    calm `400` branch: warn level, endpoint's own short reason only, no prompt
+    / model / key / payload echoed.
+  - **P2 doctype.** `index.html` already begins with `<!DOCTYPE html>` (no BOM,
+    no leading bytes) — verified, nothing to fix; a regression test now pins it
+    and also forbids `document.write` / `srcdoc` pages.
+  - Touched files: `apps/edge/netlify/edge-functions/lib/freshness.js`,
+    `apps/edge/netlify/edge-functions/markets.js`,
+    `apps/edge/public/js/terminal.js`, `apps/edge/public/js/freshness-badge.js`,
+    `apps/edge/public/js/ai-analysis.js`, `apps/edge/public/index.html`
+    (cache-bust `6m1 → 6m2`), `apps/edge/public/css/terminal.css`; new
+    `tests/production-reliability-p0-p2.test.mjs` (45). No env var, no
+    migration, no scheduler/cron/workflow, no `package.json`, no
+    trading/order/Binance-signing/Telegram path, no Arkham file.
+  **NOT pushed, NOT deployed — awaiting owner review.**
 - **Manual REFRESH market-freshness hotfix (LOCAL, UNPUSHED, branch
   `fix/manual-refresh-freshness`)** — the top-bar REFRESH button could not
   produce fresh data, and a stale dataset still rendered confident per-coin

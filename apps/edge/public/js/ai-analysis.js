@@ -155,6 +155,14 @@ function renderError(bodyEl, metaEl, error, status, opts = {}) {
   } else if (status === 403) {
     icon = '🚫'; title = 'Zakázáno';
     detail = error?.detail || 'Žádost přišla z neoprávněného původu.';
+  } else if (status === 400) {
+    // The request itself was malformed — in practice an unsupported symbol.
+    // Calm, specific and non-scary: nothing is broken server-side and the rest
+    // of the terminal is unaffected. Only the endpoint's own short reason is
+    // shown; no prompt, model name, payload or key is echoed back.
+    icon = '⚠️'; title = 'Analýza nepodporuje tento vstup';
+    detail = error?.error || error?.detail || 'Požadavek byl odmítnut jako neplatný.';
+    hint = 'Zkontroluj symbol coinu. Scanner, RADAR i alerty běží dál.';
   } else if (status === 503) {
     icon = '📡'; title = 'Binance nedostupné';
     detail = error?.error || 'Nepodařilo se stáhnout data z Binance.';
@@ -203,8 +211,10 @@ function renderError(bodyEl, metaEl, error, status, opts = {}) {
   const _doToast = () => {
     if (!window.Toast) return false;
     try {
+      // 400 is a rejected INPUT, not a fault: warn, so it reads as "that
+      // request was not supported" rather than "the AI is down".
       const lvl = (status >= 500 || status === 0) ? 'error'
-        : (status === 429 || status === 401) ? 'warn'
+        : (status === 429 || status === 401 || status === 400) ? 'warn'
         : 'error';
       const toastTitle = `AI ${status || 'ERR'}: ${title || 'Chyba'}`;
       const toastDetail = detail || hint || `Status ${status}`;

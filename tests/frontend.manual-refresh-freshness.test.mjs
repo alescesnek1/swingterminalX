@@ -234,7 +234,10 @@ test('a refresh that returns still-stale data says so instead of looking fine', 
 });
 
 test('the forced read outcome is recorded from the response headers', () => {
-  assert.match(js, /forceOutcome: r\.headers\.get\('X-Force-Refresh'\) \|\| null/);
+  // The header is the truth; a forced read that cannot READ the header still
+  // reports what it knows rather than `null` (see the P0 hotfix tests).
+  assert.match(js, /const _forceHdr = r\.headers\.get\('X-Force-Refresh'\);/);
+  assert.match(js, /forceOutcome: _forceOutcome,/);
   assert.match(js, /staleReason: r\.headers\.get\('X-Stale-Reason'\) \|\| null/);
   assert.match(js, /console\.warn\('\[REFRESH\] forced \/api\/markets read'/);
 });
@@ -261,6 +264,7 @@ test('the age label stays human and never lies about an unknown age', () => {
 
 test('the asset cache-bust token was bumped so returning users get this code', () => {
   assert.doesNotMatch(html, /\?v=6l5/);
-  assert.match(html, /js\/terminal\.js\?v=6m1/);
-  assert.match(html, /js\/freshness-badge\.js\?v=6m1/);
+  assert.doesNotMatch(html, /\?v=6m1/);
+  assert.match(html, /js\/terminal\.js\?v=6m2/);
+  assert.match(html, /js\/freshness-badge\.js\?v=6m2/);
 });

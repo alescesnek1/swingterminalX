@@ -94,10 +94,26 @@ test('the native-session restore is DEFERRED, not a bare top-level IIFE', () => 
     'a bare IIFE runs during script evaluation and boots the terminal ~170 lines above the column '
     + 'constants — that is the production TDZ crash. Keep it inside queueMicrotask()/setTimeout().',
   );
+  // The deferral mechanism moved on: a microtask runs as soon as THIS file
+  // finishes, which fixes the TDZ crash but is still BEFORE the deferred ES
+  // modules beside terminal.js have executed — so a fast restore booted the app
+  // while window.__tabOrder did not yet exist. DOMContentLoaded fires after every
+  // deferred module has run, so it satisfies this invariant strictly harder.
+  // The readyState check keeps a microtask path for an already-parsed document.
   assert.match(
     source,
-    /queueMicrotask\(async function _restoreNativeSession/,
-    'the restore must be queued so it runs only after this file has finished evaluating',
+    /if \(document\.readyState === 'loading'\) \{/,
+    'the restore must be gated on document readiness, not started during evaluation',
+  );
+  assert.match(
+    source,
+    /document\.addEventListener\('DOMContentLoaded', _restoreNativeSession, \{ once: true \}\)/,
+    'while the document is parsing the restore must wait for DOMContentLoaded, so the',
+  );
+  assert.match(
+    source,
+    /queueMicrotask\(_restoreNativeSession\)/,
+    'an already-parsed document still defers past the evaluation of this file',
   );
 });
 
@@ -113,12 +129,35 @@ test('the top-level statement that calls AuthClient.init() is deferred', () => {
     if (/^\S/.test(text) && !text.startsWith('//')) { statement = i; break; }
   }
   assert.notEqual(statement, -1, 'could not find the enclosing top-level statement');
-  assert.match(
-    lines[statement],
-    /queueMicrotask\(|setTimeout\(/,
-    `line ${statement + 1} runs AuthClient.init() during script evaluation; it must be deferred `
-    + 'so the whole file is initialized before a stored session can boot the terminal',
-  );
+  // A DECLARATION is not an execution (same principle as the test below). When
+  // the call lives inside `async function _restoreNativeSession()`, what has to
+  // be deferred is every top-level INVOCATION of it — and there must be no bare
+  // one, or the boot happens during evaluation exactly as before.
+  if (/^(?:async\s+)?function _restoreNativeSession/.test(lines[statement])) {
+    const invocations = lines.filter((line) => /^\s*[^\s/].*_restoreNativeSession[^A-Za-z0-9_]/.test(code(line))
+      && !/^(?:async\s+)?function _restoreNativeSession/.test(line));
+    assert.ok(invocations.length > 0, 'the restore is declared but never started');
+    for (const line of invocations) {
+      assert.match(
+        line,
+        /queueMicrotask\(|setTimeout\(|addEventListener\('DOMContentLoaded'/,
+        `"${line.trim()}" starts the restore without deferring it; it must wait until this file `
+        + 'is fully initialized (and, while parsing, until the deferred modules have run)',
+      );
+    }
+    assert.doesNotMatch(
+      source,
+      /^_restoreNativeSession\(\)/m,
+      'a bare top-level call runs AuthClient.init() during script evaluation',
+    );
+  } else {
+    assert.match(
+      lines[statement],
+      /queueMicrotask\(|setTimeout\(/,
+      `line ${statement + 1} runs AuthClient.init() during script evaluation; it must be deferred `
+      + 'so the whole file is initialized before a stored session can boot the terminal',
+    );
+  }
 });
 
 test('no top-level statement boots the terminal before the column constants', () => {

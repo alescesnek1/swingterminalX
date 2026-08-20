@@ -91,11 +91,40 @@ export function freshnessHeaders(meta) {
 // flickers STALE but a frozen one is called out within one cycle.
 export const MARKET_MAX_AGE_MS = 180_000;
 
+// HARD ceiling. Past MARKET_MAX_AGE_MS a snapshot is "stale but still worth
+// showing, clearly labelled". Past this it is not market data at all — a
+// 25.9-hour-old book replayed into a scanner is a different asset universe,
+// different prices and dead listings, and no badge makes that safe to trade
+// from. Callers must degrade to MARKET DATA UNAVAILABLE rather than render it
+// as a normal table. Sized well above the worst legitimate outage-plus-CDN
+// path and far below "yesterday".
+export const HARD_MAX_MARKET_AGE_MS = 30 * 60_000;
+
 // Reasons a snapshot is not trustworthy as "live". Strings are surfaced
 // to the operator, so they must stay specific and non-secret.
 export const STALE_REASON_SERVED_FROM = 'served-from-not-live';
 export const STALE_REASON_AGE = 'snapshot-older-than-budget';
 export const STALE_REASON_NO_TIMESTAMP = 'no-snapshot-timestamp';
+export const STALE_REASON_HARD_AGE = 'snapshot-beyond-hard-age';
+
+/**
+ * Is this snapshot too old to be presented as market data AT ALL?
+ * Pure; `now` injectable. Fails closed: a missing/unparseable timestamp is
+ * unusable, because we cannot prove it is not from yesterday.
+ * @param {Object} opts
+ * @param {number|null} [opts.generatedAt] epoch ms
+ * @param {number} [opts.now]
+ * @param {number} [opts.hardMaxAgeMs]
+ * @returns {{unusable:boolean, reason:string|null, ageMs:number|null}}
+ */
+export function marketDataUnusable({ generatedAt = null, now = Date.now(), hardMaxAgeMs = HARD_MAX_MARKET_AGE_MS } = {}) {
+  const gen = Number.isFinite(generatedAt) ? generatedAt : null;
+  if (gen == null) return { unusable: true, reason: STALE_REASON_NO_TIMESTAMP, ageMs: null };
+  const ageMs = Math.max(0, now - gen);
+  const budget = Number.isFinite(hardMaxAgeMs) ? hardMaxAgeMs : HARD_MAX_MARKET_AGE_MS;
+  if (ageMs > budget) return { unusable: true, reason: STALE_REASON_HARD_AGE, ageMs };
+  return { unusable: false, reason: null, ageMs };
+}
 
 /**
  * Age-aware freshness verdict. Pure; `now` is injectable.

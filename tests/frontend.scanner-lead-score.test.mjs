@@ -583,7 +583,7 @@ test('Lead Score never reaches RADAR, ENTRY_READY, Telegram or any trading path'
 
 test('the RADAR scanner-context payload does not carry Lead Score', () => {
   const push = terminalJs.slice(
-    terminalJs.indexOf('function pushScannerContextToRadar()'),
+    terminalJs.indexOf('function pushScannerContextToRadar(opts)'),
     terminalJs.indexOf('const fieldMappingDetected'),
   );
   assert.ok(push.length > 500, 'pushScannerContextToRadar not found');
