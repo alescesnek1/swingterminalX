@@ -334,8 +334,14 @@ test('no trading, Telegram, RADAR gate or env behaviour is changed here', () => 
   const bot = read('netlify/functions/bot.mjs');
   assert.match(bot, /candidate\.telegramEligible = baselineTelegramEligibility\.get\(candidate\.symbol\);/);
   assert.doesNotMatch(bot, /STALE_EXPIRED/);
-  // The two other store readers are deliberately NOT gated — documented, not accidental.
-  assert.doesNotMatch(read('netlify/functions/_personal-watch-notifier.mjs'), /maxAgeMs/);
+  // The personal-watch notifier WAS ungated when this file was written; the
+  // follow-up branch (fix/canonical-store-consumer-freshness-guards) gave it the
+  // same 30-minute budget, which is asserted in
+  // tests/canonical-store-consumer-guards.test.mjs. What matters HERE is only
+  // that /api/context's own expiry is what it is — so this file no longer pins
+  // the other consumers' scope.
+  // morning-briefing.mjs still passes no maxAgeMs on purpose: it applies its own
+  // stricter 15-minute budget downstream and withholds stale rows entirely.
   assert.doesNotMatch(read('netlify/functions/morning-briefing.mjs'), /maxAgeMs/);
 });
 

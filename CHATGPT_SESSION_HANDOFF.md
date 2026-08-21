@@ -1661,6 +1661,52 @@ email allowlist (§9), not a billing tier.
 
 From current git history (most recent first, condensed — see `git log` for full):
 
+- **Canonical store consumer freshness guards (LOCAL, UNPUSHED, branch
+  `fix/canonical-store-consumer-freshness-guards`)** — follow-up to the
+  `/api/context` hard expiry. Audited every consumer that reads the canonical
+  store DIRECTLY and could therefore bypass the endpoint's 30-minute budget.
+  Full table in `docs/canonical-context-expiry.md` §3.
+  - **Exactly three direct `getAtomizedMarketContext` callers** —
+    `context.mjs` (gated, 503), `_personal-watch-notifier.mjs`,
+    `morning-briefing.mjs` — plus a **fourth canonical consumer the earlier
+    report missed**: `cron-alerts.mjs` via `getPublishedRadar` (the Telegram
+    ENTRY_READY path).
+  - **Only ONE real hole: `_personal-watch-notifier.mjs`.** It notifies on PRICE
+    (big move / take-profit / stop broken) and `evaluateWatchTriggers` receives
+    **no timestamp at all**, so it cannot self-protect — a 28h run would have
+    sent "your stop broke" off a day-old price. FIXED: it now passes
+    `maxAgeMs: PERSONAL_WATCH_MAX_CONTEXT_AGE_MS` (30 min, the same constant as
+    `CONTEXT_HARD_MAX_AGE_MS`, asserted equal) with the same `nowMs` clock the
+    triggers and cooldowns use, and returns `CONTEXT_STALE_EXPIRED` **before**
+    reading recipients and before any `sendMessage`. Reported separately from a
+    read FAILURE (`CONTEXT_UNAVAILABLE`) so an aged run is not mistaken for a
+    database problem.
+  - **`morning-briefing.mjs` was already fail-closed and STRICTER** — this
+    corrects the previous report, which listed it as unguarded. `buildMarketContext`
+    applies its own `DEFAULT_MAX_DATA_AGE_MS = 15 min` and marks the axis
+    `MARKET_STALE`; `gatherBriefingData` then does
+    `markets = marketFresh ? ctx.markets : []`, so a stale axis contributes
+    NOTHING to the message. Left unchanged on purpose — adding `maxAgeMs` to its
+    store read would only flip the reported provenance from canonical to the
+    frozen Fleet fallback with no safety gain. Pinned by test instead.
+  - **`cron-alerts.mjs` was already fail-closed** — `CANONICAL_RADAR_STALE_MS`
+    = 6 min, `RADAR_STALE` refusal before any alert. Pinned by test.
+  - **Internal producers** (`_radar-context-publisher.mjs`,
+    `_market-context-collector.mjs`) stay flag-disabled no-ops.
+  - A test **enumerates every direct caller and fails if a new one appears**, so
+    the next consumer cannot be added without a freshness decision.
+  - No Telegram message is sent by any test (every sender is a recording stub).
+    Telegram credentials, sender resolution and message shape untouched; no
+    trading, RADAR gate, env, collector, migration, scheduler, package or
+    frontend change — so **no cache-bust bump** (token stays `6m4`).
+  - Touched files: `netlify/functions/_personal-watch-notifier.mjs`,
+    `docs/canonical-context-expiry.md`, new
+    `tests/canonical-store-consumer-guards.test.mjs` (18), and one obsolete
+    scope assertion in `tests/canonical-context-expiry.test.mjs` updated (it
+    had pinned "personal-watch is deliberately NOT gated", which this branch
+    intentionally changes). Suite 2,706 tests / 2,680 pass / 0 fail / 26
+    skipped; eslint 0 errors / 163 warnings.
+  **NOT pushed, NOT deployed — awaiting owner review.**
 - **Canonical context hard expiry — ROOT CAUSE (LOCAL, UNPUSHED, branch
   `fix/canonical-context-expiry-root-cause`)** — `/api/context` was still
   serving a 28-hour-old "canonical" run as a normal 200 body. The browser

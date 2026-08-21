@@ -14,6 +14,29 @@ import { evaluateWatchTriggers, markTriggerSent, buildTriggerMessage, DEFAULT_BI
 
 export const PERSONAL_WATCH_TRIGGERS_ENV_FLAG = 'PERSONAL_WATCH_TRIGGERS_ENABLED';
 
+// ── Canonical context freshness budget (fail closed) ────────────────────────
+//
+// WHY THIS EXISTS: this path notifies on PRICE — a big move, a take-profit
+// reached, a stop broken — and `evaluateWatchTriggers` receives no timestamp at
+// all, so it cannot tell a live quote from yesterday's. The canonical read below
+// asks the store for "the newest PUBLISHED run", which while the collector is
+// disabled (MARKET_CONTEXT_COLLECT_ENABLED=false, the emergency cost breaker) is
+// the same run forever — 28 hours old in production. Without a budget here the
+// notifier would happily send "SOL broke your stop" off a day-old price.
+//
+// Matches CONTEXT_HARD_MAX_AGE_MS in context.mjs and HARD_MAX_MARKET_AGE_MS in
+// the browser, so every consumer of this store draws the line in one place.
+//
+// Fails CLOSED: past the budget the store returns STALE_EXPIRED, this function
+// returns before reading recipients and before any Telegram send. Nothing is
+// sent, no gate is loosened, and the reason is named in the summary and the log.
+export const PERSONAL_WATCH_MAX_CONTEXT_AGE_MS = 30 * 60 * 1000;
+// What the STORE answers with when the run is past the budget…
+const STORE_REASON_STALE_EXPIRED = 'STALE_EXPIRED';
+// …and what THIS endpoint reports, so a summary line names the consumer that
+// refused as well as the reason it refused.
+export const REASON_CONTEXT_STALE_EXPIRED = 'CONTEXT_STALE_EXPIRED';
+
 async function loadStore() { return await import('./_personal-watch-store.mjs'); }
 async function loadContextStore() { return await import('./_market-context-store.mjs'); }
 async function loadDatabase() { return (await import('./_db.mjs')).getDb().pool; }
@@ -74,7 +97,23 @@ export async function runPersonalWatchTriggers(deps = {}) {
     sendMessage = deps.sendMessage || await loadSender();
   } catch { return summary({ ok: false, enabled: true, reason: 'DEPENDENCIES_UNAVAILABLE' }); }
 
-  const context = await contextStore.getAtomizedMarketContext(database, { tickerLimit: 2000, microLimit: 600 });
+  const context = await contextStore.getAtomizedMarketContext(database, {
+    tickerLimit: 2000, microLimit: 600,
+    // Fail closed on an aged published run — see the budget above. `nowMs` is the
+    // same clock the triggers and cooldowns use, so the guard cannot disagree
+    // with them about what "now" is.
+    maxAgeMs: PERSONAL_WATCH_MAX_CONTEXT_AGE_MS, now: nowMs,
+  });
+  // Reported separately from a read FAILURE: an aged run is a healthy store with
+  // nothing current in it, and telling those apart is what stops the owner
+  // hunting a database problem that does not exist. Either way nothing is sent.
+  if (context?.reason === STORE_REASON_STALE_EXPIRED || context?.staleExpired === true) {
+    console.warn('[PERSONAL_WATCH] context_stale_expired', {
+      ageMs: context.ageMs ?? null, maxAgeMs: context.maxAgeMs ?? PERSONAL_WATCH_MAX_CONTEXT_AGE_MS,
+      observedAt: context.observedAt ?? null,
+    });
+    return summary({ ok: false, enabled: true, reason: REASON_CONTEXT_STALE_EXPIRED });
+  }
   if (!context?.ok || !context.market) {
     console.warn('[PERSONAL_WATCH] context_unavailable', { reason: context?.reason || 'DB_UNAVAILABLE' });
     return summary({ ok: false, enabled: true, reason: 'CONTEXT_UNAVAILABLE' });
