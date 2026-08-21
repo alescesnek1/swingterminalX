@@ -1661,6 +1661,58 @@ email allowlist (§9), not a billing tier.
 
 From current git history (most recent first, condensed — see `git log` for full):
 
+- **Canonical expired-toast suppression + /api/context circuit breaker (LOCAL,
+  UNPUSHED, branch `fix/suppress-canonical-expired-toast`)** — closes the last
+  piece of canonical stale UX noise. Production still showed, on every `REFRESH`
+  and every 60s tick, an INFO card *"Canonical context stale — Using live
+  /api/markets — published run expired (50h old). /api/context"*. The data path
+  was already safe (the aged rows are refused, live `/api/markets` carries the
+  read), but with `MARKET_CONTEXT_COLLECT_ENABLED=false` the published run only
+  ever gets OLDER, so that card could never stop firing — and a toast that always
+  fires is a toast the owner learns to dismiss.
+  - **No toast at all** when `/api/context` is STALE_EXPIRED **and** the
+    `/api/markets` fallback succeeds — not red, not info; no `errors()` entry
+    (no `Toast` call is made on that branch and `ErrorLog` is never touched); no
+    raw JSON anywhere.
+  - **Replaced by three non-nagging surfaces:** a `console.warn` on the
+    TRANSITION only (once per breaker window, not once per tick);
+    `window.__canonicalStatus` — a small primitives-only diagnostics record
+    (`state`, `reason`, `ageMs`, `activeSource`, `breakerOpen`, `breakerTtlMs`,
+    `breakerUntil`, `probes`, `skipped`, `expiries`); and the RADAR panel, which
+    already states `/api/context is STALE — …; the live /api/markets feed is in
+    use`.
+  - **Circuit breaker, `CANONICAL_EXPIRED_TTL_MS = 15 min`.** After an observed
+    expiry `/api/context` is not probed again for 15 minutes — `/api/markets` is
+    used directly. Session-scoped in a module variable, never web storage, so a
+    hard reload always re-probes and a re-enabled collector needs no cache clear;
+    a HEALTHY read closes the breaker immediately. It only ever *removes* a
+    request: no DB read is forced or widened. At the 60s cadence that is ~1
+    `/api/context` probe per 15 ticks instead of 1 per tick.
+  - **Manual REFRESH never touches `/api/context` at all** — unchanged P0
+    contract (`force` ⇒ the canonical read is skipped), and the breaker
+    bookkeeping is itself gated on `!force`, so a forced refresh mutates no
+    canonical state and reports nothing about it. A REFRESH now reads as a plain
+    live market refresh.
+  - **What did NOT get quieter:** a genuine failure (401 / `DB_UNAVAILABLE` /
+    network / parse) keeps its `console.warn` + red toast and does **not** trip
+    the breaker (it can recover next tick); and an expiry whose live read ALSO
+    fails is still a loud red *"Market data fetch failed … Canonical context is
+    also unusable (…) — no usable market source right now."* plus a
+    `console.error`. On a breaker-skipped tick that verdict is marked
+    `, last observed this session` rather than implying a probe that did not
+    happen.
+  - Touched: `apps/edge/public/js/terminal.js`, `apps/edge/public/index.html`
+    (cache-bust `6m5 → 6m6` — frontend JS changed, so the bump is required),
+    `docs/canonical-context-expiry.md` (new §2a); new
+    `tests/frontend.canonical-expired-toast-suppression.test.mjs` (19, incl. the
+    breaker executed FOR REAL from the shipped source against a mock window and
+    an injected clock); superseded wording assertions and cache-token assertions
+    advanced across six existing test files. Suite 2,743 tests / 2,717 pass /
+    0 fail / 26 skipped; eslint 0 errors / 163 warnings (unchanged, none in the
+    new code). No env, collector, DB-writer, migration, scheduler, workflow,
+    package, trading, Telegram, RADAR/ENTRY_READY-gate, Arkham or Supabase
+    change; `/api/markets?force=1` behaviour untouched.
+  **NOT pushed, NOT deployed — awaiting owner review.**
 - **STALE_EXPIRED frontend UX (LOCAL, UNPUSHED, second commit on
   `fix/canonical-store-consumer-freshness-guards`)** — the server-side expiry
   works, but production presented it as a fault: a red *"Canonical context

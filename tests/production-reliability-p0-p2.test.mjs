@@ -139,7 +139,10 @@ test('P0: a forced refresh bypasses the canonical /api/context store entirely', 
   // THE root cause. /api/context answered instantly and successfully with a
   // 25.9-hour-old published run, so the click never reached the only endpoint
   // that can rebuild from upstream.
-  assert.match(js, /const _canonical = _canonicalContextEnabled\(\) && !force;/);
+  // `!force` is still the second condition. The third — `!_breakerOpen` — was
+  // added by fix/suppress-canonical-expired-toast and only ever REMOVES a
+  // canonical probe, so it cannot weaken this contract.
+  assert.match(js, /const _canonical = _canonicalContextEnabled\(\) && !force && !_breakerOpen;/);
   assert.match(js, /forced read bypasses the canonical \/api\/context store/);
 });
 
@@ -556,11 +559,11 @@ test('P2: no generated document is written without a doctype', () => {
 test('the cache-bust token was bumped once, consistently, for this JS/CSS change', () => {
   const tokens = Array.from(new Set((html.match(/\?v=([0-9a-z]+)/g) || []).map((m) => m.slice(3))));
   assert.equal(tokens.length, 1, 'every versioned asset must carry the SAME token, got ' + tokens.join(','));
-  assert.equal(tokens[0], '6m5');
+  assert.equal(tokens[0], '6m6');
   assert.doesNotMatch(html, /\?v=6m1/);
   // The files this hotfix actually changed are all versioned.
   for (const asset of ['js/terminal.js', 'js/freshness-badge.js', 'js/ai-analysis.js', 'css/terminal.css']) {
-    assert.ok(html.includes(asset + '?v=6m5'), asset + ' must carry the bumped token');
+    assert.ok(html.includes(asset + '?v=6m6'), asset + ' must carry the bumped token');
   }
 });
 

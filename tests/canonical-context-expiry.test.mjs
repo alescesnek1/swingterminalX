@@ -274,8 +274,12 @@ test('frontend: a 503 STALE_EXPIRED is treated as the EXPECTED degraded state', 
   assert.match(js, /if \(r\.status === 503 && \(headerExpired \|\| \(parsed && parsed\.reason === 'STALE_EXPIRED'\)\)\)/);
   assert.match(js, /err\.canonicalDegraded = true;/);
   assert.match(js, /err\.canonicalReason = 'published run expired'/);
-  // ...so it reports as INFO, not as a fault (the post-deploy diagnostics rule).
-  assert.match(js, /window\.Toast\?\.info\?\.\('Canonical context stale'/);
+  // ...so it produces NO toast at all when the live fallback works. The INFO
+  // card this used to require reappeared on every 60s tick, because the
+  // published run only ages while the collector is off — see
+  // tests/frontend.canonical-expired-toast-suppression.test.mjs.
+  assert.doesNotMatch(js, /Toast\?\.info\?\.\('Canonical context/);
+  assert.match(js, /_canonicalBreakerTrip\(_canonicalDegraded\.reason, _canonicalDegraded\.ageMs\);/);
 });
 
 test('frontend: a NON-expiry failure still surfaces a visible error', () => {
@@ -287,8 +291,11 @@ test('frontend: a NON-expiry failure still surfaces a visible error', () => {
 
 test('frontend: the live /api/markets fallback is preserved, force included', () => {
   assert.match(js, /const _mktUrl = force \? '\/api\/markets\?force=1' : '\/api\/markets';/);
-  assert.match(js, /const _canonical = _canonicalContextEnabled\(\) && !force;/);
-  assert.match(js, /\[CANONICAL\] context stale; using live \/api\/markets/);
+  // Third skip condition: the circuit breaker. It only ever removes a canonical
+  // probe — force still bypasses the store outright, as before.
+  assert.match(js, /const _canonical = _canonicalContextEnabled\(\) && !force && !_breakerOpen;/);
+  // The expiry is still LOGGED, once per breaker window rather than per tick.
+  assert.match(js, /live \/api\/markets is the active source/);
 });
 
 test('frontend: no expired canonical row can reach the scanner, detail or RADAR', () => {

@@ -1881,6 +1881,112 @@ function _canonicalContextEnabled() {
   } catch { return false; }
 }
 
+// ─────────────────────────────────────────────────────────────
+// CANONICAL CONTEXT CIRCUIT BREAKER  (region: canonical-breaker)
+//
+// WHY IT EXISTS: while the publishing collector is disabled
+// (MARKET_CONTEXT_COLLECT_ENABLED=false) the newest published canonical run only
+// ever gets OLDER. Once /api/context has answered STALE_EXPIRED once, every
+// later probe in this session is a guaranteed refusal — yet each one is still a
+// real request to a Postgres-backed function, on a 60-second steady-state tick.
+// Probing a source that is KNOWN dead cannot return anything new; it only spends
+// database wake-ups and function invocations.
+//
+// After the first observed expiry the canonical read is SKIPPED for
+// CANONICAL_EXPIRED_TTL_MS and the live /api/markets read — which touches no
+// database — is used directly. This only ever REMOVES requests: it never forces
+// a DB read, never widens one, and never changes what /api/markets returns.
+//
+// SESSION-SCOPED ON PURPOSE: the trip lives in a module variable, never in
+// localStorage/sessionStorage, so a hard reload always re-probes. Nothing is
+// latched past the tab's life, and re-enabling the collector needs no cache
+// clear — the next page load sees the healthy store immediately.
+//
+// WHY THIS IS NOT A SWALLOWED FAILURE. An expected expiry whose live fallback
+// SUCCEEDED is not a fault the owner has to triage, and a card on every 60s tick
+// trains them to dismiss toasts — which is how a real outage gets missed. It
+// stays observable three ways that do not nag:
+//   • a console.warn on the TRANSITION (once per trip, not once per tick);
+//   • window.__canonicalStatus — a small diagnostics record, readable in
+//     devtools, naming the state, the sanitized reason and the ACTIVE source;
+//   • the RADAR panel, which already states the active source outright
+//     ("/api/context is STALE — …; the live /api/markets feed is in use").
+// A GENUINE failure (401 / DB_UNAVAILABLE / network / parse) is untouched: red
+// toast plus an errors() entry, and it does NOT trip the breaker, because it can
+// recover on the next tick. And if the live read ALSO fails there is no usable
+// market source at all — that stays a loud red error naming both sides.
+// ─────────────────────────────────────────────────────────────
+const CANONICAL_EXPIRED_TTL_MS = 15 * 60 * 1000;   // 15 min ⇒ 1 probe per ~15 ticks
+let _canonicalExpiredUntil = 0;                    // epoch ms; 0 = breaker closed
+let _canonicalExpiredReason = null;                // last SANITIZED short reason
+
+// The small internal diagnostics record that replaces the toast. Carries no
+// token, no URL, no payload — only a state name, a short sanitized reason and
+// counters. Never rendered as raw JSON anywhere.
+function _canonicalStatusSet(patch) {
+  if (typeof window === 'undefined') return null;
+  const prev = window.__canonicalStatus || { probes: 0, skipped: 0, expiries: 0 };
+  window.__canonicalStatus = { ...prev, ...patch, at: Date.now() };
+  return window.__canonicalStatus;
+}
+
+function _canonicalStatusBump(key) {
+  if (typeof window === 'undefined') return null;
+  const prev = window.__canonicalStatus || { probes: 0, skipped: 0, expiries: 0 };
+  return _canonicalStatusSet({ [key]: (Number(prev[key]) || 0) + 1 });
+}
+
+// True while a previously observed expiry is still inside its TTL.
+function _canonicalBreakerOpen(nowMs) {
+  const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+  return _canonicalExpiredUntil > now;
+}
+
+// Milliseconds left on an open breaker (0 when closed).
+function _canonicalBreakerRemainingMs(nowMs) {
+  const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+  return Math.max(0, _canonicalExpiredUntil - now);
+}
+
+// The last observed expiry reason, or null. Lets an /api/markets failure still
+// state that the canonical source is unusable without re-probing it.
+function _canonicalBreakerReason() { return _canonicalExpiredReason; }
+
+// Records an OBSERVED expiry and opens the breaker. Called only for a refusal
+// already classified canonicalDegraded — never for a genuine failure.
+function _canonicalBreakerTrip(reason, ageMs, nowMs) {
+  const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const firstTrip = !_canonicalBreakerOpen(now);
+  _canonicalExpiredUntil = now + CANONICAL_EXPIRED_TTL_MS;
+  _canonicalExpiredReason = reason || 'published run expired';
+  _canonicalStatusSet({
+    state: 'STALE_EXPIRED',
+    reason: _canonicalExpiredReason,
+    ageMs: Number.isFinite(ageMs) ? ageMs : null,
+    activeSource: '/api/markets',
+    breakerOpen: true,
+    breakerTtlMs: CANONICAL_EXPIRED_TTL_MS,
+    breakerUntil: _canonicalExpiredUntil,
+  });
+  _canonicalStatusBump('expiries');
+  // Logged on the TRANSITION only, so a long session does not repeat one line
+  // every minute. No toast: the fallback works and nothing needs triage.
+  if (firstTrip) {
+    console.warn('[CANONICAL] published run expired (' + _canonicalExpiredReason
+      + ') — /api/context skipped for ' + Math.round(CANONICAL_EXPIRED_TTL_MS / 60000)
+      + ' min; live /api/markets is the active source. window.__canonicalStatus has the detail.');
+  }
+  return _canonicalExpiredReason;
+}
+
+// Closes the breaker after a HEALTHY canonical read, so a re-enabled collector
+// is picked up at once instead of waiting out a TTL that no longer applies.
+function _canonicalBreakerReset() {
+  _canonicalExpiredUntil = 0;
+  _canonicalExpiredReason = null;
+}
+// ── end region: canonical-breaker ────────────────────────────
+
 // Maps one canonical /api/context ticker to the scanner row shape. Missing
 // multi-timeframe fields (symbols outside the collected top-N) are left ABSENT so
 // getTimeframePct returns null — never a fabricated value.
@@ -2053,6 +2159,9 @@ function _safeHttpReason(body) {
 }
 
 async function _fetchCanonicalMarkets(authHeaders) {
+  // Counted so the breaker's effect is measurable rather than asserted:
+  // window.__canonicalStatus.probes is how many requests actually went out.
+  _canonicalStatusBump('probes');
   const r = await fetch('/api/context', { headers: { 'Accept': 'application/json', ...authHeaders } });
   if (!r.ok) {
     const body = await r.text().catch(() => '');
@@ -2119,6 +2228,13 @@ async function _fetchCanonicalMarkets(authHeaders) {
     err.canonicalAgeMs = _unusable.ageMs;
     throw err;
   }
+  // A HEALTHY read closes the breaker, so a re-enabled collector is picked up on
+  // the very next tick instead of waiting out a TTL that no longer applies.
+  _canonicalBreakerReset();
+  _canonicalStatusSet({
+    state: 'OK', reason: null, ageMs: null, activeSource: '/api/context',
+    breakerOpen: false, breakerUntil: 0,
+  });
   const tickers = (j.market && Array.isArray(j.market.tickers)) ? j.market.tickers : [];
   const rows = _dedupeCanonicalByBase(tickers.map(_mapCanonicalTicker).filter((row) => row.symbol));
   await _enrichCanonicalWithMarketCap(rows, authHeaders);
@@ -2151,7 +2267,14 @@ async function fetchData(opts) {
   // Forcing the canonical read instead is NOT the fix: it would wake Postgres
   // on a user's click and still hand back the same published run. The only
   // path that can actually rebuild from upstream is the public market read.
-  const _canonical = _canonicalContextEnabled() && !force;
+  //
+  // Third condition: the CIRCUIT BREAKER. A canonical run that has already been
+  // observed expired cannot un-expire while the publishing collector is off, so
+  // re-probing it every 60s spends a Postgres-backed request to learn the same
+  // refusal. Inside the TTL the read is skipped and /api/markets is used
+  // directly. Only ever removes a request; never forces or widens a DB read.
+  const _breakerOpen = _canonicalBreakerOpen();
+  const _canonical = _canonicalContextEnabled() && !force && !_breakerOpen;
   // Set when the canonical store answered but its run was past the hard ceiling.
   // Read again on the /api/markets failure path: a degraded canonical PLUS a
   // failed live read means there is no usable market source at all, and that
@@ -2159,6 +2282,24 @@ async function fetchData(opts) {
   let _canonicalDegraded = null;
   if (force && _canonicalContextEnabled()) {
     console.warn('[REFRESH] forced read bypasses the canonical /api/context store — going straight to /api/markets (no DB read is forced)');
+  }
+  // Breaker open and this is NOT a forced read: no probe happened this tick, but
+  // the LAST OBSERVED verdict still stands. Carry it forward so that (a) the
+  // RADAR panel keeps naming the real active source instead of going quiet, and
+  // (b) if /api/markets then fails, the red outage toast can still say there is
+  // no usable market source at all. The reason is the same short sanitized
+  // string the probe produced — no raw body, no JSON.
+  if (_breakerOpen && !force && _canonicalContextEnabled()) {
+    _canonicalStatusBump('skipped');
+    // How long the skip still has to run, so devtools shows when the next probe
+    // is due instead of only that one is being withheld.
+    _canonicalStatusSet({ breakerRemainingMs: _canonicalBreakerRemainingMs() });
+    _canonicalDegraded = { reason: _canonicalBreakerReason() || 'published run expired', ageMs: null, remembered: true };
+    window.__canonicalContext = {
+      radar: null, market: null, run: null, receivedAt: Date.now(),
+      failed: true, degraded: true,
+      failureReason: _canonicalDegraded.reason,
+    };
   }
   try {
     const authHeaders = await _getAuthHeaders();
@@ -2171,13 +2312,16 @@ async function fetchData(opts) {
         //
         //   EXPECTED DEGRADED — the store answered fine, its newest published
         //   run is simply older than the hard ceiling (the publishing collector
-        //   is deliberately off). Nothing is broken, the terminal has a working
-        //   answer, and a red toast on every boot trains the owner to ignore
-        //   toasts. Reported as INFO: no error toast, and — because Toast only
-        //   forwards error/warn to ErrorLog — no entry in errors() either.
+        //   is deliberately off). Nothing is broken and the terminal has a
+        //   working answer, so it produces NO TOAST AT ALL — not red, not info.
+        //   It trips the circuit breaker (which logs the transition once and
+        //   records window.__canonicalStatus) and the live read below carries
+        //   the tick. No errors() entry either: no Toast call is made and
+        //   ErrorLog is never touched on this path.
         //
-        //   GENUINE FAILURE — 401/503/network/parse. Unchanged: warn + a red
-        //   toast, because the owner does have to look at it.
+        //   GENUINE FAILURE — 401/DB_UNAVAILABLE/network/parse. Unchanged: warn
+        //   + a red toast, because the owner does have to look at it. It does
+        //   NOT trip the breaker — a genuine failure can recover next tick.
         //
         // Either way the aged rows are REFUSED and the live /api/markets read
         // below is what actually feeds the scanner.
@@ -2185,8 +2329,17 @@ async function fetchData(opts) {
           ? { reason: ce.canonicalReason || 'stale run', ageMs: ce.canonicalAgeMs ?? null }
           : null;
         if (_canonicalDegraded) {
-          console.warn('[CANONICAL] context stale; using live /api/markets —', _canonicalDegraded.reason);
-          window.Toast?.info?.('Canonical context stale', `Using live /api/markets — ${_canonicalDegraded.reason}.`, { endpoint: '/api/context' });
+          // NO TOAST. The store answered, its published run is simply older than
+          // the hard ceiling, the aged rows are REFUSED, and the live
+          // /api/markets read below is a working answer — so there is nothing
+          // for the owner to act on. A card here fired on every 60s tick and on
+          // every REFRESH, which is exactly how a real outage gets dismissed
+          // along with the noise. What replaces it: the breaker's one-time
+          // console.warn, the window.__canonicalStatus diagnostics record, and
+          // the RADAR panel, which states the active source outright. Nothing
+          // lands in errors() either: no Toast call is made on this path, and no
+          // failure is recorded from it.
+          _canonicalBreakerTrip(_canonicalDegraded.reason, _canonicalDegraded.ageMs);
         } else {
           console.warn('[CANONICAL] /api/context read failed; falling back to /api/markets:', ce && ce.message);
           window.Toast?.error?.('Canonical context unavailable', `Falling back to /api/markets — ${ce && ce.message || 'error'}`, { endpoint: '/api/context' });
@@ -2224,12 +2377,15 @@ async function fetchData(opts) {
     const r = await fetch(_mktUrl, _mktInit);
     if (!r.ok) {
       const body = await r.text().catch(() => '');
-      // Downgrading the canonical-stale notice to INFO must never make a TOTAL
-      // outage quieter. When the live read fails too, the fact that the
-      // canonical store was ALSO unusable is part of the error, not a separate
-      // whisper: there is no usable market source at all.
+      // Silencing the canonical-stale notice must never make a TOTAL outage
+      // quieter. When the live read fails too, the fact that the canonical store
+      // is ALSO unusable is part of the error, not a separate whisper: there is
+      // no usable market source at all. `remembered` is stated outright rather
+      // than implied — on a breaker-skipped tick this verdict is the last one
+      // actually observed, not a probe made just now, and claiming otherwise
+      // would be inventing a check that did not happen.
       const both = _canonicalDegraded
-        ? ` Canonical context is also unusable (${_canonicalDegraded.reason}) — no usable market source right now.`
+        ? ` Canonical context is also unusable (${_canonicalDegraded.reason}${_canonicalDegraded.remembered ? ', last observed this session' : ''}) — no usable market source right now.`
         : '';
       // Short named reason only — a raw upstream body in a red card is
       // unreadable, and this one is the LAST thing the owner sees before the

@@ -80,10 +80,47 @@ trip to learn the same thing), and a memo hit replays the **same 503**, with the
 age recomputed from `observedAt` so it can never under-report.
 
 **`apps/edge/public/js/terminal.js`** — recognises `503 STALE_EXPIRED` as the
-*expected* degraded state and tags it `canonicalDegraded`, so it reports as INFO
-("Canonical context stale; using live /api/markets") rather than as a fault, and
-falls back to the live `/api/markets` read exactly as before. A genuine
-401/503/network failure still surfaces a red toast.
+*expected* degraded state and tags it `canonicalDegraded`, then falls back to the
+live `/api/markets` read exactly as before. A genuine 401/503/network failure
+still surfaces a red toast.
+
+### 2a. The expiry is silent in the UI, and stops being re-probed
+
+Superseding the INFO card this originally shipped
+(`fix/suppress-canonical-expired-toast`). While
+`MARKET_CONTEXT_COLLECT_ENABLED=false` the published run only ever gets **older**,
+so an INFO toast on the expiry fired on every 60-second tick and on every
+`REFRESH` — a card that always fires is a card the owner learns to dismiss, which
+is how a real outage gets missed.
+
+**An expected expiry whose live fallback SUCCEEDS produces no toast at all** — not
+red, not info — no `errors()` entry, and no raw JSON. It stays observable three
+ways that do not nag:
+
+| Surface | What it says |
+|---|---|
+| `console.warn`, once per breaker window | `[CANONICAL] published run expired (…) — /api/context skipped for 15 min; live /api/markets is the active source` |
+| `window.__canonicalStatus` | `{ state:'STALE_EXPIRED', reason, ageMs, activeSource:'/api/markets', breakerOpen, breakerTtlMs, breakerUntil, probes, skipped, expiries }` — primitives only, no body, no URL, no credential |
+| RADAR panel | `/api/context is STALE — …; the live /api/markets feed is in use` (already shipped) |
+
+**Circuit breaker.** `CANONICAL_EXPIRED_TTL_MS = 15 min`. After an observed
+expiry the canonical read is **skipped** and `/api/markets` is used directly; the
+trip lives in a module variable (never web storage), so a hard reload always
+re-probes and a re-enabled collector needs no cache clear. A **healthy** read
+closes the breaker at once. This only ever *removes* a request — it never forces
+a DB read and never widens one. At the 60s steady-state cadence that is one
+`/api/context` probe per ~15 ticks instead of one per tick.
+
+What did **not** get quieter:
+
+- a **genuine** failure (401 / `DB_UNAVAILABLE` / network / parse) keeps its
+  `console.warn` + red toast, and does **not** trip the breaker — it can recover
+  on the next tick;
+- an expiry whose live read **also** fails is still a loud red
+  `Market data fetch failed …  Canonical context is also unusable (…) — no usable
+  market source right now.` plus a `console.error`. On a breaker-skipped tick that
+  verdict is marked `, last observed this session`, because it is the last one
+  actually observed rather than a probe made just now.
 
 ## 3. Every store consumer, and how each one fails closed
 
