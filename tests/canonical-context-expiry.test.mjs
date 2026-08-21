@@ -268,15 +268,20 @@ test('client and server draw the hard line in the same place', () => {
 // ─────────────────────────────────────────────────────────────
 
 test('frontend: a 503 STALE_EXPIRED is treated as the EXPECTED degraded state', () => {
-  assert.match(js, /if \(r\.status === 503 && parsed && parsed\.reason === 'STALE_EXPIRED'\)/);
+  // Classification now prefers the response HEADER, so a truncated or
+  // unparseable body cannot turn an expected expiry into a scary failure.
+  // Wording and detail live in tests/frontend.stale-expired-ux.test.mjs.
+  assert.match(js, /if \(r\.status === 503 && \(headerExpired \|\| \(parsed && parsed\.reason === 'STALE_EXPIRED'\)\)\)/);
   assert.match(js, /err\.canonicalDegraded = true;/);
-  assert.match(js, /err\.canonicalReason = 'server refused the published run as expired'/);
+  assert.match(js, /err\.canonicalReason = 'published run expired'/);
   // ...so it reports as INFO, not as a fault (the post-deploy diagnostics rule).
   assert.match(js, /window\.Toast\?\.info\?\.\('Canonical context stale'/);
 });
 
 test('frontend: a NON-expiry failure still surfaces a visible error', () => {
-  assert.match(js, /throw new Error\('HTTP ' \+ r\.status \+ ' — ' \+ body\.slice\(0, 120\)\)/);
+  // The raw body no longer travels into the message — one short named field
+  // from it does, via _safeHttpReason. The red toast itself is unchanged.
+  assert.match(js, /throw new Error\('HTTP ' \+ r\.status \+ \(safe \? ' — ' \+ safe : ''\)\);/);
   assert.match(js, /window\.Toast\?\.error\?\.\('Canonical context unavailable'/);
 });
 
@@ -334,8 +339,14 @@ test('no trading, Telegram, RADAR gate or env behaviour is changed here', () => 
   const bot = read('netlify/functions/bot.mjs');
   assert.match(bot, /candidate\.telegramEligible = baselineTelegramEligibility\.get\(candidate\.symbol\);/);
   assert.doesNotMatch(bot, /STALE_EXPIRED/);
-  // The two other store readers are deliberately NOT gated — documented, not accidental.
-  assert.doesNotMatch(read('netlify/functions/_personal-watch-notifier.mjs'), /maxAgeMs/);
+  // The personal-watch notifier WAS ungated when this file was written; the
+  // follow-up branch (fix/canonical-store-consumer-freshness-guards) gave it the
+  // same 30-minute budget, which is asserted in
+  // tests/canonical-store-consumer-guards.test.mjs. What matters HERE is only
+  // that /api/context's own expiry is what it is — so this file no longer pins
+  // the other consumers' scope.
+  // morning-briefing.mjs still passes no maxAgeMs on purpose: it applies its own
+  // stricter 15-minute budget downstream and withholds stale rows entirely.
   assert.doesNotMatch(read('netlify/functions/morning-briefing.mjs'), /maxAgeMs/);
 });
 

@@ -85,25 +85,33 @@ age recomputed from `observedAt` so it can never under-report.
 falls back to the live `/api/markets` read exactly as before. A genuine
 401/503/network failure still surfaces a red toast.
 
-## 3. Deliberately NOT changed
+## 3. Every store consumer, and how each one fails closed
 
-Two other readers call `getAtomizedMarketContext()` and neither applies any
-freshness gate of its own:
+Audited in full (`fix/canonical-store-consumer-freshness-guards`). Every
+user-facing consumer now refuses a stale published run:
 
-| Caller | What it feeds | Status here |
-|---|---|---|
-| `netlify/functions/_personal-watch-notifier.mjs` | personal-watch triggers → **Telegram alerts** | unchanged |
-| `netlify/functions/morning-briefing.mjs` | the morning briefing | unchanged |
+| Consumer | Classification | Guard | 28h run |
+|---|---|---|---|
+| `context.mjs` | user-facing terminal read | `maxAgeMs` 30 min | `503 STALE_EXPIRED`, no rows |
+| `_personal-watch-notifier.mjs` | **Telegram** watch alerts | `maxAgeMs` 30 min | returns `CONTEXT_STALE_EXPIRED` **before** reading recipients or sending |
+| `morning-briefing.mjs` + `scripts/briefing/morning-briefing.mjs` | **Telegram** briefing | its own **15 min** budget (`DEFAULT_MAX_DATA_AGE_MS`) | axis marked `MARKET_STALE`, `markets` becomes `[]` — contributes nothing |
+| `cron-alerts.mjs` (`getPublishedRadar`) | **Telegram** ENTRY_READY alerts | its own **6 min** budget (`CANONICAL_RADAR_STALE_MS`) | `RADAR_STALE`, no alert |
+| `_radar-context-publisher.mjs` (`getRadarInputBundle`, `getRadarStatusIndex`) | internal producer | flag-gated (`MARKET_CONTEXT_RADAR_ENABLED=false`) | no-op |
+| `_market-context-collector.mjs` (`getMicrostructureBaseline`) | internal producer | flag-gated (`MARKET_CONTEXT_COLLECT_ENABLED=false`) | no-op |
 
-Because `maxAgeMs` defaults to `null`, both keep their exact current behaviour.
+**The personal-watch notifier was the only real hole.** `evaluateWatchTriggers`
+receives no timestamp and cannot self-protect, so a 28-hour run would have sent
+"your stop broke" off a day-old price. It now passes `maxAgeMs` (30 min, the
+same constant as `/api/context`) using the same `nowMs` clock the triggers and
+cooldowns use, and returns before any recipient read or Telegram send.
 
-**This is an owner decision, not an oversight.** Both would happily read the same
-28-hour run. Gating them would change a Telegram alerting path, which is out of
-scope for this branch. Recommended follow-up: pass `maxAgeMs` in
-`_personal-watch-notifier.mjs` so alerts fail closed on stale data rather than
-firing on yesterday's prices — but that is a behaviour change to an alerting path
-and needs its own review.
+The briefing and cron-alerts were already stricter than the store budget — that
+is asserted by test so it cannot regress. Telegram credentials, the sender, and
+the message shape are untouched.
 
+A test enumerates every direct `getAtomizedMarketContext` caller and fails if a
+new one appears, so the next consumer cannot be added without a freshness
+decision.
 ## 4. Safely re-enabling the publisher (NOT done here)
 
 Nothing in this branch re-enables anything, and no env var was changed. If the
