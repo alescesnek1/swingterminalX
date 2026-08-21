@@ -293,9 +293,9 @@ test('C: nothing in the app can create a second, doctype-less document', () => {
 test('the cache-bust token was bumped once, consistently, for this JS change', () => {
   const tokens = [...new Set((html.match(/\?v=([0-9a-z]+)/g) || []).map((m) => m.slice(3)))];
   assert.equal(tokens.length, 1, 'every versioned asset must carry the SAME token, got ' + tokens.join(','));
-  assert.equal(tokens[0], '6m4');
+  assert.equal(tokens[0], '6m5');
   assert.doesNotMatch(html, /\?v=6m2/);
-  assert.ok(html.includes('js/terminal.js?v=6m4'), 'terminal.js changed, so it must carry the bumped token');
+  assert.ok(html.includes('js/terminal.js?v=6m5'), 'terminal.js changed, so it must carry the bumped token');
 });
 
 // ─────────────────────────────────────────────────────────────

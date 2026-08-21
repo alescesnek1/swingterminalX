@@ -189,6 +189,38 @@
     return '';
   }
 
+  // ── Server-declared EXPECTED degradation ────────────────────────────────
+  //
+  // This is NOT a way to hide failures, and it is deliberately not a generic
+  // mute. It recognises exactly one thing: a response on which OUR OWN server
+  // has stamped a header saying "this non-2xx is the designed answer, not a
+  // fault". Today that is `/api/context` answering 503 STALE_EXPIRED because the
+  // newest published canonical run is past its hard freshness budget — a state
+  // the terminal handles by reading live /api/markets instead.
+  //
+  // WHY IT MUST NOT BE RECORDED HERE: this interceptor cannot see whether the
+  // caller recovered. It fires on every 60-second tick, so recording it painted
+  // a fresh red `errors()` entry once a minute for a condition that is expected
+  // and already handled — burying the failures this log exists to surface.
+  //
+  // WHAT STILL REPORTS IT: the CONSUMER, which does know the outcome —
+  // fetchData() emits an INFO notice when the live fallback succeeds, and a RED
+  // error naming BOTH sources when the fallback also fails. So the honest-error
+  // rule is satisfied by the layer that has the information; nothing is
+  // swallowed. A header we do not set can never reach this branch.
+  function serverDeclaredExpected(res) {
+    try {
+      const headers = res && res.headers && typeof res.headers.get === 'function' ? res.headers : null;
+      if (!headers) return false;
+      return headers.get('X-Context-Stale') === 'expired';
+    } catch (err) {
+      // A response whose headers cannot be read is treated as a NORMAL failure
+      // and recorded — failing closed towards visibility, not towards silence.
+      void err;
+      return false;
+    }
+  }
+
   function installFetchInterceptor() {
     if (installedFetch || typeof window.fetch !== 'function') return;
     const original = window.fetch;
@@ -215,7 +247,7 @@
 
       return Promise.resolve(result).then(
         (res) => {
-          if (res && res.ok === false) {
+          if (res && res.ok === false && !serverDeclaredExpected(res)) {
             record({
               level: res.status >= 500 ? 'error' : 'warn',
               kind: 'http',

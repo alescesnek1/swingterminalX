@@ -2030,6 +2030,28 @@ async function _enrichCanonicalWithMarketCap(rows, authHeaders) {
   return rows;
 }
 
+// A SHORT, safe reason for a failed HTTP read — never the raw response body.
+//
+// A JSON error body contributes only its own named reason/error field; anything
+// else contributes nothing but the status. This is what keeps a toast readable:
+// production showed a whole `{"ok":false,"reason":"STALE_EXPIRED","age_ms":…}`
+// blob pasted into a red card, which is noise to a human and pointless to
+// anyone else. Never leaks a token, a query string or a payload, because it only
+// ever emits one short whitelisted field.
+function _safeHttpReason(body) {
+  const raw = typeof body === 'string' ? body.trim() : '';
+  if (!raw) return null;
+  let parsed = null;
+  try { parsed = JSON.parse(raw); } catch (e) { void e; }
+  if (parsed && typeof parsed === 'object') {
+    const named = parsed.reason || parsed.error || parsed.detail;
+    return named ? String(named).slice(0, 120) : null;
+  }
+  // Not JSON: a short plain-text status line is useful, a wall of markup is not.
+  if (/^[\w .,:;()'\-/]{1,120}$/.test(raw)) return raw.slice(0, 120);
+  return null;
+}
+
 async function _fetchCanonicalMarkets(authHeaders) {
   const r = await fetch('/api/context', { headers: { 'Accept': 'application/json', ...authHeaders } });
   if (!r.ok) {
@@ -2040,21 +2062,36 @@ async function _fetchCanonicalMarkets(authHeaders) {
     // means the endpoint refused correctly — so it is tagged like the browser's
     // own refusal and reported as INFO, not as a fault.
     let parsed = null;
-    // A body that is not JSON is not a swallowed failure: `parsed` stays null
-    // and the request falls through to the generic error throw below, which
-    // surfaces the status and the raw body exactly as before.
+    // A body that is not JSON is not a swallowed failure: `parsed` stays null,
+    // the header check below still classifies the response, and anything
+    // unclassified falls through to the generic throw with a SAFE short reason.
     try { parsed = JSON.parse(body); } catch (e) { void e; }
-    if (r.status === 503 && parsed && parsed.reason === 'STALE_EXPIRED') {
-      const ageLabel = Number.isFinite(parsed.age_ms) && window.__marketFreshness?.ageAgoLabel
-        ? window.__marketFreshness.ageAgoLabel(parsed.age_ms)
+    // Classified by the response HEADER first, body second. The header is what
+    // the server stamps on the response itself, so a truncated or unparseable
+    // body cannot turn an EXPECTED expiry into a scary generic failure.
+    let headerExpired = false;
+    let headerAgeMs = null;
+    try {
+      headerExpired = r.headers.get('X-Context-Stale') === 'expired';
+      const rawAge = Number(r.headers.get('X-Context-Age-Ms'));
+      headerAgeMs = Number.isFinite(rawAge) ? rawAge : null;
+    } catch (e) { void e; }
+    if (r.status === 503 && (headerExpired || (parsed && parsed.reason === 'STALE_EXPIRED'))) {
+      const ageMs = Number.isFinite(parsed?.age_ms) ? parsed.age_ms : headerAgeMs;
+      const ageLabel = Number.isFinite(ageMs) && window.__marketFreshness?.ageAgoLabel
+        ? window.__marketFreshness.ageAgoLabel(ageMs)
         : null;
       const err = new Error('canonical run expired server-side' + (ageLabel ? ' — published run is ' + ageLabel + ' old' : ''));
       err.canonicalDegraded = true;
-      err.canonicalReason = 'server refused the published run as expired' + (ageLabel ? ' (' + ageLabel + ' old)' : '');
-      err.canonicalAgeMs = Number.isFinite(parsed.age_ms) ? parsed.age_ms : null;
+      err.canonicalReason = 'published run expired' + (ageLabel ? ' (' + ageLabel + ' old)' : '');
+      err.canonicalAgeMs = Number.isFinite(ageMs) ? ageMs : null;
       throw err;
     }
-    throw new Error('HTTP ' + r.status + ' — ' + body.slice(0, 120));
+    // Generic failure: status plus at most ONE short named field from the body.
+    // The raw body never travels — it ends up in a toast, and a JSON blob there
+    // is unreadable to the owner and a leak risk to nobody's benefit.
+    const safe = _safeHttpReason(body);
+    throw new Error('HTTP ' + r.status + (safe ? ' — ' + safe : ''));
   }
   const j = await r.json();
   if (!j || j.ok === false) throw new Error('context error: ' + ((j && j.reason) || 'unknown'));
@@ -2194,7 +2231,11 @@ async function fetchData(opts) {
       const both = _canonicalDegraded
         ? ` Canonical context is also unusable (${_canonicalDegraded.reason}) — no usable market source right now.`
         : '';
-      window.Toast?.error('Market data fetch failed', `HTTP ${r.status} — ${body.slice(0,140)}.${both}`, { endpoint: '/api/markets', code: r.status });
+      // Short named reason only — a raw upstream body in a red card is
+      // unreadable, and this one is the LAST thing the owner sees before the
+      // scanner degrades, so it has to be legible.
+      const _safe = _safeHttpReason(body);
+      window.Toast?.error('Market data fetch failed', `HTTP ${r.status}${_safe ? ' — ' + _safe : ''}.${both}`, { endpoint: '/api/markets', code: r.status });
       if (_canonicalDegraded) console.error('[MARKET] no usable source — canonical is stale AND /api/markets failed:', { canonical: _canonicalDegraded.reason, markets_status: r.status });
       throw new Error('HTTP ' + r.status);
     }

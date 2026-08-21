@@ -235,7 +235,7 @@ test('every versioned asset carries the same single bumped cache-bust token', ()
   // unavailable banner). Load-bearing: netlify.toml sets max-age=3600 on
   // /*.js, so without the bump a returning tab keeps the old code — the code
   // whose REFRESH cannot reach /api/markets at all.
-  assert.equal(tokens[0], '6m4', 'token was bumped for this JS change');
+  assert.equal(tokens[0], '6m5', 'token was bumped for this JS change');
 });
 
 // The measurement budget targets the deepest drawdowns, and DISLOCATION is 20% of

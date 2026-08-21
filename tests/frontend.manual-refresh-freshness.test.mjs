@@ -265,6 +265,6 @@ test('the age label stays human and never lies about an unknown age', () => {
 test('the asset cache-bust token was bumped so returning users get this code', () => {
   assert.doesNotMatch(html, /\?v=6l5/);
   assert.doesNotMatch(html, /\?v=6m1/);
-  assert.match(html, /js\/terminal\.js\?v=6m4/);
-  assert.match(html, /js\/freshness-badge\.js\?v=6m4/);
+  assert.match(html, /js\/terminal\.js\?v=6m5/);
+  assert.match(html, /js\/freshness-badge\.js\?v=6m5/);
 });
