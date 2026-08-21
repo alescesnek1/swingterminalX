@@ -184,6 +184,31 @@ must always be able to tell that something broke and what broke.
   fallback is allowed *behaviour*, but the active source (Binance vs CoinGecko,
   spot vs futures) must be visible in the UI, and any *unexpected* upstream
   failure behind the fallback must still be logged.
+- **A DESIGNED degradation whose fallback SUCCEEDED may be silent in toasts —
+  and only under all four conditions.** This is the one narrow carve-out from
+  "surface a visible error", and it exists because a card that fires on every
+  poll tick trains the owner to dismiss cards, which is how a real outage gets
+  missed. All four must hold: (1) the condition is the endpoint's *designed*
+  answer, not a fault (today: `/api/context` → `503 STALE_EXPIRED` while the
+  publishing collector is off); (2) a working fallback actually served the
+  request; (3) the degraded data is **refused**, never displayed; (4) the state
+  is still observable without a toast — a `console.warn`/`console.error` on the
+  transition, a small primitives-only diagnostics object (e.g.
+  `window.__canonicalStatus`), **and** a persistent UI surface naming the ACTIVE
+  source (e.g. the RADAR panel's *"/api/context is STALE — …; the live
+  /api/markets feed is in use"*). If the fallback also fails there is no working
+  answer, so the combined outage must be LOUD and name both sources. A genuine
+  failure (401 / `DB_UNAVAILABLE` / network / parse) never qualifies — it keeps
+  its red toast and its `errors()` entry. Reference implementation and its tests:
+  `docs/canonical-context-expiry.md` §2a,
+  `tests/frontend.canonical-expired-toast-suppression.test.mjs`.
+- **Do not re-probe a source you have just proved dead.** When a read's refusal
+  is *monotonic* — it cannot recover without a deploy or an env change — put a
+  short session circuit breaker in front of it rather than paying for the same
+  refusal every tick. Constraints: memory-only (never web storage, so a hard
+  reload always re-probes), closed immediately by a healthy read, and it may only
+  ever REMOVE a request — never force or widen a DB read. A *recoverable* failure
+  must keep being retried.
 - **Order book specifically:** a failure to load the book must show the user a
   clear reason (blocked / unavailable / upstream error) and log it — it must
   never appear as an empty or "loading…" box that silently never resolves.

@@ -198,19 +198,26 @@ test('classification prefers the response HEADER, so a bad body still classifies
   assert.match(canonical, /err\.canonicalDegraded = true;/);
 });
 
-test('fallback SUCCEEDS ⇒ short info notice, no scary wording', () => {
-  assert.match(js, /window\.Toast\?\.info\?\.\('Canonical context stale', `Using live \/api\/markets — \$\{_canonicalDegraded\.reason\}\.`/);
+test('fallback SUCCEEDS ⇒ NO toast at all, just the tagged refusal', () => {
+  // SUPERSEDED by fix/suppress-canonical-expired-toast. The INFO card this used
+  // to require came back on every 60s tick and on every REFRESH, because the
+  // published run only ages while the collector is off. An expected expiry with
+  // a working live fallback is now silent in the UI; the circuit breaker logs it
+  // once and records window.__canonicalStatus.
   assert.match(js, /err\.canonicalReason = 'published run expired'/);
-  // The degraded branch cannot reach an error toast.
+  assert.doesNotMatch(js, /Canonical context stale/, 'the retired card must be gone from the bundle');
+  // The degraded branch cannot reach ANY toast level.
   const degraded = js.slice(js.indexOf('if (_canonicalDegraded) {'), js.indexOf('} else {', js.indexOf('if (_canonicalDegraded) {')));
-  assert.doesNotMatch(degraded, /Toast\?\.error/);
+  assert.doesNotMatch(degraded.replace(/^\s*\/\/.*$/gm, ''), /Toast/);
   assert.doesNotMatch(degraded, /unavailable/i);
+  assert.match(degraded, /_canonicalBreakerTrip\(/);
 });
 
 test('fallback FAILS ⇒ a real red outage naming both sources', () => {
   const fd = js.slice(js.indexOf('async function fetchData(opts)'), js.indexOf('// ========== RENDER FUNCTIONS =========='));
   assert.match(fd, /window\.Toast\?\.error\('Market data fetch failed'/);
-  assert.match(fd, /Canonical context is also unusable \(\$\{_canonicalDegraded\.reason\}\) — no usable market source right now\./);
+  assert.match(fd, /Canonical context is also unusable \(\$\{_canonicalDegraded\.reason\}/);
+  assert.match(fd, /no usable market source right now\./);
   assert.match(fd, /console\.error\('\[MARKET\] no usable source — canonical is stale AND \/api\/markets failed:'/);
 });
 
@@ -221,7 +228,9 @@ test('a GENUINE canonical failure still gets the red unavailable toast', () => {
 
 test('the live /api/markets fallback itself is unchanged', () => {
   assert.match(js, /const _mktUrl = force \? '\/api\/markets\?force=1' : '\/api\/markets';/);
-  assert.match(js, /const _canonical = _canonicalContextEnabled\(\) && !force;/);
+  // The canonical read gained a third skip condition — the circuit breaker —
+  // which only ever REMOVES a probe. force still bypasses the store outright.
+  assert.match(js, /const _canonical = _canonicalContextEnabled\(\) && !force && !_breakerOpen;/);
   assert.match(js, /if \(!live\) \{/);
 });
 
@@ -232,10 +241,11 @@ test('the live /api/markets fallback itself is unchanged', () => {
 test('the cache token was bumped because frontend assets changed', () => {
   const tokens = [...new Set((html.match(/\?v=([0-9a-z]+)/g) || []).map((m) => m.slice(3)))];
   assert.equal(tokens.length, 1, 'one token for every asset, got ' + tokens.join(','));
-  assert.equal(tokens[0], '6m5');
+  assert.equal(tokens[0], '6m6');
   assert.doesNotMatch(html, /\?v=6m4/);
+  assert.doesNotMatch(html, /\?v=6m5/);
   for (const asset of ['js/terminal.js', 'js/error-log.js']) {
-    assert.ok(html.includes(asset + '?v=6m5'), asset + ' must carry the bumped token');
+    assert.ok(html.includes(asset + '?v=6m6'), asset + ' must carry the bumped token');
   }
 });
 

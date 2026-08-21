@@ -78,21 +78,29 @@ test('A: the refusal is TAGGED so the caller can tell expected from broken', () 
   assert.match(canonical, /err\.canonicalAgeMs = _unusable\.ageMs;/);
 });
 
-test('A: an expected hard-stale canonical read produces NO error toast', () => {
+test('A: an expected hard-stale canonical read produces NO toast at all', () => {
+  // SUPERSEDED by fix/suppress-canonical-expired-toast: this used to assert an
+  // INFO card. With the publishing collector off the run only ages, so that card
+  // reappeared on every 60s tick and on every REFRESH — noise the owner learns
+  // to dismiss. The expected expiry is now silent in the UI and observable via
+  // the circuit breaker's one-time log plus window.__canonicalStatus. Full
+  // coverage in tests/frontend.canonical-expired-toast-suppression.test.mjs.
   const fd = code(fetchDataRegion());
   // The branch exists and is chosen by the tag, not by string matching.
   assert.match(fd, /_canonicalDegraded = \(ce && ce\.canonicalDegraded === true\)/);
-  // INFO, with the required wording.
-  assert.match(fd, /window\.Toast\?\.info\?\.\('Canonical context stale', `Using live \/api\/markets — \$\{_canonicalDegraded\.reason\}\.`/);
-  assert.match(fd, /\[CANONICAL\] context stale; using live \/api\/markets/);
-  // ...and the error toast is now only reachable from the ELSE branch.
-  const degradedBranch = region(js, 'if (_canonicalDegraded) {', '} else {');
-  assert.doesNotMatch(degradedBranch, /Toast\?\.error/);
+  // No toast of ANY level on the degraded path.
+  const degradedBranch = code(region(js, 'if (_canonicalDegraded) {', '} else {'));
+  assert.doesNotMatch(degradedBranch, /Toast/);
+  // What replaces it: the circuit breaker, which logs the transition once.
+  assert.match(degradedBranch, /_canonicalBreakerTrip\(_canonicalDegraded\.reason, _canonicalDegraded\.ageMs\);/);
+  assert.match(code(js), /console\.warn\('\[CANONICAL\] published run expired \('/);
 });
 
 test('A: an expected hard-stale fallback creates NO ErrorLog failure entry', () => {
-  // Mechanism, proved from toast.js: only error/warn are forwarded to ErrorLog,
-  // so Toast.info cannot add a failure to errors().
+  // Mechanism, proved from toast.js: only error/warn are forwarded to ErrorLog.
+  // The degraded path now calls no Toast level at all, so nothing could forward
+  // — but the mechanism stays asserted so a toast added here later cannot
+  // quietly become a red entry.
   assert.match(toastSrc, /if \(\(level === 'error' \|\| level === 'warn'\) && !opts\.skipLog && window\.ErrorLog\)/);
   assert.match(toastSrc, /info:\s*\(title, detail, opts\) => push\('info',\s*title, detail, opts\)/);
   // And ErrorLog itself only knows error/warn, so there is no "info failure".
@@ -112,7 +120,11 @@ test('A: canonical stale AND a failed live read stays LOUD', () => {
   const fd = code(fetchDataRegion());
   // The live-read failure toast names the combination outright.
   assert.match(fd, /const both = _canonicalDegraded/);
-  assert.match(fd, /Canonical context is also unusable \(\$\{_canonicalDegraded\.reason\}\) — no usable market source right now\./);
+  assert.match(fd, /Canonical context is also unusable \(\$\{_canonicalDegraded\.reason\}/);
+  assert.match(fd, /no usable market source right now\./);
+  // On a breaker-skipped tick the verdict is the LAST OBSERVED one, and the
+  // message says so instead of implying a probe that did not happen.
+  assert.match(fd, /_canonicalDegraded\.remembered \? ', last observed this session' : ''/);
   assert.match(fd, /window\.Toast\?\.error\('Market data fetch failed'/);
   assert.match(fd, /console\.error\('\[MARKET\] no usable source — canonical is stale AND \/api\/markets failed:'/);
 });
@@ -129,8 +141,9 @@ test('A: downgrading the notice did not touch what the scanner actually reads', 
   const fd = code(fetchDataRegion());
   // The live read is still the thing that feeds the scanner after a refusal.
   assert.match(fd, /const _mktUrl = force \? '\/api\/markets\?force=1' : '\/api\/markets';/);
-  // A forced read still never consults the canonical store.
-  assert.match(fd, /const _canonical = _canonicalContextEnabled\(\) && !force;/);
+  // A forced read still never consults the canonical store. The third condition
+  // is the circuit breaker, which only ever REMOVES a canonical probe.
+  assert.match(fd, /const _canonical = _canonicalContextEnabled\(\) && !force && !_breakerOpen;/);
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -293,9 +306,9 @@ test('C: nothing in the app can create a second, doctype-less document', () => {
 test('the cache-bust token was bumped once, consistently, for this JS change', () => {
   const tokens = [...new Set((html.match(/\?v=([0-9a-z]+)/g) || []).map((m) => m.slice(3)))];
   assert.equal(tokens.length, 1, 'every versioned asset must carry the SAME token, got ' + tokens.join(','));
-  assert.equal(tokens[0], '6m5');
+  assert.equal(tokens[0], '6m6');
   assert.doesNotMatch(html, /\?v=6m2/);
-  assert.ok(html.includes('js/terminal.js?v=6m5'), 'terminal.js changed, so it must carry the bumped token');
+  assert.ok(html.includes('js/terminal.js?v=6m6'), 'terminal.js changed, so it must carry the bumped token');
 });
 
 // ─────────────────────────────────────────────────────────────
