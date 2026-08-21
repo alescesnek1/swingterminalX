@@ -2032,7 +2032,30 @@ async function _enrichCanonicalWithMarketCap(rows, authHeaders) {
 
 async function _fetchCanonicalMarkets(authHeaders) {
   const r = await fetch('/api/context', { headers: { 'Accept': 'application/json', ...authHeaders } });
-  if (!r.ok) { const body = await r.text().catch(() => ''); throw new Error('HTTP ' + r.status + ' — ' + body.slice(0, 120)); }
+  if (!r.ok) {
+    const body = await r.text().catch(() => '');
+    // The SERVER now enforces the same hard freshness budget the browser does,
+    // and answers 503 STALE_EXPIRED rather than handing over an aged run. That
+    // is the EXPECTED degraded state while the publishing collector is off — it
+    // means the endpoint refused correctly — so it is tagged like the browser's
+    // own refusal and reported as INFO, not as a fault.
+    let parsed = null;
+    // A body that is not JSON is not a swallowed failure: `parsed` stays null
+    // and the request falls through to the generic error throw below, which
+    // surfaces the status and the raw body exactly as before.
+    try { parsed = JSON.parse(body); } catch (e) { void e; }
+    if (r.status === 503 && parsed && parsed.reason === 'STALE_EXPIRED') {
+      const ageLabel = Number.isFinite(parsed.age_ms) && window.__marketFreshness?.ageAgoLabel
+        ? window.__marketFreshness.ageAgoLabel(parsed.age_ms)
+        : null;
+      const err = new Error('canonical run expired server-side' + (ageLabel ? ' — published run is ' + ageLabel + ' old' : ''));
+      err.canonicalDegraded = true;
+      err.canonicalReason = 'server refused the published run as expired' + (ageLabel ? ' (' + ageLabel + ' old)' : '');
+      err.canonicalAgeMs = Number.isFinite(parsed.age_ms) ? parsed.age_ms : null;
+      throw err;
+    }
+    throw new Error('HTTP ' + r.status + ' — ' + body.slice(0, 120));
+  }
   const j = await r.json();
   if (!j || j.ok === false) throw new Error('context error: ' + ((j && j.reason) || 'unknown'));
   // HARD age gate on the published run.

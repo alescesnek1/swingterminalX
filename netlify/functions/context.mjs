@@ -63,6 +63,23 @@ export const CONTEXT_CACHE_ENV_FLAG = 'CONTEXT_READ_CACHE_MS';
 export const CONTEXT_CACHE_DEFAULT_MS = 180_000;
 // Matches the store's own FRESH/STALE boundary in getAtomizedMarketContext.
 const FRESHNESS_MAX_AGE_MS = 6 * 60 * 1000;
+
+// ── HARD EXPIRY — the endpoint stops calling an old run "canonical" ──────────
+//
+// ROOT CAUSE this closes: the store asks for "the newest PUBLISHED run" with no
+// age predicate, and `freshness` above is a LABEL computed after the read, not a
+// gate. While MARKET_CONTEXT_COLLECT_ENABLED is false (the emergency cost
+// breaker — deliberate, see docs/netlify-cost-breaker.md) nothing publishes a
+// new run, so the last one before the breaker was engaged was served, with a
+// 200 and a full body, for 28 hours and counting. The browser refusing it is a
+// second line of defence; the endpoint must not offer it in the first place.
+//
+// Past this budget the response carries NO rows — only a named reason and
+// non-secret age diagnostics. Sized to match the browser's own hard ceiling
+// (HARD_MAX_MARKET_AGE_MS in js/freshness-badge.js) so client and server draw
+// the line in the same place.
+export const CONTEXT_HARD_MAX_AGE_MS = 30 * 60 * 1000;
+export const REASON_STALE_EXPIRED = 'STALE_EXPIRED';
 // Ceiling: never memoize longer than the collector's publish interval, or the
 // terminal could sit on a run after a newer one exists.
 const CONTEXT_CACHE_MAX_MS = 180_000;
@@ -101,7 +118,41 @@ export function resetContextCacheForTests() {
   contextReadStats.coalesced = 0; contextReadStats.failures = 0;
 }
 
-function headers(req, cacheState) { return { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Context-Cache': cacheState || 'bypass', 'Vary': 'Origin, Authorization', 'Access-Control-Allow-Origin': req.headers.get('origin') || '*', 'Access-Control-Allow-Methods': 'GET, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type, Authorization, Accept' }; }
+function headers(req, cacheState) { return { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Context-Cache': cacheState || 'bypass', 'Vary': 'Origin, Authorization', 'Access-Control-Allow-Origin': req.headers.get('origin') || '*', 'Access-Control-Allow-Methods': 'GET, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type, Authorization, Accept', 'Access-Control-Expose-Headers': 'X-Context-Cache, X-Context-Stale, X-Context-Age-Ms, X-Context-Observed-At' }; }
+
+/**
+ * The one place an expired canonical run is turned into a response. Used by the
+ * cold path and by a memo hit, so both refuse identically.
+ *
+ * Carries NO rows — the store returned before fetching any. Diagnostics are
+ * non-secret status only: a stable reason code, the measured age, the budget it
+ * broke, and the run's own observedAt. Age is RECOMPUTED from observedAt so a
+ * memoized verdict cannot report an age younger than the truth.
+ */
+function staleExpiredResponse(req, context, now, cacheState) {
+  const observedMs = context?.observedAt ? Date.parse(context.observedAt) : NaN;
+  const ageMs = Number.isFinite(observedMs) ? Math.max(0, now - observedMs) : (Number.isFinite(context?.ageMs) ? context.ageMs : null);
+  const maxAgeMs = Number.isFinite(context?.maxAgeMs) ? context.maxAgeMs : CONTEXT_HARD_MAX_AGE_MS;
+  console.warn('[CONTEXT] stale_expired', { ageMs, maxAgeMs, observedAt: context?.observedAt || null, cache: cacheState });
+  const body = {
+    ok: false,
+    reason: REASON_STALE_EXPIRED,
+    stale_expired: true,
+    age_ms: ageMs,
+    max_age_ms: maxAgeMs,
+    observedAt: context?.observedAt || null,
+    detail: 'the newest published canonical run is older than the hard freshness budget; use the live market read',
+  };
+  return new Response(JSON.stringify(body), {
+    status: 503,
+    headers: {
+      ...headers(req, cacheState),
+      'X-Context-Stale': 'expired',
+      'X-Context-Age-Ms': ageMs == null ? 'unknown' : String(ageMs),
+      'X-Context-Observed-At': context?.observedAt || 'unknown',
+    },
+  });
+}
 function json(req, body, status = 200, cacheState) { return new Response(JSON.stringify(body), { status, headers: headers(req, cacheState) }); }
 export async function runContextRead(req, deps = {}) {
   if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: headers(req) });
@@ -135,6 +186,10 @@ export async function runContextRead(req, deps = {}) {
   // Memo hit: no database work at all for this request.
   if (ttlMs > 0 && _memo && (now - _memo.storedAt) < ttlMs) {
     contextReadStats.memoHits += 1;
+    // A memoized EXPIRED verdict must be replayed as the same refusal, never as
+    // a 200. Age is recomputed from observedAt rather than replayed, so the memo
+    // cannot understate how old the run has become while it sat here.
+    if (_memo.context?.reason === REASON_STALE_EXPIRED) return staleExpiredResponse(req, _memo.context, now, 'hit');
     return json(req, refreshFreshness(_memo.context, now), 200, 'hit');
   }
 
@@ -149,7 +204,14 @@ export async function runContextRead(req, deps = {}) {
       // base asset into one coin, so ~1000 displayed coins needs materially more rows
       // than 1000 here.
       contextReadStats.dbReads += 1;
-      const context = await store.getAtomizedMarketContext(database, { tickerLimit: 2000, microLimit: 600 });
+      // maxAgeMs makes the store refuse an expired run BEFORE it issues the two
+      // expensive queries, so an expired read is cheaper than a served one.
+      const context = await store.getAtomizedMarketContext(database, {
+        tickerLimit: 2000, microLimit: 600, maxAgeMs: CONTEXT_HARD_MAX_AGE_MS, now,
+      });
+      // An expired run is a DELIBERATE refusal, not a database fault, and it
+      // carries its own diagnostics through untouched.
+      if (context?.reason === REASON_STALE_EXPIRED) return context;
       if (!context?.ok) return { ok: false, reason: context?.reason || 'DB_UNAVAILABLE' };
       // Safety annotation must never take the read down: a classifier failure leaves
       // the rows unannotated (blank, i.e. UNKNOWN) rather than failing the response.
@@ -166,6 +228,26 @@ export async function runContextRead(req, deps = {}) {
   }
 
   const context = await _inFlight;
+
+  // ── Expired published run: refuse, with the numbers that prove it ──────────
+  //
+  // 503, not 200-with-rows: this endpoint has no canonical answer to give, and
+  // the browser already treats that as an expected fallback to the live
+  // /api/markets read. The body carries only non-secret status — a stable
+  // reason code, the age, the budget it broke, and the run's own observedAt.
+  // No ticker or microstructure row is included, by construction: the store
+  // returned before it fetched any.
+  //
+  // MEMOIZED like a success on purpose. The verdict is global (same published
+  // run for every caller) and monotonic (a run only gets older), so re-deriving
+  // it per request would spend a Postgres round trip to be told the same thing.
+  // The memo TTL bounds how long a NEWLY published run waits to be noticed,
+  // exactly as it already does for a healthy read.
+  if (context?.reason === REASON_STALE_EXPIRED) {
+    if (ttlMs > 0) _memo = { context, storedAt: now };
+    return staleExpiredResponse(req, context, now, 'miss');
+  }
+
   // A failed read is never memoized and never served from a previous good
   // response — the caller must see the failure, per the error-observability rule.
   if (!context?.ok) {
