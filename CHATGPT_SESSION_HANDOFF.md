@@ -1661,6 +1661,73 @@ email allowlist (§9), not a billing tier.
 
 From current git history (most recent first, condensed — see `git log` for full):
 
+- **Canonical context hard expiry — ROOT CAUSE (LOCAL, UNPUSHED, branch
+  `fix/canonical-context-expiry-root-cause`)** — `/api/context` was still
+  serving a 28-hour-old "canonical" run as a normal 200 body. The browser
+  refusing it (shipped earlier) was a second line of defence; this closes the
+  first. **Full write-up: `docs/canonical-context-expiry.md`.**
+  - **Root cause, three parts, all true at once.** (1) Nothing publishes:
+    `MARKET_CONTEXT_COLLECT_ENABLED=false` in production — the emergency cost
+    breaker, **deliberate** (Postgres is billed per GB-hour awake and the
+    collector's `*/3` schedule sits under the 5-minute sleep timer). The
+    collector is **disabled, not broken**: it returns
+    `{ok:true,skipped:true,reason:'COLLECT_DISABLED'}` before importing a
+    module, connecting or fetching. (2) `getAtomizedMarketContext()` asks for
+    *the newest PUBLISHED run* with **no age predicate**, so with nothing
+    publishing that is the same row forever. (3) `freshness`
+    (`FRESH|STALE|MISSING`) was a **label computed after the read, never a
+    gate** — the body went out with 200 either way. Verified production env
+    read-only: `MARKET_CONTEXT_COLLECT_ENABLED=false`,
+    `MARKET_CONTEXT_RADAR_ENABLED=false`, `MARKET_CONTEXT_BACKGROUND_ENABLED=false`,
+    `DB_READS_ENABLED` unset, `CONTEXT_READ_CACHE_MS=180000`.
+  - **Decision: option A** (publisher intentionally disabled ⇒ the endpoint must
+    fail closed server-side). No env change, no collector re-enable, no
+    migration, no scheduler change.
+  - **`_market-context-store.mjs`** — `getAtomizedMarketContext()` takes an
+    **opt-in** `maxAgeMs` (+ injectable `now`), default `null` = previous
+    behaviour byte-for-byte. When set, the run's age is checked immediately
+    after the run row is read and **before** the ticker/microstructure queries,
+    returning `{ok:false, reason:'STALE_EXPIRED', staleExpired:true, ageMs,
+    maxAgeMs, observedAt}`. Fails closed on an unparseable `observed_at` (that
+    path used to throw inside `new Date(...).toISOString()` and get swallowed as
+    `DB_UNAVAILABLE` — a phantom outage hiding an expired run; now guarded). The
+    store's own `freshness` label now uses the same injected clock as the gate so
+    label and gate can never disagree. **Cost: strictly cheaper** — an expired
+    read skips the two expensive queries (up to 2,000 tickers + 600
+    microstructure rows) and adds **no** query on the healthy path.
+  - **`context.mjs`** — new `CONTEXT_HARD_MAX_AGE_MS = 30 min` (equal to
+    `HARD_MAX_MARKET_AGE_MS` in `js/freshness-badge.js`, asserted by test, so
+    client and server draw the line in the same place). An expired run answers
+    **`503`** with `{ok:false, reason:'STALE_EXPIRED', stale_expired:true,
+    age_ms, max_age_ms, observedAt, detail}` and headers `X-Context-Stale:
+    expired` / `X-Context-Age-Ms` / `X-Context-Observed-At` (added to
+    `Access-Control-Expose-Headers`). **No ticker, microstructure or RADAR row is
+    included, by construction.** The verdict is memoized like a success (global +
+    monotonic), and a **memo hit replays the same 503** with the age recomputed
+    from `observedAt` so it can never under-report. A real `DB_UNAVAILABLE` stays
+    its own distinct 503; auth still 401s first; the `DB_READS_ENABLED=false`
+    master switch still wins with its 200 + reason.
+  - **`terminal.js`** — recognises `503 STALE_EXPIRED` as the **expected**
+    degraded state (tags `canonicalDegraded`), so it reports as INFO and falls
+    back to the live `/api/markets` read; a genuine 401/503/network failure still
+    gets a red toast.
+  - **Deliberately NOT gated (owner decision, documented):**
+    `_personal-watch-notifier.mjs` (feeds **Telegram** alerts) and
+    `morning-briefing.mjs` both call the same store read and neither has any
+    freshness guard of its own — they would read the same 28h run. Because
+    `maxAgeMs` defaults off they are untouched here. Recommended follow-up:
+    gate personal-watch so alerts fail closed on stale data — but that is a
+    behaviour change to an alerting path and needs its own review.
+  - Touched files: `netlify/functions/context.mjs`,
+    `netlify/functions/_market-context-store.mjs`,
+    `apps/edge/public/js/terminal.js`, `apps/edge/public/index.html`
+    (cache-bust `6m3 → 6m4`); new `docs/canonical-context-expiry.md` and
+    `tests/canonical-context-expiry.test.mjs` (23); five existing cache-token
+    assertions advanced. Suite 2,688 tests / 2,662 pass / 0 fail / 26 skipped;
+    eslint 0 errors / 163 warnings (identical to baseline — one `no-useless-assignment`
+    I introduced was fixed rather than suppressed, which had unmasked 8
+    pre-existing suppressed ones as errors).
+  **NOT pushed, NOT deployed — awaiting owner review.**
 - **Post-deploy freshness diagnostics cleanup (LOCAL, UNPUSHED, branch
   `fix/post-deploy-reliability-cleanup`)** — follow-up to the P0-P2 deploy
   (`f1eefde`), which is confirmed working in production (`REFRESH` →

@@ -188,6 +188,22 @@ export async function completeCollectionRun(db, payload = {}) {
 
 export async function getAtomizedMarketContext(db, options = {}) {
   const tickerLimit = Math.min(Math.max(Number(options.tickerLimit) || 500, 1), 2000); const microLimit = Math.min(Math.max(Number(options.microLimit) || 50, 1), 600);
+  // ── HARD EXPIRY (opt-in per caller; default OFF) ───────────────────────────
+  //
+  // The query below asks for "the newest PUBLISHED run" with no age predicate,
+  // so while the collector is disabled it keeps returning the same run forever
+  // — 28 hours old in production. `freshness` was only ever a LABEL computed
+  // after the fact, never a gate, so that run was served as a normal body.
+  //
+  // A caller that passes `maxAgeMs` gets a refusal instead: no ticker rows, no
+  // microstructure rows, and — because the two expensive queries are skipped —
+  // strictly LESS database work than serving the stale body was.
+  //
+  // Default null keeps every existing caller byte-identical. Only /api/context
+  // opts in here; the personal-watch and morning-briefing readers are
+  // deliberately unchanged in this branch (see docs/canonical-context-expiry.md).
+  const maxAgeMs = Number.isFinite(options.maxAgeMs) && options.maxAgeMs > 0 ? options.maxAgeMs : null;
+  const now = Number.isFinite(options.now) ? options.now : Date.now();
   try {
     const runRes = await db.query(`SELECT id,run_key,observed_at,completed_at,diagnostics FROM market_collection_runs WHERE scope_id=$1 AND status='published' ORDER BY observed_at DESC LIMIT 1`, [CONTEXT_SCOPE_ID]); const run = runRes.rows[0];
     // No published collection run at all — the COLLECTOR is the missing stage here,
@@ -195,6 +211,23 @@ export async function getAtomizedMarketContext(db, options = {}) {
     // "collector fine, RADAR not scoring", which otherwise both surfaced as a bare
     // PENDING and sent the owner looking in the wrong place.
     if (!run) return { ok: true, contextVersion: null, run: null, market: null, radar: { status: 'PENDING', candidates: [], pendingReason: 'NO_PUBLISHED_RUN' } };
+    if (maxAgeMs !== null) {
+      const observedMs = new Date(run.observed_at).getTime();
+      const runAgeMs = Number.isFinite(observedMs) ? Math.max(0, now - observedMs) : null;
+      // Fails closed: a run whose timestamp will not parse cannot be shown to be
+      // current, so it expires too.
+      if (runAgeMs === null || runAgeMs > maxAgeMs) {
+        return {
+          ok: false, reason: 'STALE_EXPIRED', staleExpired: true,
+          ageMs: runAgeMs, maxAgeMs,
+          // Guarded: an unparseable timestamp is exactly the case that lands
+          // here, and `new Date('nonsense').toISOString()` THROWS — which would
+          // have been swallowed by the catch below and reported as
+          // DB_UNAVAILABLE, hiding an expired run behind a phantom outage.
+          observedAt: Number.isFinite(observedMs) ? new Date(observedMs).toISOString() : null,
+        };
+      }
+    }
     const [tickers, micro] = await Promise.all([
       // Joined to the instrument so every row carries its base/quote asset, and
       // restricted to USD-stable quotes.
@@ -213,7 +246,9 @@ export async function getAtomizedMarketContext(db, options = {}) {
           ORDER BY t.quote_volume DESC NULLS LAST LIMIT $2`, [run.id,tickerLimit,RANKABLE_QUOTE_ASSETS]),
       db.query(`SELECT market,symbol,observed_at,window_start,window_end,data_status,failure_code,missing_inputs,candle_count,order_book_bid_levels,order_book_ask_levels,best_bid,best_ask,spread_bps,bid_quote_depth,ask_quote_depth,agg_trade_count,taker_buy_quote,taker_sell_quote FROM market_microstructure_measurements WHERE run_id=$1 ORDER BY market,symbol LIMIT $2`, [run.id,microLimit]),
     ]);
-    const ageMs = Date.now() - new Date(run.observed_at).getTime(); const freshness = !Number.isFinite(ageMs) ? 'MISSING' : ageMs <= 6 * 60 * 1000 ? 'FRESH' : 'STALE';
+    // Same clock as the expiry gate above, so the LABEL and the GATE can never
+    // disagree about how old this run is.
+    const ageMs = now - new Date(run.observed_at).getTime(); const freshness = !Number.isFinite(ageMs) ? 'MISSING' : ageMs <= 6 * 60 * 1000 ? 'FRESH' : 'STALE';
     const radar = await readCanonicalRadar(db, { limit: tickerLimit });
     return { ok: true, contextVersion: null, run: { id: run.id, key: run.run_key, observedAt: run.observed_at, completedAt: run.completed_at }, market: { observedAt: run.observed_at, freshness, tickers: tickers.rows, microstructure: micro.rows, dataQuality: sanitizeDiagnostics(run.diagnostics || {}) }, radar };
   } catch (error) { dbError('atomic_context_read_failed', error); return { ok: false, reason: 'DB_UNAVAILABLE' }; }
